@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-frontend
+  labels:
+    {{- include "practice-app.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+data:
+  default.conf: |
+    server {
+      listen 80;
+      root /usr/share/nginx/html;
+      index index.html;
+
+      # The frontend proxies /api to the backend service, so the browser only
+      # ever talks to one origin (works over port-forward, NLB, and ALB alike).
+      location /api/ {
+        proxy_pass http://{{ .Release.Name }}-backend:{{ .Values.backend.service.port }}/;
+        proxy_set_header Host $host;
+      }
+    }
+  index.html: |
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>EKS Practice Guestbook</title>
+      <style>
+        :root { color-scheme: dark; }
+        body { font-family: system-ui, sans-serif; background: #10141a; color: #e6e6e6;
+               max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.4rem; } h1 span { color: #7aa2f7; }
+        form { display: flex; gap: .5rem; margin: 1rem 0; }
+        input { flex: 1; padding: .55rem .75rem; border-radius: 8px; border: 1px solid #2a3140;
+                background: #171c26; color: inherit; }
+        button { padding: .55rem 1rem; border-radius: 8px; border: 0; background: #7aa2f7;
+                 color: #10141a; font-weight: 600; cursor: pointer; }
+        li { background: #171c26; border: 1px solid #2a3140; border-radius: 8px;
+             padding: .5rem .75rem; margin: .4rem 0; list-style: none; }
+        ul { padding: 0; }
+        #status { font-size: .85rem; color: #9aa5b1; }
+        code { color: #9ece6a; }
+      </style>
+    </head>
+    <body>
+      <h1><span>guestbook</span> - EKS practice app</h1>
+      <p id="status">checking backend...</p>
+      <form id="f"><input id="msg" placeholder="leave a note" maxlength="200" required>
+        <button>Sign</button></form>
+      <ul id="list"></ul>
+      <p id="pod"></p>
+      <script>
+        const list = document.getElementById('list'), status = document.getElementById('status');
+        async function load() {
+          try {
+            const r = await fetch('/api/guestbook?order=id.desc&limit=20');
+            if (!r.ok) throw new Error(r.status);
+            const rows = await r.json();
+            status.textContent = 'backend ok - ' + rows.length + ' recent entries (db-backed)';
+            list.innerHTML = rows.map(e => `<li>${e.message.replace(/</g,'&lt;')}</li>`).join('');
+          } catch (e) { status.textContent = 'backend unreachable: ' + e; }
+        }
+        document.getElementById('f').addEventListener('submit', async ev => {
+          ev.preventDefault();
+          const msg = document.getElementById('msg').value;
+          await fetch('/api/guestbook', { method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ message: msg }) });
+          document.getElementById('msg').value = '';
+          load();
+        });
+        load();
+      </script>
+    </body>
+    </html>

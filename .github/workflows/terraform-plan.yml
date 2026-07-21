@@ -1,0 +1,99 @@
+name: terraform-plan
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - "helm/**"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # assume the AWS role via OIDC
+  contents: read
+  pull-requests: write # post the plan as a comment
+
+concurrency:
+  group: tf-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.6
+
+      # --- No-AWS feedback first: fmt + validate + chart lint need no credentials ---
+      - name: fmt check
+        run: terraform -chdir=terraform fmt -recursive -check
+
+      - name: validate (no backend)
+        run: |
+          for d in envs/dev bootstrap-oidc; do
+            terraform -chdir=terraform/$d init -backend=false -input=false
+            terraform -chdir=terraform/$d validate
+          done
+
+      - name: helm lint + template
+        uses: azure/setup-helm@v4
+      - run: |
+          helm lint helm/practice-app
+          helm template practice-app helm/practice-app >/dev/null
+
+      # --- Real plan needs your config + OIDC role. Both come from repo settings:
+      #     secret CONFIG_TOML  = contents of your scripts/config.toml
+      #     variable AWS_ROLE_ARN = role from terraform/bootstrap-oidc
+      - name: materialize config.toml
+        if: ${{ env.HAVE_CONFIG == 'true' }}
+        env:
+          HAVE_CONFIG: ${{ secrets.CONFIG_TOML != '' }}
+          CONFIG_TOML: ${{ secrets.CONFIG_TOML }}
+        run: printf '%s' "$CONFIG_TOML" > scripts/config.toml
+
+      - name: read region from config
+        id: cfg
+        if: ${{ vars.AWS_ROLE_ARN != '' }}
+        run: echo "region=$(python3 scripts/bootstrap.py dev --print aws_region)" >> "$GITHUB_OUTPUT"
+
+      - name: AWS credentials (OIDC)
+        if: ${{ vars.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ steps.cfg.outputs.region }}
+
+      - name: init + plan
+        id: plan
+        if: ${{ vars.AWS_ROLE_ARN != '' }}
+        run: |
+          set +e
+          python3 scripts/bootstrap.py dev init -input=false
+          python3 scripts/bootstrap.py dev plan -no-color -input=false | tee plan-dev.txt
+          echo "exit=${PIPESTATUS[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: comment plan
+        if: ${{ vars.AWS_ROLE_ARN != '' && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '';
+            try { body = fs.readFileSync('plan-dev.txt', 'utf8'); } catch (e) { body = '(no plan output)'; }
+            const clipped = body.length > 60000 ? body.slice(-60000) : body;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `### terraform plan \`dev\`\n<details><summary>output</summary>\n\n\`\`\`\n${clipped}\n\`\`\`\n</details>`
+            });
+
+      - name: fail on plan error
+        if: ${{ vars.AWS_ROLE_ARN != '' && steps.plan.outputs.exit != '0' }}
+        run: exit 1

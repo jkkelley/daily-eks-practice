@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Daily EKS Practice - Sealed Answer Key</title>
+    <style>
+      :root[data-theme="dark"] {
+        --bg: #10141a;
+        --panel: #171c26;
+        --border: #2a3140;
+        --fg: #e6e6e6;
+        --dim: #9aa5b1;
+        --accent: #7aa2f7;
+        --good: #9ece6a;
+        --warn: #e0af68;
+        --code-bg: #0d1117;
+      }
+      :root[data-theme="light"] {
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --border: #d8dee6;
+        --fg: #1a2330;
+        --dim: #5b6673;
+        --accent: #2f5fd0;
+        --good: #3d7a1f;
+        --warn: #a06400;
+        --code-bg: #eef1f5;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 2rem 1.25rem 6rem;
+        line-height: 1.55;
+      }
+      h1 {
+        font-size: 1.6rem;
+      }
+      h1 span {
+        color: var(--accent);
+      }
+      h2 {
+        font-size: 1.15rem;
+        margin: 0;
+      }
+      h3 {
+        font-size: 0.95rem;
+        color: var(--accent);
+        margin: 1.1rem 0 0.3rem;
+      }
+      p,
+      li {
+        font-size: 0.92rem;
+      }
+      .dim {
+        color: var(--dim);
+      }
+      .warn {
+        color: var(--warn);
+        font-weight: 600;
+      }
+      pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.7rem 0.9rem;
+        overflow-x: auto;
+        font-size: 0.8rem;
+        line-height: 1.45;
+      }
+      code {
+        font-family: ui-monospace, monospace;
+        color: var(--good);
+      }
+      p code,
+      li code {
+        background: var(--code-bg);
+        padding: 0.08rem 0.3rem;
+        border-radius: 4px;
+      }
+      details {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        margin: 0.8rem 0;
+        padding: 0.9rem 1.1rem;
+      }
+      summary {
+        cursor: pointer;
+      }
+      summary::marker {
+        color: var(--accent);
+      }
+      #toggle {
+        position: fixed;
+        top: 1rem;
+        right: 1rem;
+        padding: 0.4rem 0.8rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--panel);
+        color: var(--fg);
+        cursor: pointer;
+      }
+      .seal {
+        border: 1px dashed var(--warn);
+        border-radius: 10px;
+        padding: 0.8rem 1.1rem;
+        margin: 1.2rem 0;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="toggle">light</button>
+    <h1><span>daily-eks-practice</span> - sealed answer key</h1>
+    <div class="seal">
+      <p class="warn">Don't read this until you've tried the drill.</p>
+      <p class="dim">
+        Every scenario below has the commands and the "why". The learning is in
+        fumbling first - this file is for grading yourself afterwards, or for
+        getting unstuck after a real attempt. Serve it with
+        <code>make serve-answers</code>.
+      </p>
+    </div>
+
+    <details>
+      <summary><h2 style="display: inline">01 - Lay of the land</h2></summary>
+      <h3>Nodes</h3>
+      <pre>
+kubectl get nodes -o wide
+kubectl describe node &lt;name&gt; | grep -E 'instance-type|capacityType|zone|pods'
+kubectl get node &lt;name&gt; -o jsonpath='{.status.allocatable.pods}'</pre>
+      <p>
+        Capacity type is the label
+        <code>eks.amazonaws.com/capacityType</code> (SPOT here). Max pods on a
+        t3.medium is 17 - it is an ENI/IP limit, not CPU/memory. That is why
+        t3.small (11) is too tight for this stack.
+      </p>
+      <h3>Namespaces you should see</h3>
+      <p>
+        <code>kube-system</code> (cluster machinery + ALB controller),
+        <code>practice-app</code> (the app + DB secret), <code>argocd</code>,
+        <code>monitoring</code>, plus the default four.
+      </p>
+      <h3>App without any LB</h3>
+      <pre>
+kubectl -n practice-app port-forward svc/practice-app-frontend 8081:80
+# browse http://localhost:8081</pre>
+      <h3>Reach RDS without a client</h3>
+      <pre>
+kubectl run tcpcheck --rm -it --restart=Never --image=busybox:1.36 -- \
+  nc -zv -w 3 &lt;rds-address&gt; 5432</pre>
+      <p>
+        <code>nc</code> proves L4 reachability; no psql needed. The RDS address
+        comes from <code>make output</code>.
+      </p>
+    </details>
+
+    <details>
+      <summary><h2 style="display: inline">02 - Scale the app</h2></summary>
+      <pre>
+kubectl -n practice-app scale deploy practice-app-frontend --replicas=4
+kubectl -n practice-app get pods -l app.kubernetes.io/component=frontend -o wide -w</pre>
+      <p>
+        If Argo CD manages the app, it now shows <b>OutOfSync</b> - git still
+        says 2. That is the whole GitOps lesson: imperative changes are drift.
+        The "right way" is editing <code>frontend.replicas</code> in values.yaml
+        and letting the sync roll it.
+      </p>
+      <h3>Metrics + HPA</h3>
+      <pre>
+kubectl top pods -n practice-app
+# values.yaml: hpa.enabled: true  ->  sync/deploy
+kubectl -n practice-app get hpa -w</pre>
+      <h3>Load generation</h3>
+      <pre>
+kubectl run load --rm -it --restart=Never --image=busybox:1.36 -- \
+  /bin/sh -c 'while true; do wget -q -O- http://practice-app-frontend.practice-app/ &gt;/dev/null; done'</pre>
+      <p>
+        <b>Who wins, replicas vs HPA?</b> The HPA does - it owns
+        <code>scale</code> and will fight any manual/values replica count
+        between min and max. Best practice: remove <code>replicas</code> from
+        the manifest once an HPA owns the workload (in helm, that means guarding
+        it with <code>if not .Values.hpa.enabled</code>).
+      </p>
+    </details>
+
+    <details>
+      <summary>
+        <h2 style="display: inline">03 - Rolling update + rollback</h2>
+      </summary>
+      <pre>
+kubectl -n practice-app rollout history deploy/practice-app-frontend
+# bump values.yaml frontend.image.tag -> deploy, then:
+kubectl -n practice-app rollout status deploy/practice-app-frontend
+while true; do curl -so /dev/null -w '%{http_code}\n' localhost:8081; sleep .3; done</pre>
+      <p>
+        Default Deployment strategy: RollingUpdate with 25% maxSurge / 25%
+        maxUnavailable. With readiness probes set, requests should not fail
+        during the roll.
+      </p>
+      <h3>Rollback, both ways</h3>
+      <pre>
+kubectl -n practice-app rollout undo deploy/practice-app-frontend   # fast, imperative
+git revert &lt;commit&gt; && git push                                     # the GitOps way</pre>
+      <p>
+        <code>rollout undo</code> in a GitOps shop is a trap: Argo CD will see
+        drift and put the bad version back (especially with self-heal on). Git
+        must be reverted for the rollback to stick.
+      </p>
+      <h3>Stuck rollout</h3>
+      <p>
+        With a bad tag you get <code>ImagePullBackOff</code>; the rollout waits
+        forever on unready new pods while old pods keep serving (that is
+        maxUnavailable protecting you). <code>kubectl rollout undo</code> or fix
+        the tag.
+      </p>
+    </details>
+
+    <details>
+      <summary><h2 style="display: inline">04 - Load balancing</h2></summary>
+      <p>
+        The controller runs in kube-system with an IRSA service account -
+        <code
+          >kubectl -n kube-system get sa aws-load-balancer-controller -o
+          yaml</code
+        >
+        shows the <code>eks.amazonaws.com/role-arn</code> annotation. No node
+        keys involved.
+      </p>
+      <h3>NLB (Service)</h3>
+      <pre>
+# values.yaml: frontend.service.type: LoadBalancer  -> deploy
+kubectl -n practice-app get svc practice-app-frontend -w   # EXTERNAL-IP appears</pre>
+      <p>
+        The chart's annotations request <code>external</code> +
+        <code>ip</code> targets: the NLB sends traffic straight to pod IPs (VPC
+        CNI pods are first-class VPC citizens). <code>instance</code> mode would
+        bounce through NodePorts instead.
+      </p>
+      <h3>ALB (Ingress)</h3>
+      <pre>
+# values.yaml: ingress.enabled: true -> deploy
+kubectl -n practice-app get ingress -w                     # ADDRESS = ALB DNS name</pre>
+      <p>
+        Target group health checks hit each pod IP on the traffic port; scale to
+        0 and targets drain to zero - the ALB returns 503s.
+      </p>
+      <p class="warn">
+        Cleanup order matters: delete the Ingress/Service (controller deletes
+        the AWS LB) BEFORE make down. Destroy the cluster first and the LB + its
+        SGs orphan and keep billing, then block VPC deletion.
+      </p>
+    </details>
+
+    <details>
+      <summary><h2 style="display: inline">05 - DNS</h2></summary>
+      <pre>
+kubectl run dnstest --rm -it --restart=Never --image=busybox:1.36 -- sh
+/ # nslookup practice-app-backend.practice-app.svc.cluster.local
+/ # cat /etc/resolv.conf</pre>
+      <p>
+        Short names work because resolv.conf carries
+        <code
+          >search practice-app.svc.cluster.local svc.cluster.local
+          cluster.local</code
+        >
+        plus <code>ndots:5</code>. The nameserver IP (.10 of the service CIDR)
+        belongs to the <code>kube-dns</code> Service in kube-system, which
+        fronts the CoreDNS pods.
+      </p>
+      <p>
+        Corefile plugins: <code>kubernetes</code> answers cluster.local from the
+        API, <code>forward . /etc/resolv.conf</code> sends everything else
+        upstream (the VPC resolver, .2 of the VPC CIDR),
+        <code>cache</code> keeps CoreDNS from melting.
+      </p>
+      <pre>
+kubectl -n kube-system get configmap coredns -o yaml
+kubectl -n kube-system scale deploy coredns --replicas=0   # break
+kubectl -n kube-system scale deploy coredns --replicas=2   # fix</pre>
+      <h3>external-dns</h3>
+      <p>
+        Set the Ingress <code>host</code> under your zone; external-dns watches
+        Ingresses and writes A/TXT records (the TXT is its ownership marker,
+        tied to <code>txtOwnerId</code>). Policy <code>sync</code> deletes
+        records when the Ingress goes; <code>upsert-only</code> would leave
+        them.
+      </p>
+    </details>
+
+    <details>
+      <summary><h2 style="display: inline">06 - Storage</h2></summary>
+      <h3>EBS</h3>
+      <pre>
+kubectl get storageclass                       # gp2 (in-tree default) - make a gp3 one
+kubectl apply -f - &lt;&lt;'EOF'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: { name: gp3 }
+provisioner: ebs.csi.aws.com
+parameters: { type: gp3 }
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+EOF</pre>
+      <p>
+        <code>WaitForFirstConsumer</code> delays provisioning until a pod
+        schedules, so the volume lands in the pod's AZ (EBS is AZ-locked).
+        <code>allowVolumeExpansion</code> is what makes the live resize
+        possible; edit <code>spec.resources.requests.storage</code> on the PVC
+        and the CSI driver grows volume + filesystem.
+      </p>
+      <p>
+        The volume in the console carries
+        <code>kubernetes.io/created-for/pvc/name</code> tags plus this repo's
+        Project/Environment tags. Reclaim policy Delete removes it with the PVC.
+      </p>
+      <h3>S3 via IRSA</h3>
+      <pre>
+kubectl -n practice-app run s3test --rm -it --restart=Never \
+  --overrides='{"spec":{"serviceAccountName":"s3-explorer"}}' \
+  --image=amazon/aws-cli -- s3 ls s3://$(make output 2>/dev/null | grep -o 'daily-eks-practice[^"]*practice[^"]*' | head -1)</pre>
+      <p>
+        Credential chain: the SA's role-arn annotation makes EKS inject a
+        projected OIDC token file + env vars; the SDK calls
+        <code>AssumeRoleWithWebIdentity</code>; STS trusts the token because the
+        cluster's OIDC provider is registered in IAM, scoped to exactly
+        <code>system:serviceaccount:practice-app:s3-explorer</code>. Without the
+        SA there are no credentials at all - the CLI errors immediately.
+      </p>
+    </details>
+
+    <details>
+      <summary>
+        <h2 style="display: inline">07 - Prometheus + Grafana</h2>
+      </summary>
+      <pre>
+make grafana-ui                                # admin / (make output -> grafana_admin_password)
+kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090</pre>
+      <p>
+        The <code>kube_*</code> metrics come from
+        <b>kube-state-metrics</b> (object states from the API), while
+        <code>container_*</code> comes from cAdvisor in each kubelet, and
+        <code>node_*</code> from node-exporter. Three different exporters, one
+        scrape config.
+      </p>
+      <pre>
+# the three from the card:
+rate(container_cpu_usage_seconds_total{namespace="practice-app"}[5m])
+kube_pod_container_status_restarts_total{namespace="practice-app"}
+kube_deployment_status_replicas_available{deployment=~".*frontend"}</pre>
+      <p>
+        Alert idea:
+        <code
+          >kube_deployment_status_replicas_available{deployment=~".*frontend"}
+          &lt; 2</code
+        >
+        for 2m. Trip it by scaling to 1.
+      </p>
+    </details>
+
+    <details>
+      <summary><h2 style="display: inline">08 - CloudWatch</h2></summary>
+      <pre>
+# config.toml: enabled_cluster_log_types = ["api", "audit"]  -> make apply
+aws logs describe-log-groups --log-group-name-prefix /aws/eks/
+aws logs put-retention-policy --log-group-name /aws/eks/&lt;cluster&gt;/cluster --retention-in-days 1</pre>
+      <p>
+        Logs Insights, audit stream: filter
+        <code
+          >{ $.user.username = "kubernetes-admin" &amp;&amp; $.verb = "create"
+          }</code
+        >
+        (or your role name). Every kubectl you run is in there.
+      </p>
+      <p>
+        Container Insights: add <code>amazon-cloudwatch-observability</code> to
+        <code>managed_addons</code>. The agent pods will crash on permissions
+        until the node role has <code>CloudWatchAgentServerPolicy</code> - the
+        pod logs say exactly that. (Attach it via terraform on the node role;
+        that is the exercise.)
+      </p>
+      <p>
+        When to pay for it: when your org's alerting/on-call tooling lives in
+        CloudWatch, when you need logs+metrics correlated per pod without
+        running your own stack, or for control-plane visibility Prometheus
+        cannot see. Otherwise scenario 07's stack is free-er.
+      </p>
+      <p class="warn">
+        Turn it all back off the same day - audit ingestion is the classic
+        surprise line item.
+      </p>
+    </details>
+
+    <details>
+      <summary>
+        <h2 style="display: inline">09 - GitOps with Argo CD</h2>
+      </summary>
+      <pre>
+make argo-ui        # admin + printed password
+# creds live here after repo registration:
+kubectl -n argocd get secret -l argocd.argoproj.io/secret-type=repository</pre>
+      <p>
+        Register the private repo (fine-grained PAT, contents read-only): UI →
+        Settings → Repositories → HTTPS, or
+        <code
+          >argocd repo add https://github.com/&lt;you&gt;/daily-eks-practice.git
+          --username git --password &lt;PAT&gt;</code
+        >. The PAT ends up in that namespaced Secret - in your cluster, never in
+        git.
+      </p>
+      <pre>
+make app-deploy
+kubectl -n argocd get application practice-app -w</pre>
+      <p>
+        Drift drill: after the manual scale, the app shows OutOfSync with a
+        live/target diff on <code>spec.replicas</code>. Auto-sync + self-heal
+        (Application spec):
+      </p>
+      <pre>
+spec:
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }</pre>
+      <p>
+        With self-heal on, Argo reverts manual kubectl changes within seconds -
+        which is also why <code>rollout undo</code> stopped working for you in
+        scenario 03.
+      </p>
+    </details>
+
+    <details>
+      <summary>
+        <h2 style="display: inline">10 - Break/fix signatures</h2>
+      </summary>
+      <ul>
+        <li>
+          <b>CrashLoopBackOff</b>: container starts then dies;
+          <code>kubectl logs --previous</code> has the real error (PostgREST:
+          connection refused/auth failed).
+        </li>
+        <li>
+          <b>Bad readiness probe</b>: rollout stuck at "1 old / 1 new"; new pod
+          Running but 0/1 Ready; events show probe 404s. Old pods keep serving -
+          that's maxUnavailable doing its job.
+        </li>
+        <li>
+          <b>ImagePullBackOff</b>: kubelet on the node reports it;
+          <code>describe pod</code> events show the registry 404/manifest
+          unknown.
+        </li>
+        <li>
+          <b>OOMKilled</b>: <code>describe pod</code> →
+          lastState.terminated.reason: OOMKilled, exit code 137. Restarts climb.
+        </li>
+        <li>
+          <b>Pending</b>: scheduler event says it verbatim: "0/2 nodes are
+          available: 2 Insufficient cpu."
+        </li>
+        <li>
+          <b>cordon vs drain</b>: cordon only marks unschedulable (running pods
+          stay); drain evicts respecting PDBs. Deleted pods reschedule to other
+          nodes because the ReplicaSet, not the node, owns them.
+        </li>
+        <li>
+          <b>Selector typo</b>: pods Ready, service up, app dead.
+          <code>kubectl get endpoints</code> shows an empty endpoints list - the
+          smoking gun for selector/label mismatch.
+        </li>
+      </ul>
+    </details>
+
+    <details>
+      <summary><h2 style="display: inline">11 - RDS day-2</h2></summary>
+      <p>
+        Laptop connect fails because (1)
+        <code>publicly_accessible = false</code> - no public IP/DNS resolution
+        outside the VPC, and (2) the DB security group only allows 5432 from the
+        EKS cluster security group (a SG reference, not a CIDR - that's the
+        answer to task 3).
+      </p>
+      <pre>
+kubectl -n practice-app run psql --rm -it --restart=Never --image=postgres:16-alpine \
+  --env="PGPASSWORD=$(kubectl -n practice-app get secret practice-db -o jsonpath='{.data.password}' | base64 -d)" -- \
+  psql -h &lt;address&gt; -U practice_admin -d practice</pre>
+      <h3>Rotation order</h3>
+      <ol>
+        <li>
+          Change the master password in RDS (finishes in seconds, old
+          connections survive).
+        </li>
+        <li>
+          Update the k8s secret (<code
+            >kubectl -n practice-app edit secret practice-db</code
+          >
+          - remember db-uri holds it too).
+        </li>
+        <li>
+          <code
+            >kubectl -n practice-app rollout restart deploy
+            practice-app-backend</code
+          >.
+        </li>
+      </ol>
+      <p>
+        Backwards = the backend restarts with the old password and crashloops on
+        auth until RDS catches up. Terraform drift: <code>make plan</code> wants
+        to set the password back to the one in state (random_password). Here
+        that is harmless-ish; in prod it is exactly why passwords managed
+        outside terraform should use <code>manage_master_user_password</code> /
+        Secrets Manager instead.
+      </p>
+      <p>
+        Cost trades vs prod: single-AZ (no failover),
+        <code>backup_retention_period = 0</code> (no PITR!), tiny instance, no
+        deletion protection, no performance insights. Every one of those flips
+        for a real database.
+      </p>
+    </details>
+
+    <details>
+      <summary><h2 style="display: inline">12 - CI via OIDC</h2></summary>
+      <pre>
+AWS_PROFILE=&lt;admin&gt; python3 scripts/bootstrap.py bootstrap-oidc init -input=false
+AWS_PROFILE=&lt;admin&gt; python3 scripts/bootstrap.py bootstrap-oidc apply
+gh variable set AWS_ROLE_ARN --body "$(python3 scripts/bootstrap.py bootstrap-oidc output -raw role_arn)"
+gh secret set CONFIG_TOML < scripts/config.toml</pre>
+      <p>
+        The handshake in three sentences: GitHub mints a short-lived OIDC token
+        for the workflow run, signed by
+        <code>token.actions.githubusercontent.com</code> and carrying a
+        <code>sub</code> claim like
+        <code>repo:you/daily-eks-practice:ref:refs/heads/main</code>. The
+        workflow calls STS <code>AssumeRoleWithWebIdentity</code> with that
+        token. STS checks the role's trust policy - which trusts that issuer and
+        that exact repo pattern - and returns temporary credentials; no stored
+        keys anywhere.
+      </p>
+      <p>
+        Tightening for a real org: set <code>subject_claims</code> to specific
+        branches/environments (e.g. <code>repo:org/repo:environment:dev</code>)
+        and swap AdministratorAccess for a scoped policy. The gated apply comes
+        from the <code>environment: dev</code> line in the workflow + required
+        reviewers on that environment.
+      </p>
+    </details>
+
+    <script>
+      const btn = document.getElementById("toggle");
+      const root = document.documentElement;
+      btn.addEventListener("click", () => {
+        const next = root.dataset.theme === "dark" ? "light" : "dark";
+        root.dataset.theme = next;
+        btn.textContent = next === "dark" ? "light" : "dark";
+      });
+    </script>
+  </body>
+</html>

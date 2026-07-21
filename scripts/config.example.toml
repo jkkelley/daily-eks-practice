@@ -1,0 +1,121 @@
+# =============================================================================
+# CONFIG TEMPLATE - the single source of truth for every Terraform variable.
+#
+# HOW TO USE (hand-off friendly):
+#   1. cp scripts/config.example.toml scripts/config.toml
+#   2. edit scripts/config.toml for your account/needs
+#   3. make up                 (bootstrap.py reads it and generates the tfvars)
+#
+# If you skip step 1, bootstrap.py falls back to THIS example, so a fresh clone
+# still runs out of the box. There are NO defaults in any variables.tf - values
+# live here only. There is a single practice env: [dev].
+#
+# Each line notes a GENERIC default so you know what a sane value looks like.
+# NOTHING personal (account ids, profiles, zones) is committed - only this
+# documented template. Your real scripts/config.toml is git-ignored.
+# =============================================================================
+
+# Terraform S3 state backend - injected at init time (backend blocks can't take variables).
+[backend]
+bucket = "<your-tf-state-bucket>"   # globally-unique S3 bucket YOU created for state
+region = "us-east-2"                # region the state bucket lives in
+
+[common]
+# ---- identity / region ----
+aws_region  = "us-east-2"          # region for everything;            generic default: "us-east-1"
+aws_profile = "default"            # your AWS CLI profile (kubeconfig hint; auth = AWS_PROFILE env); generic default: "default"
+project     = "daily-eks-practice" # name prefix for ALL resources;    generic default: "my-eks"
+
+# ---- kubernetes version ----
+cluster_version = "1.34"           # EKS/k8s minor; keep on standard support ($0.10/hr, not $0.60/hr)
+
+# ---- networking (small on purpose - you pay for what you provision) ----
+vpc_cidr             = "10.0.0.0/16"                    # VPC CIDR;                generic default: "10.0.0.0/16"
+az_count             = 2                                # AZs to spread across;    generic default: 3
+public_subnet_cidrs  = ["10.0.0.0/24", "10.0.1.0/24"]   # one per AZ;              generic default: three /20s
+private_subnet_cidrs = ["10.0.16.0/24", "10.0.17.0/24"] # small on purpose here;   generic default: three /20s
+node_subnet_tier     = "private"                        # "private" (needs NAT) | "public"; generic default: "private"
+enable_nat_gateway   = true                             # egress for private nodes; generic default: true
+single_nat_gateway   = true                             # one shared NAT (cheaper); generic default: false (one per AZ)
+enable_vpc_endpoints = false                            # ECR/S3/STS/EC2 endpoints; generic default: false
+
+# ---- control plane ----
+endpoint_public_access                      = true                 # public API endpoint;      generic default: true
+endpoint_private_access                     = true                 # private API endpoint;     generic default: true
+public_access_cidrs                         = ["0.0.0.0/0"]        # who can reach the API;    generic default: ["<your-office-cidr>"]
+enabled_cluster_log_types                   = []                   # [] off (cheap); the CloudWatch scenario turns some on
+authentication_mode                         = "API_AND_CONFIG_MAP" # CONFIG_MAP|API|API_AND_CONFIG_MAP; generic default: "API"
+bootstrap_cluster_creator_admin_permissions = true                 # give the applier admin;   generic default: true
+access_entries                              = {}                   # extra IAM principals;     generic default: {} (add as needed)
+
+# ---- node group (small + SPOT = cheap; resize is itself a scenario) ----
+node_instance_types  = ["t3.medium"]              # instance types;   t3.small fits ~11 pods - too tight for this stack
+capacity_type        = "SPOT"                     # SPOT | ON_DEMAND; generic default: "ON_DEMAND"
+ami_type             = "AL2023_x86_64_STANDARD"   # node AMI family;  generic default: "AL2023_x86_64_STANDARD"
+node_version         = ""                         # "" = at cluster version; set to roll nodes
+node_desired_size    = 2                          # desired nodes;    generic default: 2
+node_min_size        = 1                          # min nodes;        generic default: 1
+node_max_size        = 3                          # max nodes;        generic default: 4
+node_max_unavailable = 1                          # rolling surge;    generic default: 1
+node_disk_size       = 20                         # root EBS GB;      generic default: 20
+
+# ---- managed add-ons ----
+managed_addons                   = ["vpc-cni", "coredns", "kube-proxy", "aws-ebs-csi-driver", "eks-pod-identity-agent"] # generic default: same core five
+addon_versions                   = {}          # {} = EKS default;        generic default: {}
+addon_resolve_conflicts          = "OVERWRITE" # OVERWRITE|NONE|PRESERVE; generic default: "OVERWRITE"
+enable_metrics_server            = true        # install metrics-server (HPA scenario needs it); generic default: true
+metrics_server_chart_version     = ""          # "" = latest chart;       generic default: "" (or pin)
+enable_cluster_autoscaler        = false       # off by default (cheaper, quieter); enabling it is a scenario
+cluster_autoscaler_chart_version = ""          # "" = latest chart;       generic default: "" (or pin)
+cluster_autoscaler_image_tag     = "v1.34.0"   # MUST track the cluster minor; generic default: "v<cluster_version>.0"
+enable_cert_manager              = false       # install cert-manager;    generic default: false
+cert_manager_chart_version       = ""          # "" = latest chart;       generic default: "" (or pin)
+
+# ---- practice database (RDS Postgres, tiny on purpose) ----
+enable_rds            = true         # the fe/be app needs it; false = skip DB (and its ~$0.016/hr)
+rds_engine_version    = "16"         # Postgres major;   generic default: latest major
+rds_instance_class    = "db.t4g.micro"  # smallest current-gen; generic default: "db.t4g.micro"
+rds_allocated_storage = 20           # GB gp3 (20 is the floor); you pay for what you provision
+rds_db_name           = "practice"   # initial database; generic default: "app"
+rds_username          = "practice_admin" # master user (password generated + pushed to a k8s Secret)
+
+# ---- practice S3 bucket (IRSA exercise) ----
+enable_practice_bucket = true        # tiny cost (storage only); the S3/IRSA scenario uses it
+
+# ---- platform toggles ----
+enable_alb_controller        = true  # AWS Load Balancer Controller (Ingress/NLB scenarios)
+alb_controller_chart_version = ""    # "" = latest chart; generic default: "" (or pin)
+enable_external_dns          = false # needs a Route53 zone YOU own; set dns_zone_name too
+external_dns_chart_version   = ""    # "" = latest chart
+dns_zone_name                = ""    # e.g. "practice.example.com" (only used when external-dns is on)
+enable_argocd                = true  # Argo CD in-cluster, its own namespace (GitOps scenarios)
+argocd_chart_version         = ""    # "" = latest chart; generic default: "" (or pin)
+enable_monitoring            = true  # kube-prometheus-stack (Prometheus + Grafana)
+kube_prometheus_stack_chart_version = "" # "" = latest chart; generic default: "" (or pin)
+
+# ---- practice app plumbing ----
+app_namespace      = "practice-app" # namespace terraform pre-creates (DB secret lands here)
+s3_service_account = "s3-explorer"  # IRSA-annotated service account for the S3 scenario
+
+# ---- tags merged onto every resource (base tags are always applied) ----
+extra_tags = {}   # e.g. { owner = "you", cost-center = "123" }; generic default: {}
+
+# =============================================================================
+# Per-environment overrides (ONLY what differs from [common]). One env here.
+# =============================================================================
+
+[dev]
+environment = "dev"                # generic default: "dev"
+
+# =============================================================================
+# One-time GitHub Actions OIDC bootstrap (terraform/bootstrap-oidc).
+# Standalone: uses ONLY this table, not the cluster [common] block.
+# =============================================================================
+
+[bootstrap_oidc]
+aws_region          = "us-east-2"                                       # generic default: "us-east-1"
+github_owner        = "<your-gh-user-or-org>"                           # your GitHub user or org
+github_repo         = "daily-eks-practice"                              # the repo name
+role_name           = "gha-daily-eks-practice"                          # generic default: "gha-<repo>"
+subject_claims      = []                                                # [] = repo:<owner>/<repo>:*; generic default: tighten to a branch/env
+managed_policy_arns = ["arn:aws:iam::aws:policy/AdministratorAccess"]   # generic default: a least-privilege custom policy

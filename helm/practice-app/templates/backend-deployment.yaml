@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-backend
+  labels:
+    {{- include "practice-app.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "practice-app.backend.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "practice-app.backend.selector" . | nindent 8 }}
+    spec:
+      containers:
+        - name: postgrest
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          env:
+            - name: PGRST_DB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.existingSecret }}
+                  key: db-uri
+            - name: PGRST_DB_ANON_ROLE
+              value: {{ .Values.backend.dbAnonRole | quote }}
+            - name: PGRST_DB_SCHEMAS
+              value: {{ .Values.backend.dbSchemas | quote }}
+            - name: PGRST_SERVER_PORT
+              value: {{ .Values.backend.service.port | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.service.port }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}

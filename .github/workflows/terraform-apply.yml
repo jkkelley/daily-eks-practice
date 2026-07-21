@@ -1,0 +1,62 @@
+name: terraform-apply
+
+# Manual, gated apply/destroy. Tie the dev GitHub Environment to required
+# reviewers (Settings > Environments) to force an approval before anything runs.
+# Needs repo secret CONFIG_TOML (your scripts/config.toml) + variable AWS_ROLE_ARN.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: apply or destroy
+        type: choice
+        options: [apply, destroy]
+        default: apply
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: tf-apply-dev
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.6
+
+      - name: materialize config.toml
+        env:
+          CONFIG_TOML: ${{ secrets.CONFIG_TOML }}
+        run: |
+          if [ -z "$CONFIG_TOML" ]; then
+            echo "Repo secret CONFIG_TOML is not set - add your scripts/config.toml contents as that secret." >&2
+            exit 1
+          fi
+          printf '%s' "$CONFIG_TOML" > scripts/config.toml
+
+      - name: read region from config
+        id: cfg
+        run: echo "region=$(python3 scripts/bootstrap.py dev --print aws_region)" >> "$GITHUB_OUTPUT"
+
+      - name: AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ steps.cfg.outputs.region }}
+
+      - name: init
+        run: python3 scripts/bootstrap.py dev init -input=false
+
+      - name: ${{ inputs.action }}
+        run: python3 scripts/bootstrap.py dev ${{ inputs.action }} -auto-approve -input=false

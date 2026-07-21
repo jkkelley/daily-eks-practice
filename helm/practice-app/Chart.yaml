@@ -1,0 +1,10 @@
+apiVersion: v2
+name: practice-app
+description: >-
+  Tiny frontend/backend guestbook for daily EKS practice. Frontend is nginx
+  serving a static page and proxying /api to the backend; backend is PostgREST
+  exposing the RDS practice database as a REST API. All public images - nothing
+  to build or push.
+type: application
+version: 0.1.0
+appVersion: "1.0"

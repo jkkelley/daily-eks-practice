@@ -1,0 +1,56 @@
+{{- if .Values.seedJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-seed
+  labels:
+    {{- include "practice-app.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed
+  annotations:
+    # Re-run on every install/upgrade; idempotent SQL below makes that safe.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        {{- include "practice-app.labels" . | nindent 8 }}
+        app.kubernetes.io/component: seed
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          image: "{{ .Values.seedJob.image.repository }}:{{ .Values.seedJob.image.tag }}"
+          env:
+            - name: PGHOST
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.existingSecret }}, key: host } }
+            - name: PGPORT
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.existingSecret }}, key: port } }
+            - name: PGDATABASE
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.existingSecret }}, key: dbname } }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.existingSecret }}, key: username } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.existingSecret }}, key: password } }
+          command: ["psql", "-v", "ON_ERROR_STOP=1", "-c"]
+          args:
+            - |
+              CREATE TABLE IF NOT EXISTS guestbook (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                message TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+              );
+              DO $$ BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ .Values.backend.dbAnonRole }}') THEN
+                  CREATE ROLE {{ .Values.backend.dbAnonRole }} NOLOGIN;
+                END IF;
+              END $$;
+              GRANT {{ .Values.backend.dbAnonRole }} TO CURRENT_USER;
+              GRANT USAGE ON SCHEMA public TO {{ .Values.backend.dbAnonRole }};
+              GRANT SELECT, INSERT ON guestbook TO {{ .Values.backend.dbAnonRole }};
+              GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO {{ .Values.backend.dbAnonRole }};
+              INSERT INTO guestbook (message)
+                SELECT 'hello from the seed job - the cluster lives'
+                WHERE NOT EXISTS (SELECT 1 FROM guestbook);
+{{- end }}

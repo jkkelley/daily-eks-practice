@@ -1,0 +1,48 @@
+# ---- container-sandbox / ministack skill: mandated entries (never commit) ----
+test/
+**/.terraform/
+*.tfvars
+*.tfstate.backup
+**/.terraform.lock.hcl
+
+# ---- Terraform ----
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Bootstrap: generated tfvars + the real (local) config. The documented
+# scripts/config.example.toml stays committed as the hand-off template.
+**/config.auto.tfvars.json
+scripts/config.toml
+
+# ---- Lavish review artifacts (local only) ----
+.lavish/
+
+# ---- Claude local settings (keep skills/, drop local settings) ----
+.claude/settings.local.json
+
+# ---- OS / editor noise ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+.env
+
+# ---- Python ----
+__pycache__/
+*.pyc
+
+# Run thru notes
+notes/
+# ---- generated Argo CD manifests (repo URL is user-specific) ----
+argocd/generated/
