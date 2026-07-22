@@ -80,7 +80,8 @@ cp scripts/config.example.toml scripts/config.toml   # then edit for your accoun
 ```bash
 cp scripts/config.example.toml scripts/config.toml   # edit for your account
 make up            # ~15 min (control plane + nodes + rds + platform)
-make kubeconfig    # point kubectl at it
+make kubeconfig    # writes .kubeconfig-daily-eks-practice (repo-local; ~/.kube/config is never touched)
+eval "$(make kubeconfig-env)"   # point YOUR shell's kubectl at it (PowerShell: $env:KUBECONFIG = ...)
 make argo-repo     # let Argo CD read this private repo (token from your gh login)
 make app-deploy    # hand the app to Argo CD, then Sync it (UI or CLI)
 make scenario N=01 # print today's drill
@@ -90,6 +91,10 @@ make down          # WHEN DONE - stops the charges
 
 The app with no LB yet: `kubectl -n practice-app port-forward svc/practice-app-frontend 8081:80` → http://localhost:8081.
 UIs: `make argo-ui` (Argo CD), `make grafana-ui` (Grafana).
+
+**Kubeconfig isolation:** this playground writes only to `.kubeconfig-daily-eks-practice` at the repo root (git-ignored) and every make target uses it automatically.
+Your `~/.kube/config` and its contexts are never created, modified, or selected.
+For hands-on kubectl during drills, export it into your shell first: `eval "$(make kubeconfig-env)"` (Linux/WSL) or `$env:KUBECONFIG = "<repo>\.kubeconfig-daily-eks-practice"` (PowerShell).
 
 ---
 

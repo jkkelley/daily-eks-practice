@@ -33,6 +33,7 @@ Do not "pre-solve" scenarios in the committed defaults (e.g. don't enable the HP
 
 - Providers: AWS `>= 6.0, < 7.0`, helm `>= 2.12, < 3.0`, kubectl (gavinbunney), random. Values blocks via `yamlencode`.
 - Kube/AWS auth uses `aws eks get-token` via the `AWS_PROFILE` env var; same config works locally and in CI (OIDC). No profile in `backend.tf` or providers.
+- Kubeconfig is repo-local: `.kubeconfig-daily-eks-practice` (git-ignored), written by `make kubeconfig` and exported as `KUBECONFIG` by the Makefile for every target. Never read or write the user's `~/.kube/config`.
 - State: partial S3 backend; bucket/region from `[backend]`, key injected per env by `bootstrap.py`. `use_lockfile = true`, no DynamoDB.
 - Follow the global markdown rule: one full sentence per line in long Markdown.
 - Track problems in `ISSUES.md` (DATE/TIME | description table); park ideas in `BACKLOG.md`.

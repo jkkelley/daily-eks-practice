@@ -46,3 +46,6 @@ __pycache__/
 notes/
 # ---- generated Argo CD manifests (repo URL is user-specific) ----
 argocd/generated/
+
+# ---- repo-local kubeconfig (make kubeconfig) ----
+.kubeconfig-daily-eks-practice

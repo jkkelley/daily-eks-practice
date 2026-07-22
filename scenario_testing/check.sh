@@ -8,6 +8,11 @@ set -uo pipefail
 N="${1:-}"
 [ -n "$N" ] || { echo "usage: check.sh <scenario number, e.g. 03>"; exit 2; }
 
+# The playground uses a repo-local kubeconfig (make kubeconfig), never ~/.kube/config.
+# `make check` exports KUBECONFIG already; this covers running check.sh directly.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "$REPO_ROOT/.kubeconfig-daily-eks-practice" ] && export KUBECONFIG="$REPO_ROOT/.kubeconfig-daily-eks-practice"
+
 PASS=0; FAIL=0
 ok()   { echo "  PASS  $*"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }

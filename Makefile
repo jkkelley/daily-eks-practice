@@ -33,9 +33,16 @@ AWS_REGION  ?= $(shell $(BOOT) $(ENV) --print aws_region 2>/dev/null)
 export AWS_PROFILE
 export AWS_REGION
 
+# Repo-local kubeconfig (git-ignored): this playground NEVER touches ~/.kube/config.
+# Exported so every kubectl in every target below - and the scripts they call -
+# automatically uses it. For your own shell: eval "$(make kubeconfig-env)".
+KUBECONFIG_FILE := $(CURDIR)/.kubeconfig-daily-eks-practice
+export KUBECONFIG := $(KUBECONFIG_FILE)
+
 .DEFAULT_GOAL := help
-.PHONY: help config init plan apply up down output kubeconfig app-deploy app-status \
-        argo-ui argo-password grafana-ui scenario check serve-answers fmt clean guard-env
+.PHONY: help config init plan apply up down output kubeconfig kubeconfig-env app-deploy \
+        app-status argo-repo argo-ui argo-password grafana-ui scenario check serve-answers \
+        fmt clean guard-env
 
 help: ## Show this help
 	@echo "Daily EKS Practice ($(DETECTED_OS)) - ENV=$(ENV), profile=$(AWS_PROFILE), region=$(AWS_REGION)"
@@ -70,8 +77,17 @@ down: guard-env ## terraform destroy (RUN THIS WHEN DONE to stop charges)
 output: guard-env ## Show terraform outputs
 	$(BOOT) $(ENV) output
 
-kubeconfig: guard-env ## Point kubectl at the cluster
-	@aws eks update-kubeconfig --name $$($(BOOT) $(ENV) output -raw cluster_name) --region $(AWS_REGION) --profile $(AWS_PROFILE)
+kubeconfig: guard-env ## Write a REPO-LOCAL kubeconfig (.kubeconfig-daily-eks-practice) - never touches ~/.kube/config
+	@aws eks update-kubeconfig --name $$($(BOOT) $(ENV) output -raw cluster_name) \
+	  --region $(AWS_REGION) --profile $(AWS_PROFILE) --kubeconfig $(KUBECONFIG_FILE)
+	@echo ""
+	@echo "Wrote $(KUBECONFIG_FILE) (your ~/.kube/config is untouched)."
+	@echo "make targets use it automatically. For your own kubectl in this shell:"
+	@echo "  linux/wsl:   eval \"\$$(make kubeconfig-env)\""
+	@echo "  powershell:  \$$env:KUBECONFIG = \"$(KUBECONFIG_FILE)\""
+
+kubeconfig-env: ## Print the export line for your shell (eval "$$(make kubeconfig-env)")
+	@echo "export KUBECONFIG=$(KUBECONFIG_FILE)"
 
 argo-repo: ## Give Argo CD read access to this private repo (token from your gh CLI login)
 	$(PYTHON) scripts/argo-repo.py

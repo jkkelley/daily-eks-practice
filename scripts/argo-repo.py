@@ -11,12 +11,19 @@ Scenario 09 still teaches the manual PAT/UI registration - this is the daily
 shortcut once you understand what it does.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_argocd_app_url import repo_https_url  # shared with gen-argocd-app.py
+
+# Repo-local kubeconfig (make kubeconfig) - covers running this script directly;
+# `make argo-repo` exports KUBECONFIG already.
+_kubeconfig = Path(__file__).resolve().parent.parent / ".kubeconfig-daily-eks-practice"
+if _kubeconfig.exists():
+    os.environ["KUBECONFIG"] = str(_kubeconfig)
 
 
 def main() -> int:
