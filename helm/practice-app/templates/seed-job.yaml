@@ -7,8 +7,11 @@ metadata:
     {{- include "practice-app.labels" . | nindent 4 }}
     app.kubernetes.io/component: seed
   annotations:
+    # Seed before workloads become eligible for readiness checks.
+    # Argo CD maps Helm pre hooks to PreSync, avoiding a circular wait where
+    # PostgREST needs this schema but a post hook waits for PostgREST health.
     # Re-run on every install/upgrade; idempotent SQL below makes that safe.
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 4
@@ -41,11 +44,11 @@ spec:
                 message TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
               );
-              DO $$ BEGIN
+              DO $seed$ BEGIN
                 IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ .Values.backend.dbAnonRole }}') THEN
                   CREATE ROLE {{ .Values.backend.dbAnonRole }} NOLOGIN;
                 END IF;
-              END $$;
+              END $seed$;
               GRANT {{ .Values.backend.dbAnonRole }} TO CURRENT_USER;
               GRANT USAGE ON SCHEMA public TO {{ .Values.backend.dbAnonRole }};
               GRANT SELECT, INSERT ON guestbook TO {{ .Values.backend.dbAnonRole }};
