@@ -17,8 +17,9 @@
 
 # Terraform S3 state backend - injected at init time (backend blocks can't take variables).
 [backend]
-bucket = "<your-tf-state-bucket>"   # globally-unique S3 bucket YOU created for state
-region = "us-east-2"                # region the state bucket lives in
+bucket     = "<your-tf-state-bucket>" # globally-unique S3 bucket YOU created for state (name only, no path)
+key_prefix = ""                     # optional folder inside the bucket, e.g. "daily-eks-practice"
+region     = "us-east-2"            # region the state bucket lives in
 
 [common]
 # ---- identity / region ----

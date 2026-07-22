@@ -87,9 +87,19 @@ def load_config() -> dict:
 
 def backend_config_flags(env: str, backend: dict) -> list[str]:
     flags = []
-    if backend.get("bucket"):
-        flags.append(f"-backend-config=bucket={backend['bucket']}")
-    flags.append(f"-backend-config=key={BACKEND_KEYS[env]}")
+    bucket = backend.get("bucket", "")
+    if "/" in bucket:
+        sys.exit(
+            "bootstrap: [backend].bucket must be the bare bucket name (no '/'). "
+            "Put a folder path in [backend].key_prefix instead."
+        )
+    if bucket:
+        flags.append(f"-backend-config=bucket={bucket}")
+    key = BACKEND_KEYS[env]
+    prefix = backend.get("key_prefix", "").strip("/")
+    if prefix:
+        key = f"{prefix}/{key}"
+    flags.append(f"-backend-config=key={key}")
     if backend.get("region"):
         flags.append(f"-backend-config=region={backend['region']}")
     return flags
@@ -164,8 +174,11 @@ def main(argv: list[str]) -> int:
 
     tf = ["terraform", f"-chdir={ENV_DIRS[env]}"]
     # Inject the S3 backend on `init` (unless the caller disabled the backend).
+    # -reconfigure: the ministack tests leave a cached LOCAL backend in
+    # .terraform/, and switching back to S3 would otherwise demand a migration.
     if rest[0] == "init" and "-backend=false" not in rest:
-        cmd = tf + ["init"] + backend_config_flags(env, backend) + rest[1:]
+        extra = [] if "-reconfigure" in rest else ["-reconfigure"]
+        cmd = tf + ["init"] + extra + backend_config_flags(env, backend) + rest[1:]
     else:
         cmd = tf + rest
     log("bootstrap: " + " ".join(cmd))
