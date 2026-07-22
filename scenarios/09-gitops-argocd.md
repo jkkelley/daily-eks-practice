@@ -10,6 +10,7 @@ Ticket: "We're moving deploys to GitOps. Nobody runs helm by hand anymore - git 
 2. This repo is private, so Argo CD can't read it yet.
    Register the repo in Argo CD with a GitHub fine-grained PAT (contents: read-only) - UI or `argocd` CLI, your choice.
    Where do those credentials actually live now? Find the k8s object.
+   (Daily shortcut once you've done it by hand: `make argo-repo` builds that same Secret from your `gh` CLI token - read `scripts/argo-repo.py` and confirm it creates exactly what you just made manually.)
 3. `make app-deploy` - it generates the Application manifest from your git remote and applies it. Find the app in the UI: it's OutOfSync. Read the diff view until it makes sense, then Sync.
 4. Drift drill: `kubectl scale deploy practice-app-frontend -n practice-app --replicas=1`.
    Watch Argo CD notice. Sync to heal it.

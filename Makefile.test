@@ -24,9 +24,12 @@ fmt-check: ## terraform fmt -check
 validate: ## init -backend=false + validate (dev + bootstrap-oidc)
 	@set -e; for d in envs/dev bootstrap-oidc; do \
 	  echo "== validate $$d =="; \
+	  rm -f terraform/$$d/.terraform/terraform.tfstate; \
 	  terraform -chdir=terraform/$$d init -backend=false -input=false >/dev/null; \
 	  terraform -chdir=terraform/$$d validate; \
 	done
+	# ^ the rm drops only the cached backend marker (left by a real `make init`),
+	#   so this stays credential-free; provider downloads remain cached.
 
 helm-lint: ## helm lint the practice-app chart (inside Podman)
 	$(HELM) lint practice-app

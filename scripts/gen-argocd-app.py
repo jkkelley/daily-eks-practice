@@ -8,28 +8,14 @@ Linux, WSL, and Windows (any Python 3.9+).
 Output: argocd/generated/practice-app.yaml  (git-ignored)
 Apply:  make app-deploy   (or kubectl apply -f argocd/generated/practice-app.yaml)
 """
-import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gen_argocd_app_url import repo_https_url
+
 REPO = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO / "argocd" / "generated"
-
-
-def repo_https_url() -> str:
-    try:
-        url = subprocess.check_output(
-            ["git", "-C", str(REPO), "remote", "get-url", "origin"], text=True
-        ).strip()
-    except subprocess.CalledProcessError:
-        sys.exit("gen-argocd-app: no 'origin' git remote - push this repo to GitHub first.")
-    # Normalize ssh form (git@github.com:owner/repo.git) to https for Argo CD.
-    if url.startswith("git@"):
-        host, path = url.removeprefix("git@").split(":", 1)
-        url = f"https://{host}/{path}"
-    if not url.endswith(".git"):
-        url += ".git"
-    return url
 
 
 def main() -> int:

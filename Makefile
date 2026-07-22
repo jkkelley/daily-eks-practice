@@ -73,11 +73,14 @@ output: guard-env ## Show terraform outputs
 kubeconfig: guard-env ## Point kubectl at the cluster
 	@aws eks update-kubeconfig --name $$($(BOOT) $(ENV) output -raw cluster_name) --region $(AWS_REGION) --profile $(AWS_PROFILE)
 
+argo-repo: ## Give Argo CD read access to this private repo (token from your gh CLI login)
+	$(PYTHON) scripts/argo-repo.py
+
 app-deploy: ## Register the practice app with Argo CD (generates the Application from your git remote)
 	$(PYTHON) scripts/gen-argocd-app.py
 	kubectl apply -f argocd/generated/practice-app.yaml
 	@echo ""
-	@echo "Argo CD now owns the app. Private repo? Register credentials first - see scenarios/09-gitops-argocd.md."
+	@echo "Argo CD now owns the app. If it can't pull (private repo): make argo-repo, then Sync."
 
 app-status: ## Quick look at the practice app
 	kubectl -n practice-app get deploy,pod,svc,ingress,pvc

@@ -81,7 +81,8 @@ cp scripts/config.example.toml scripts/config.toml   # then edit for your accoun
 cp scripts/config.example.toml scripts/config.toml   # edit for your account
 make up            # ~15 min (control plane + nodes + rds + platform)
 make kubeconfig    # point kubectl at it
-make app-deploy    # hand the app to Argo CD (see scenario 09 for private-repo creds)
+make argo-repo     # let Argo CD read this private repo (token from your gh login)
+make app-deploy    # hand the app to Argo CD, then Sync it (UI or CLI)
 make scenario N=01 # print today's drill
 make check N=01    # grade yourself
 make down          # WHEN DONE - stops the charges
