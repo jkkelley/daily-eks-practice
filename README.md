@@ -83,8 +83,9 @@ make up            # ~15 min (control plane + nodes + rds + platform)
 make kubeconfig    # writes .kubeconfig-daily-eks-practice (repo-local; ~/.kube/config is never touched)
 eval "$(make kubeconfig-env)"   # point YOUR shell's kubectl at it (PowerShell: $env:KUBECONFIG = ...)
 make argo-repo     # let Argo CD read this private repo (token from your gh login)
-make app-deploy    # hand the app to Argo CD, then Sync it (UI or CLI)
-make scenario N=01 # print today's drill
+make app-deploy    # register the app with Argo CD (creates nothing yet)
+make argo-sync     # Sync it - creates the pods (or do it in the UI: make argo-ui, click Sync)
+make scenario N=01 # print today's drill (checks its prereqs first)
 make check N=01    # grade yourself
 make down          # WHEN DONE - stops the charges
 ```

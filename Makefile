@@ -9,6 +9,7 @@
 #   make argo-ui               # port-forward the Argo CD UI (+ prints the password)
 #   make scenario N=01         # print a scenario card
 #   make check N=01            # verify you actually completed a scenario
+#   make serve-answers N=02    # serve ONLY that card's answer (omit N for the whole key)
 #   make down                  # destroy everything (DO THIS when done!)
 
 ENV ?= dev
@@ -41,7 +42,7 @@ export KUBECONFIG := $(KUBECONFIG_FILE)
 
 .DEFAULT_GOAL := help
 .PHONY: help config init plan apply up down output kubeconfig kubeconfig-env app-deploy \
-        app-status argo-repo argo-ui argo-password grafana-ui scenario check serve-answers \
+        app-status argo-repo argo-sync argo-ui argo-password grafana-ui scenario check serve-answers \
         fmt clean guard-env
 
 help: ## Show this help
@@ -68,11 +69,12 @@ plan: init ## terraform plan
 apply: init ## terraform apply (creates AWS resources - COSTS MONEY)
 	$(BOOT) $(ENV) apply
 
-up: apply ## Alias for apply
+up: init ## terraform apply, auto-approved (creates AWS resources - COSTS MONEY)
+	$(BOOT) $(ENV) apply -auto-approve
 
-down: guard-env ## terraform destroy (RUN THIS WHEN DONE to stop charges)
+down: guard-env ## terraform destroy, auto-approved (RUN THIS WHEN DONE to stop charges)
 	$(BOOT) $(ENV) init -input=false
-	$(BOOT) $(ENV) destroy
+	$(BOOT) $(ENV) destroy -auto-approve
 
 output: guard-env ## Show terraform outputs
 	$(BOOT) $(ENV) output
@@ -96,7 +98,15 @@ app-deploy: ## Register the practice app with Argo CD (generates the Application
 	$(PYTHON) scripts/gen-argocd-app.py
 	kubectl apply -f argocd/generated/practice-app.yaml
 	@echo ""
-	@echo "Argo CD now owns the app. If it can't pull (private repo): make argo-repo, then Sync."
+	@echo "Argo CD now owns the app. Run 'make argo-sync' (or Sync in the UI) to create the pods."
+
+argo-sync: ## Manually Sync the practice app in Argo CD, then wait until it is Healthy
+	@kubectl -n argocd patch application practice-app --type merge \
+	  -p '{"operation":{"initiatedBy":{"username":"make argo-sync"},"sync":{"syncStrategy":{"hook":{}}}}}'
+	@echo "Sync triggered - waiting for practice-app to become Healthy (up to 180s)..."
+	@kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy \
+	  application/practice-app --timeout=180s
+	@kubectl -n practice-app get deploy
 
 app-status: ## Quick look at the practice app
 	kubectl -n practice-app get deploy,pod,svc,ingress,pvc
@@ -113,15 +123,16 @@ grafana-ui: ## Port-forward Grafana to http://localhost:3000 (user: admin)
 	@echo "Grafana -> http://localhost:3000  (user: admin, password: make output -> grafana_admin_password)"
 	kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
 
-scenario: ## Print a scenario card, e.g. make scenario N=03
+scenario: ## Print a scenario card (checks its prereqs first), e.g. make scenario N=03
 	@ls scenarios/$(N)-*.md >/dev/null 2>&1 || { echo "no scenario $(N) (see scenarios/)"; exit 1; }
+	@$(PYTHON) scripts/scenario-prereqs.py $(N)
 	@cat scenarios/$(N)-*.md
 
 check: ## Verify a scenario's end state, e.g. make check N=03
 	bash scenario_testing/check.sh $(N)
 
-serve-answers: ## Serve the sealed answer key (PRACTICE_ANSWERS.html) locally
-	$(SERVE_ANSWERS)
+serve-answers: ## Serve the sealed answer key locally; scope to one card with N=NN (e.g. make serve-answers N=02)
+	$(SERVE_ANSWERS) $(if $(filter command line,$(origin N)),$(N),)
 
 fmt: ## terraform fmt -recursive
 	terraform -chdir=terraform fmt -recursive
