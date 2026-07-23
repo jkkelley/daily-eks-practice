@@ -142,6 +142,25 @@ Scenario grading (`make check`) is separate and documented in [`scenario_testing
 
 ---
 
+## Scrub a Git identity before publishing
+
+`scripts/scrub-git-identity.sh` permanently replaces an author, committer, and tagger email through `git-filter-repo`.
+It always works in a fresh mirror clone outside this checkout, verifies that branch and tag trees remain unchanged, and does not touch the remote unless `--push` is explicit.
+
+```bash
+scripts/scrub-git-identity.sh \
+  --old-email '<private-email>' \
+  --new-name '<public-name>' \
+  --new-email '<github-noreply-email>' \
+  --output /tmp/daily-eks-practice-sanitized.git
+```
+
+Inspect the sanitized mirror before rerunning with `--push`.
+The push path requires typing `force-push`, checks that the remote has not changed since cloning, and reclones the remote afterward for verification.
+Every rewritten commit ID changes, signatures become invalid, and hosting-provider pull-request refs or caches can retain old objects.
+
+---
+
 ## Hand-off
 
 This repo is built to be handed to another engineer whole: clone, copy the example config, fill in your own account values, go.

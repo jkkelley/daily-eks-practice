@@ -13,7 +13,8 @@ make -f Makefile.test ministack   # deepest: full terraform plan vs a mock AWS
 1. **`fmt-check`** - `terraform fmt -recursive -check`. Style only.
 2. **`validate`** - `terraform init -backend=false` + `validate` for `envs/dev` and `bootstrap-oidc`. Catches type errors, missing variables, bad references. Needs internet for provider downloads, no credentials.
 3. **`helm-lint` / `helm-template`** - lints and fully renders `helm/practice-app`. Helm runs **inside Podman** (`docker.io/alpine/helm`), so no local helm install is needed or assumed.
-4. **`ministack`** - `scripts/ministack-test.sh` starts a local mock-AWS container (Podman), points Terraform at it with fake credentials and a local state backend (via a git-ignored `*_override.tf`), and runs a full plan. This is the vendored [`container-sandbox`](../.claude/skills/container-sandbox/SKILL.md) skill's flow; it catches wiring/dependency/attribute bugs across the whole graph for $0.
+4. **`history-scrubber`** - builds temporary local repositories, rewrites identity metadata in a mirror, exercises the guarded force-push path against a local bare remote, and verifies the result.
+5. **`ministack`** - `scripts/ministack-test.sh` starts a local mock-AWS container (Podman), points Terraform at it with fake credentials and a local state backend (via a git-ignored `*_override.tf`), and runs a full plan. This is the vendored [`container-sandbox`](../.claude/skills/container-sandbox/SKILL.md) skill's flow; it catches wiring/dependency/attribute bugs across the whole graph for $0.
 
 ## Fidelity caveat
 
