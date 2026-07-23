@@ -2,7 +2,7 @@
 # image tags, probes, resources, ingress - then sync via Argo CD or helm.
 
 frontend:
-  replicas: 4
+  replicas: 2
   image:
     repository: nginx
     tag: 1.27-alpine # rolling-update scenario: bump to 1.28-alpine
