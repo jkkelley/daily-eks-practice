@@ -58,7 +58,7 @@ ingress:
 
 # HPA for the frontend (needs metrics-server, on by default).
 hpa:
-  enabled: false # autoscaling scenario: flip on and load-test
+  enabled: true # autoscaling scenario: flip on and load-test
   minReplicas: 2
   maxReplicas: 5
   targetCPUUtilizationPercent: 50
