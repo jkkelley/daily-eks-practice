@@ -1,7 +1,7 @@
 # Scenario drill sessions - design
 
 Date: 2026-08-19
-Status: in progress. Q1, Q2, Q2a and Q3 resolved; Q4 through Q7 open.
+Status: in progress. Q1 through Q6 resolved; Q7 open.
 Slice: scenario 03 only (`03-rolling-update-rollback`).
 
 ## Problem
@@ -251,6 +251,81 @@ Accepted friction: a changed IP (ISP renewal, coffee shop, tether, VPN) locks yo
 The platform ALB is the ops plane; scenario 04 is about exposing a workload.
 The card becomes "join the existing ALB with a new Ingress, then stand up an NLB separately to feel the difference", which is closer to what you would actually do at work than provisioning a load balancer from scratch.
 
+### Q4 - integrations are contextual, and mostly not iframes
+
+**Decision: Argo CD, Grafana and Prometheus surface when the active scenario calls for them and they are actually running.**
+
+Delivered at three levels, and the top one is preferred.
+
+**Native widgets from their APIs.**
+Argo CD has a REST API and the Prometheus query API is plain HTTP and JSON.
+Sync status, health and metric charts get built as components of this app, so they look like this app, load instantly, and need no auth dance or framing workaround.
+For scenario 03 this is the whole requirement: one call to `/api/v1/applications/practice-app` shows Argo stomping a `rollout undo` in a panel we designed.
+
+**Grafana `d-solo` panel embeds** when a scenario wants one specific chart rather than the whole product.
+
+**Full-app access through a reverse proxy** for scenarios where the lesson is the app itself, such as 07.
+
+The reverse proxy is the "central wrapper" and it lives in the Fastify backend.
+Path-based routing on **one** host (`/`, `/argo/*`, `/grafana/*`) makes everything same-origin, which is the structural fix.
+Subdomain-per-app cannot be wrapped: different origins mean `X-Frame-Options: sameorigin` blocks framing and cookies do not cross.
+
+The proxy does three things the browser cannot.
+It injects backend-held API tokens, so the browser never sees a login screen and "logged in once" works today without OIDC or a domain.
+It rewrites `X-Frame-Options` and CSP `frame-ancestors` on the way through.
+It gives one entry point through the ALB that is already paid for.
+
+An iframe of Grafana inside this app looks like an iframe of Grafana; native widgets look like this app, which matters given the quality bar.
+
+Gotcha to verify at build time: serving those apps under a subpath needs Grafana's `root_url` and `serve_from_sub_path`, and Argo CD's server rootpath parameter.
+Both are settable through Helm values already under our control, and both are fiddly enough to verify against current chart versions rather than trusting memory.
+The proxy is designed now and built when scenario 07 is ported, so no subpath surgery happens for a scenario that does not need it.
+
+### Q5 - one long-lived pod, and sessions are append-only
+
+**Decision: a single long-lived `drill-gui` pod.**
+
+It is the mothership and the only surface the user interacts from.
+`make scenario N=NN` switches what it is doing rather than building a new pod; scenarios are state inside it.
+
+**Sessions are append-only.**
+Redoing a scenario creates a _new_ session tracked in a results table with running totals.
+Nothing is overwritten and nothing is deleted.
+This changes the Q2 schema from one save file per scenario to a history:
+
+```
+drill-progress/
+  curriculum.json                    # running totals across all scenarios
+  03/
+    sessions/
+      2026-08-19T14-03-11/
+        state.json
+        workspace.bundle
+      2026-08-21T09-12-40/
+    index.json                       # results table + current-session pointer
+```
+
+Timestamps carry no colons and the current-session pointer is JSON rather than a symlink, because Windows 11 is a supported target.
+
+### Q6 - TypeScript both ends
+
+| Layer      | Choice                        | Why                                                                                                                                                   |
+| ---------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Language   | TypeScript, both ends         | The websocket carries a real protocol: terminal bytes, resize, grader verdicts, file saves, sync status. Shared types make a mismatch a compile error |
+| Backend    | Node + Fastify                | TypeScript-native, first-class websocket plugin, fast, not bloated like Nest                                                                          |
+| PTY        | `node-pty`                    | What VS Code itself uses                                                                                                                              |
+| Kubernetes | `@kubernetes/client-node`     | Official, and supports the watch the sync watcher depends on                                                                                          |
+| Proxy      | `@fastify/http-proxy`         | The integration wrapper above                                                                                                                         |
+| Frontend   | React + Vite                  | Multi-panel IDE-like app with heavy state; mature resizable-panel libraries, and xterm and Monaco integrations are all React-first                    |
+| Terminal   | `xterm.js` + fit/webgl addons | Effectively the only serious option                                                                                                                   |
+| Editor     | Monaco                        | Monaco _is_ VS Code's editor, so "fake VS Code" is literal rather than an imitation. ~5MB is irrelevant when shipping an image                        |
+
+Hand-rolling RFC6455 was rejected.
+It was only ever justified by the stdlib-only constraint, which died when we chose to build an image.
+
+Both terminal surfaces, the one integrated into the code page and the dedicated terminal page, run `tmux attach` against the same session.
+Multiplexing, shared views and reattach-after-disconnect come free rather than being built.
+
 ### Build-time items not to forget
 
 `drill-progress/` must be added to `.gitignore` before it is ever created, or practice history lands in a commit.
@@ -258,14 +333,6 @@ The drill GUI must not use port 8080, which `make argo-ui` already occupies.
 Two new config values are needed in `config.toml` and `config.example.toml`: the ingress group name and the allowed CIDR.
 
 ## Open questions
-
-**Q4 - integrations scope.** Argo CD only, or Argo plus Prometheus/Grafana, given scenario 07 is entirely observability.
-
-**Q5 - pod lifetime.** One long-lived `drill-gui` that loads whichever scenario is active, versus one pod per scenario.
-
-**Q6 - stack.** Frontend is TypeScript regardless: xterm.js is effectively the only serious browser terminal, and Monaco and CodeMirror 6 are both JS.
-Backend candidates are Node/TS (shared websocket message types with the frontend, `node-pty`, official k8s client), Go (`client-go`, static binary, tiny image, protocol maintained twice), or Python (weakest; the only argument was matching `scripts/`, which is inertia).
-Separable sub-choices: React+Vite versus Svelte, and Monaco (~5MB, literally VS Code) versus CodeMirror 6 (~10x smaller).
 
 **Q7 - guarding unsafe targets.** Largely absorbed by the Makefile handover model above, but the exact refusal behaviour and the GUI port still need pinning.
 
