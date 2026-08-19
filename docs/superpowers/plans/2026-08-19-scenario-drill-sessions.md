@@ -28,17 +28,40 @@ Copied verbatim from the spec and `CLAUDE.md`. Every task's requirements implici
 - Ports already taken: `make argo-ui` uses 8080, `make grafana-ui` uses 3000. The drill GUI uses **8090**.
 - Local tooling confirmed present: `kind` (/usr/local/bin/kind), `minikube`, `kubectl`, `podman` 4.9.3, `node` v20.20.2, `npm`, `python3` 3.12.3, `jq`, `tmux`. **`helm` is NOT installed on the host** and must run in Podman via `docker.io/alpine/helm:latest`.
 
-## One deviation from the spec
+## The self-contained git rule
 
-**Cluster git is seeded by streaming a bundle in, not by an init container cloning GitHub.**
+**The drill never contacts github.com. Everything Argo CD reads comes from the local repo, via the cluster.**
 
-This contradicts the spec and the spec should be amended once Phase 3 lands.
+This is a standing rule, not a preference, and it supersedes the spec's Q1 seeding sentence.
+The spec must be amended to match.
 
-Q1 says the init container clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses.
-That mechanism is a script the user runs after apply, so Terraform cannot supply the token at init-container time, and a private repo would make the first apply fail.
-Instead the init container runs `git init --bare` only, and a new `make git-seed` target streams `git bundle create - --all` from the local repo into the pod.
-This removes the PAT from the cluster entirely, removes the dependency on GitHub being reachable from a private subnet, and reuses the exact primitive the sync watcher already needs, just in the other direction.
+**"Self-contained" is not "simulated."** The in-cluster server runs genuine git and Argo CD does a genuine clone and a genuine sync.
+Nothing here is a mock.
+What changes is the location of the remote, from `github.com` to `git-server.git.svc.cluster.local`, and nothing else.
+The distinction is the whole learning value: if the GitOps step were faked, scenario 03 would be teaching a simulation of a skill instead of the skill.
+
+**How it works.** The init container runs `git init --bare` only.
+A `make git-seed` target streams `git bundle create - --all` from the local repo into the pod over `kubectl exec`.
+That one primitive, `git bundle`, is used inward to seed and outward to save progress, so there is no second mechanism to build or maintain.
+
+**Why the spec's version cannot work anyway.** Q1 says the init container clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses.
+That mechanism is a script the user runs _after_ apply, so Terraform cannot supply the token at init-container time, and a private repo would make the first apply fail.
+Seeding from the laptop removes the PAT from the cluster entirely, removes the dependency on GitHub being reachable from a private subnet, and seeds exactly what is on disk rather than whatever was last pushed.
 The readiness gate the spec actually cared about is preserved and strengthened: the probe requires a `.seeded` marker, so until the bundle lands the Service has no endpoints and Argo retries cleanly instead of syncing a half-served repo.
+
+**What the rule forbids:**
+
+- Argo CD reading any repoURL outside the cluster. This deletes rung 5 from Task 3.2's fallback ladder rather than merely deprioritising it, so a failure at rung 4 cannot slide back into the thing the rule rejects.
+- A GitHub credential in the cluster. The drill path never calls `make argo-repo`.
+- `scripts/gen-argocd-app.py` reading the user's git remote on the drill path. It generates from `cluster_git_url`.
+
+**What the rule does not forbid**, stated so nobody over-applies it: container images still come from `docker.io` and `ghcr.io`, and the kind acceptance test pulls Argo's install manifest from `raw.githubusercontent.com`.
+Those are network but they are not git and they are not the sync path.
+The rule governs what Argo reads, not whether the cluster has egress.
+
+**`scripts/argo-repo.py` is kept, not deleted.** It exists for `scenarios/09-gitops-argocd.md`, which teaches manual PAT-and-UI repo registration against real GitHub, and that lesson ships today.
+The drill simply never calls it.
+Whether 09's lesson survives contact with cluster git is a decision for when 09 is ported, not now.
 
 ## Where each language runs, and why
 
@@ -2780,16 +2803,21 @@ Why it is not obvious. Argo's repo-server clones with `--depth 1`. Shallow fetch
 
 Why it is not a gate. A failure never invalidates the design, it only changes which container serves the repo. So instead of proving it in a throwaway spike first, Step 7 proves it on kind against the manifests that ship, and the alternatives are ranked here in advance:
 
-| #   | Option                                                        | Fidelity                               | Cost of switching                                       | What it costs you                                                                                |
-| --- | ------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 1   | Dumb HTTP, static nginx over a bare repo (what Step 1 writes) | full GitOps                            | baseline                                                | may fail on Argo's `--depth 1` shallow clone                                                     |
-| 2   | Smart HTTP: `git http-backend` CGI behind `fcgiwrap`          | full GitOps                            | one ConfigMap and one image swap                        | nothing functional; more container config to read                                                |
-| 3   | `git daemon` on 9418, `git://` repoURL                        | full GitOps                            | one image swap, plus confirming Argo accepts the scheme | nothing, if Argo takes `git://`                                                                  |
-| 4   | Gitea with the sqlite backend                                 | full GitOps **and a browsable web UI** | ~150MB image and a handful of env vars                  | more moving parts; arguably an upgrade for a learning repo                                       |
-| 5   | Argo reads GitHub directly (the spec's original position)     | full GitOps                            | revert the seeding deviation                            | needs a PAT in the cluster and egress to github.com, which is exactly what the deviation removed |
-| 6   | No Argo; the drill server runs `helm upgrade` on submit       | **simulated**                          | rewrites Phase 6                                        | the entire GitOps lesson                                                                         |
+| #   | Option                                                        | Fidelity                               | Cost of switching                                       | What it costs you                                          |
+| --- | ------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| 1   | Dumb HTTP, static nginx over a bare repo (what Step 1 writes) | full GitOps                            | baseline                                                | may fail on Argo's `--depth 1` shallow clone               |
+| 2   | Smart HTTP: `git http-backend` CGI behind `fcgiwrap`          | full GitOps                            | one ConfigMap and one image swap                        | nothing functional; more container config to read          |
+| 3   | `git daemon` on 9418, `git://` repoURL                        | full GitOps                            | one image swap, plus confirming Argo accepts the scheme | nothing, if Argo takes `git://`                            |
+| 4   | Gitea with the sqlite backend                                 | full GitOps **and a browsable web UI** | ~150MB image and a handful of env vars                  | more moving parts; arguably an upgrade for a learning repo |
+| 5   | No Argo; the drill server runs `helm upgrade` on submit       | **simulated**                          | rewrites Phase 6                                        | the entire GitOps lesson                                   |
 
-Work down the ladder in order. Rung 6 is the floor, not a peer of the others: there are four better rungs above it and it is the only one that stops teaching GitOps. If the ladder is entered at all, record which rung won and why in a comment at the top of `cluster-git.tf`, and report it to the user before continuing to Task 3.3, because rungs 3 to 6 change `cluster_git_url` and therefore Task 3.3's Argo Application.
+Work down the ladder in order.
+
+Rung 5 is the floor, not a peer of the others: there are three better rungs above it and it is the only one that stops teaching GitOps. Do not reach for it because it is quick.
+
+**"Argo reads GitHub directly" is deliberately absent from this ladder.** It was rung 5 in an earlier draft and was deleted, not demoted, because the self-contained git rule at the top of this plan forbids it. Leaving it on the ladder would mean a failure at rung 4 could slide straight back into the thing the rule rejects. If every rung here fails, that is a conversation with the user, not a licence to point Argo at github.com.
+
+If the ladder is entered at all, record which rung won and why in a comment at the top of `cluster-git.tf`, and report it to the user before continuing to Task 3.3, because rungs 3 to 5 change `cluster_git_url` and therefore Task 3.3's Argo Application.
 
 **Files:**
 
@@ -3340,7 +3368,13 @@ def source_repo_url() -> str:
     return repo_https_url()
 ```
 
-Use `source_repo_url()` where `repo_https_url()` is currently called to build `spec.source.repoURL`. Leave `scripts/argo-repo.py` alone: it registers the GitHub credential, which is still needed for the push half of scenarios 09 and 12.
+Use `source_repo_url()` where `repo_https_url()` is currently called to build `spec.source.repoURL`.
+
+Two notes on how this sits with the self-contained git rule at the top of this plan.
+
+The GitHub fallback is not a violation. It is the pre-drill path, reached only when `enable_cluster_git = false`, which is how the repo behaves today for anyone who never turns the drill on. On the drill path the toggle is on and the fallback is unreachable. What the rule forbids is Argo reading GitHub _while a drill is running_, and that cannot happen here.
+
+Leave `scripts/argo-repo.py` alone. It registers the GitHub credential, which is still needed for the push half of scenarios 09 and 12, and `scenarios/09-gitops-argocd.md` teaches that registration as its lesson. The drill simply never calls `make argo-repo`. Deleting the script to satisfy the rule would break a scenario that ships today, in service of a rule about a scenario that does not exist yet.
 
 - [ ] **Step 6: Add the Makefile target and wire the ordering**
 
@@ -5236,4 +5270,4 @@ Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions
 
 Scenario 03 is one of twelve. The other eleven are ported one at a time, each getting its own answers TOML and whatever grader kinds it needs, and each may extend the schema - which is why `schema = 1` and the `grader` discriminator exist. Scenario 04's card also needs rewriting, because the platform ALB is now the ops plane: it becomes "join the existing ALB with a new Ingress, then stand up an NLB separately to feel the difference", which is closer to what you would actually do at work than provisioning a load balancer from scratch.
 
-One spec amendment to make once Phase 3 lands: the cluster git seeding mechanism, documented under "One deviation from the spec" at the top of this plan. The language split is not an amendment, because the spec never assigned the grader a language; it is written up under "Where each language runs, and why" as a decision this plan made.
+One spec amendment to make: the self-contained git rule, documented under "The self-contained git rule" at the top of this plan. It supersedes the spec's Q1 sentence about an init container cloning GitHub with a token, and it is a standing rule rather than a one-off deviation, so the spec should not be left saying the opposite. The language split is not an amendment, because the spec never assigned the grader a language; it is written up under "Where each language runs, and why" as a decision this plan made.

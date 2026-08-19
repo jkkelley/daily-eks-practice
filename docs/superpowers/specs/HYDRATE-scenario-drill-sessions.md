@@ -24,7 +24,7 @@ Stage 3 is what adds branch creation, PR submission and branch cleanup, so do no
 - Design phase is **complete**. All seven open questions (Q1-Q7, plus Q2a) are resolved and recorded in the spec.
 - Implementation plan is **complete** and on main: `docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md`, 8 phases, 21 tasks.
 - The architecture diagram lives at `docs/architecture/drill-platform.html` and matches the spec. It was moved out of `.lavish/`, which is git-ignored at `.gitignore:27` and could never reach the remote.
-- The plan records **one deliberate deviation from the spec** at the top: cluster git is seeded by streaming a `git bundle` in from the laptop rather than by an init container cloning GitHub with a PAT. Read that section before treating Q1's seeding sentence as final.
+- The plan opens with **the self-contained git rule**: the drill never contacts github.com, and cluster git is seeded by streaming a `git bundle` in from the laptop. The spec has been amended to match, so the two now agree. Read that section before designing anything that touches git.
 - The plan also has a **"Where each language runs, and why"** section. That is not a deviation - the spec never said which language grades. TypeScript runs in the cluster (the whole GUI, including the grader); Python is laptop-side CLI glue the Makefile calls and is never in the container image. Read it before wondering why a TypeScript app has Python next to it.
 - **Phases 6.1-6.5 and Tasks 5.4-5.5 are specified at interface level, not full TDD steps**, on purpose: they depend on what the user says when they first see the UI at Task 5.3. Expand them after that review, before those tickets are cut.
 
@@ -38,8 +38,19 @@ Task 3.2 now carries a **six-rung fallback ladder** under "The cluster git proto
 Rung 6 is the floor and is the only rung that stops teaching GitOps. Work down in order; report to the user before Task 3.3 if you land below rung 2, because rungs 3 to 6 change `cluster_git_url`.
 Phase 0 is now a single task, the kind harness.
 
-**Q2 - Amend the spec to match the seeding deviation, or leave the plan as the record?**
-Low stakes. The plan documents the change and why; the spec still says the init container clones GitHub with a token.
+**Q2 - Amend the spec to match the seeding deviation? ANSWERED: yes, and the rule got wider.**
+The user's framing: "we don't want to contact a real git, the whole purpose of this is to simulate it based off the files already available, why make another mechanism we don't need?"
+This is now a **standing rule, not a one-off deviation**: the drill never contacts github.com, and everything Argo CD reads comes from the local repo by way of the cluster.
+The spec was amended in place at its cluster-git section, marked "Seeding: amended 2026-08-19".
+The plan's "One deviation from the spec" section became "The self-contained git rule".
+
+One correction I gave and the user accepted: **self-contained is not simulated.**
+The in-cluster server runs genuine git and Argo does a genuine clone and sync; only the location of the remote changes.
+Do not let "simulate" drift into "mock" - if the GitOps step were faked, scenario 03 would teach a simulation of the skill instead of the skill.
+
+What the rule forbids: Argo reading any repoURL outside the cluster, a GitHub credential in the cluster on the drill path, and `gen-argocd-app.py` reading the user's git remote on the drill path.
+What it does **not** forbid: container images from `docker.io`/`ghcr.io`, and the kind test pulling Argo's install manifest from `raw.githubusercontent.com`. The rule governs what Argo reads, not cluster egress.
+`scripts/argo-repo.py` is **kept, not deleted** - `scenarios/09-gitops-argocd.md` teaches manual PAT registration as its lesson and ships today. The drill just never calls it.
 
 **Q3 - The user's public IP, for `drill_allowed_cidrs`.**
 Needed at Phase 4. It lives in `scripts/config.toml`, which is git-ignored and hand-maintained.
