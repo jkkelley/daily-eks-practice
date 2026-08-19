@@ -1,7 +1,7 @@
 # Scenario drill sessions - design
 
 Date: 2026-08-19
-Status: in progress. Q1, Q2 and Q2a resolved; Q3 through Q7 open.
+Status: in progress. Q1, Q2, Q2a and Q3 resolved; Q4 through Q7 open.
 Slice: scenario 03 only (`03-rolling-update-rollback`).
 
 ## Problem
@@ -215,10 +215,49 @@ Size is therefore irrelevant here; the real risk is **orphaning**.
 If `make down` destroys the cluster while a PVC still exists, the EBS volume can outlive Terraform and bill indefinitely with nothing pointing at what created it.
 Teardown must delete the PVC before the cluster goes.
 
-## Open questions
+### Q3 - an internet-facing ALB, with three conditions
 
-**Q3 - GUI access.** `kubectl port-forward` versus Ingress/ALB.
-Note the drill GUI must not use port 8080, which `make argo-ui` already uses.
+**Decision: an ALB, chosen for growth rather than for today.**
+
+Port-forward was rejected because it caps what the platform can become.
+An ALB gives every future thing a place to be exposed, which matters more than the roughly $1 per 30-hour cycle it costs.
+
+**Cost.** At us-east-2 list prices: $0.0225/hr base, plus $0.008/LCU-hr, plus roughly $0.005/hr per public IPv4 across two AZs.
+For a 30-hour cycle that is about $1.00, of which the base rate is $0.675.
+LCU billing charges the highest of four dimensions rather than their sum (25 new connections/sec, 3,000 active connections/min, 1 GB/hr processed, 1,000 rule evaluations/sec per LCU), and a practice app never approaches one LCU on any axis.
+For context, the NAT gateway costs more than the ALB will, and the EKS control plane is roughly half the total bill.
+
+**Condition 1: one ALB, shared.**
+By default every Ingress provisions its own ALB, so Argo UI, Grafana and the drill GUI would be three of them.
+`alb.ingress.kubernetes.io/group.name` makes Ingresses share a single ALB with host and path routing.
+This is what keeps "it'll grow" affordable: cost stays flat as things are added.
+
+**Condition 2: a pre-destroy hook, or it orphans.**
+The AWS Load Balancer Controller creates the ALB, so it is not a Terraform resource and Terraform cannot sequence its deletion.
+`make down` must delete the Ingresses, poll until the ALB is genuinely gone, and only then run `terraform destroy`.
+Getting this backwards leaves a load balancer billing about $16/month that nothing in the account points at, plus security groups that make VPC deletion hang.
+Same failure shape as the orphaned PVC above.
+
+**Condition 3: source-IP restricted security group.**
+Without this the drill GUI is an unauthenticated web terminal running as `cluster-admin`, reachable by anyone who finds the hostname, over plain HTTP.
+The allowed CIDR lives in `scripts/config.toml`, which is already gitignored, alongside the existing `public_access_cidrs` value it mirrors.
+
+ALB OIDC auth was rejected for now, not on merit but on prerequisites: it needs an HTTPS listener, which needs an ACM certificate, which needs a Route53 domain that is not currently configured (`enable_external_dns = false`, `dns_zone_name = ""`).
+It is the documented growth path the moment more than one person uses this, and would make a good scenario in itself.
+
+Accepted friction: a changed IP (ISP renewal, coffee shop, tether, VPN) locks you out until the config is updated and re-applied.
+
+**Scenario 04 reframes rather than dies.**
+The platform ALB is the ops plane; scenario 04 is about exposing a workload.
+The card becomes "join the existing ALB with a new Ingress, then stand up an NLB separately to feel the difference", which is closer to what you would actually do at work than provisioning a load balancer from scratch.
+
+### Build-time items not to forget
+
+`drill-progress/` must be added to `.gitignore` before it is ever created, or practice history lands in a commit.
+The drill GUI must not use port 8080, which `make argo-ui` already occupies.
+Two new config values are needed in `config.toml` and `config.example.toml`: the ingress group name and the allowed CIDR.
+
+## Open questions
 
 **Q4 - integrations scope.** Argo CD only, or Argo plus Prometheus/Grafana, given scenario 07 is entirely observability.
 
