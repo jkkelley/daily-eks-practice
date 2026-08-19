@@ -9,6 +9,12 @@ A modular Terraform EKS project plus daily drill scenarios and a sealed answer k
 The scenarios in `scenarios/` are the curriculum; `PRACTICE_ANSWERS.html` holds the answers - keep the two in sync if you add or change a scenario, and add a matching outcome check to `scenario_testing/check.sh`.
 Do not "pre-solve" scenarios in the committed defaults (e.g. don't enable the HPA or Ingress in values.yaml - flipping them on is the exercise).
 
+## Session State
+
+See `CONTEXT_STATE.md` for current infrastructure state, active tasks, decisions and lessons learned.
+Read it before starting any task.
+Check its `last_updated` field first; if it is more than 7 days old, verify the infrastructure rows against reality before trusting them, and refresh it with the `context-compaction` skill.
+
 ## Hard rules
 
 1. **Never run `terraform apply`, `make up/apply/down`, or otherwise touch real AWS without explicit user approval.** The user drives all applies and destroys. Plans and validation are fine.
