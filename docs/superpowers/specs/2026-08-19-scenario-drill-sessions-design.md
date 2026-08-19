@@ -1,7 +1,7 @@
 # Scenario drill sessions - design
 
 Date: 2026-08-19
-Status: in progress. Q1 through Q6 resolved; Q7 open.
+Status: all open questions (Q1-Q7) resolved. Ready for an implementation plan.
 Slice: scenario 03 only (`03-rolling-update-rollback`).
 
 ## Problem
@@ -326,15 +326,28 @@ It was only ever justified by the stdlib-only constraint, which died when we cho
 Both terminal surfaces, the one integrated into the code page and the dedicated terminal page, run `tmux attach` against the same session.
 Multiplexing, shared views and reattach-after-disconnect come free rather than being built.
 
-### Build-time items not to forget
+### Q7 - refusal behaviour and the GUI port
+
+Most of this question was absorbed by the Makefile handover above, which replaced per-target guards with one steering wheel at a time.
+Two things remained.
+
+**Locked targets refuse and explain, with a `FORCE=1` escape hatch.**
+A refusal names the consequence rather than just declining: "this would re-apply the Argo Application and fight the drill", not only "the GUI owns this now".
+That costs one line per target and fits a project whose whole job is teaching why things break.
+
+`FORCE=1 make app-deploy` overrides the lock.
+This exists for the same reason the Makefile was demoted rather than archived: if the GUI wedges and the handover flag goes stale, the only alternative is destroying a cluster you are mid-drill on.
+Removing the escape hatch would remove the recovery path.
+
+**The GUI listens on 8090.**
+`make argo-ui` already uses 8080 and `make grafana-ui` uses 3000.
+Going through the ALB mostly removes the collision, but the container port still needs a number that does not trip anyone up during local development, and 8090 leaves 8081 and 8082 free for proxied apps if they ever need separate addressing in dev.
+
+## Build-time items not to forget
 
 `drill-progress/` must be added to `.gitignore` before it is ever created, or practice history lands in a commit.
-The drill GUI must not use port 8080, which `make argo-ui` already occupies.
-Two new config values are needed in `config.toml` and `config.example.toml`: the ingress group name and the allowed CIDR.
-
-## Open questions
-
-**Q7 - guarding unsafe targets.** Largely absorbed by the Makefile handover model above, but the exact refusal behaviour and the GUI port still need pinning.
+Three new config values are needed in `config.toml` and `config.example.toml`: the ingress group name, the allowed CIDR for the ALB security group, and a toggle for cluster git.
+The drill GUI listens on 8090, clear of `make argo-ui` (8080) and `make grafana-ui` (3000).
 
 ## Other requirements captured
 
