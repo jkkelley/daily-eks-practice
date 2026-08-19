@@ -1,7 +1,7 @@
 # Scenario drill sessions - design
 
 Date: 2026-08-19
-Status: in progress. Q1 and Q2 resolved; Q3 through Q7 open.
+Status: in progress. Q1, Q2 and Q2a resolved; Q3 through Q7 open.
 Slice: scenario 03 only (`03-rolling-update-rollback`).
 
 ## Problem
@@ -164,7 +164,40 @@ Replaying recorded actions was rejected: one non-deterministic step and the resu
 
 Rejected alternatives: a `DrillProgress` CRD (still dies with the cluster, so it needs the same export step anyway, and adds a CRD to version), etcd snapshots (unavailable, EKS manages the control plane), Velero (wants S3, restores cluster objects rather than learning state), pushing drill branches to GitHub (puts practice history in the remote), and a database (needs a service; this should be a file you can copy, diff and delete).
 
-Sync points: the CLI seeds the workspace from the bundle and writes the ConfigMap at session start, and re-bundles plus writes `drill-progress/` at session end before deleting the PVC.
+Passing a task requires reaching a _verified_ end state, so "tasks 1, 2, 3 passed" is not a note about the past.
+It is a declaration of a state the cluster provably reached, which is what makes rebuilding deterministic rather than hopeful.
+The pass criteria are the state declaration.
+
+### Q2a - the sync watcher
+
+**Decision: a watcher, started as part of the session apply.**
+
+The trigger is the Kubernetes watch API (`kubectl get cm drill-state -n practice-drill --watch`), not polling.
+The API server pushes changes, so there is no interval to tune and no lag on a task pass.
+It is also the primitive every controller is built on, which keeps the tool that teaches Kubernetes built out of Kubernetes.
+
+Getting the repo out avoids a persistent port-forward.
+The workspace lives on the PVC inside the pod, so the laptop cannot bundle a directory it cannot see, and holding a port-forward open for a whole drill means reconnect logic.
+Instead the bundle is created in the pod and streamed out in one shot:
+
+```bash
+kubectl exec -n git deploy/git-server -- \
+  git -C /srv/repo bundle create - --all  >  drill-progress/03/workspace.bundle
+```
+
+`git bundle create -` writes to stdout and `kubectl exec` streams it back.
+The repo is a Helm chart, so a full bundle each time is a few hundred KB and not worth making incremental.
+
+All writes are atomic: write a temp file, then rename.
+A crash mid-sync leaves the previous good save rather than a half-written one, because losing one task is annoying and a corrupt save file is losing everything.
+
+The watcher's lifecycle falls out of the declarative apply rather than being special-cased.
+`make scenario N=03` starts it and writes a PID file; re-running is a no-op if the PID is live; a dead watcher is restarted by converge exactly like a dead pod; it syncs immediately on start to catch up on anything missed while it was down; and `scenario-clean` and `down` stop it.
+
+**Caveat.** The bundle captures everything that lives in git and nothing that does not.
+Scenario 03 is entirely chart-driven, so the bundle is complete for the slice.
+A scenario that creates state imperatively (scenario 02's HPA via `kubectl autoscale`, say) lives only in the cluster and would need a declared `resume` block per task in the answers TOML.
+That is the per-scenario variation this design already expects, and it does not affect the 03 slice.
 
 **Nothing in `drill-progress/` reads like a report card.**
 The log records attempts, not judgments: what you typed, what the grader said, what the canonical answer was.
@@ -183,10 +216,6 @@ If `make down` destroys the cluster while a PVC still exists, the EBS volume can
 Teardown must delete the PVC before the cluster goes.
 
 ## Open questions
-
-**Q2a - checkpoint mechanism.** The GUI is in-cluster and cannot write to the laptop, so sync only happens when the CLI runs.
-A normal teardown is fine; an unexpected cluster loss (spot eviction, console deletion) loses everything since the last sync.
-Options: a watcher process the CLI runs during an active drill that re-bundles on every task pass, versus explicit `make drill-save` checkpoints plus automatic-on-teardown.
 
 **Q3 - GUI access.** `kubectl port-forward` versus Ingress/ALB.
 Note the drill GUI must not use port 8080, which `make argo-ui` already uses.
