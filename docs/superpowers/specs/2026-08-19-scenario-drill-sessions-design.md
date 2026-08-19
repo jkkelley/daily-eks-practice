@@ -116,8 +116,26 @@ Rejected: swapping two Applications in and out per drill, retiring the GitHub Ap
 All three manage a conflict that does not need to exist.
 
 Cluster git is created at `make up` as permanent platform infrastructure, in its own `git` namespace, via the Terraform `platform` module with a config toggle.
-It is seeded by an init container that clones from GitHub, using the same token mechanism `scripts/argo-repo.py` already uses to give Argo read access to a private repo.
-Init containers run to completion before any main container starts, so the clone cannot race the git server.
+
+**Seeding: amended 2026-08-19.**
+This paragraph originally said the repo is seeded by an init container that clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses.
+That is superseded by a standing rule: **the drill never contacts github.com, and everything Argo CD reads comes from the local repo by way of the cluster.**
+
+Two reasons the original could not stand.
+It cannot work: `scripts/argo-repo.py` is a script the user runs _after_ apply, so Terraform has no token to give an init container, and a private repo would fail the first apply.
+It is also more mechanism than the problem needs: the files are already on the laptop, so reaching out to a remote to fetch a copy of them is a round trip with a credential attached for no gain.
+
+What replaces it: the init container runs `git init --bare` only, and `make git-seed` streams `git bundle create - --all` from the local repo into the pod over `kubectl exec`.
+That one primitive is used inward to seed and outward to save drill progress, so there is no second mechanism.
+It removes the PAT from the cluster, removes the dependency on GitHub being reachable from a private subnet, and seeds exactly what is on disk rather than whatever was last pushed.
+
+**Self-contained is not simulated.** The in-cluster server runs genuine git; Argo does a genuine clone and a genuine sync.
+Only the location of the remote changes, from `github.com` to `git-server.git.svc.cluster.local`.
+If the GitOps step were faked, the scenario would be teaching a simulation of the skill instead of the skill.
+
+The ordering guarantee the init container provided is preserved by the readiness probe described below, which is strictly stronger: an init container only orders the _clone_ against the server starting, while the probe orders Argo's first read against the repo actually being complete.
+
+See "The self-contained git rule" in `docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md` for what the rule forbids and, equally, what it does not.
 
 There is therefore **one Argo Application, permanently**, pointing at cluster git.
 Nothing to swap, no second Application, no conflict to guard.
@@ -371,7 +389,10 @@ Starting scenario 05 while 03 is open refuses, because scenarios mutate the same
 Grader unit tests over alias expansion and semantic parsing, which are pure functions needing no cluster.
 Answer-key generator tests asserting mixed-mode output for the unported eleven is byte-identical to today's file.
 `make -f Makefile.test test` must keep passing.
-A spike to confirm Argo CD will clone from cluster git over the chosen protocol, before committing to the design.
+Confirmation that Argo CD will clone from cluster git over the chosen protocol.
+**Amended 2026-08-19:** this originally called for a standalone spike run before committing to the design.
+It is instead an acceptance test on kind against the manifests that ship, because a negative result never invalidated the design, it only ever changed which container serves the repo, and a throwaway spike would have built the same manifest twice.
+The plan carries a ranked fallback ladder so a failure is a menu pick rather than a redesign.
 Live verification by actually drilling scenario 03, which is the point of the vertical slice.
 
 ## Repo rules this must respect

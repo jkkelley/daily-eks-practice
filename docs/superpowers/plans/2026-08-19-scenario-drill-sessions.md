@@ -28,17 +28,40 @@ Copied verbatim from the spec and `CLAUDE.md`. Every task's requirements implici
 - Ports already taken: `make argo-ui` uses 8080, `make grafana-ui` uses 3000. The drill GUI uses **8090**.
 - Local tooling confirmed present: `kind` (/usr/local/bin/kind), `minikube`, `kubectl`, `podman` 4.9.3, `node` v20.20.2, `npm`, `python3` 3.12.3, `jq`, `tmux`. **`helm` is NOT installed on the host** and must run in Podman via `docker.io/alpine/helm:latest`.
 
-## One deviation from the spec
+## The self-contained git rule
 
-**Cluster git is seeded by streaming a bundle in, not by an init container cloning GitHub.**
+**The drill never contacts github.com. Everything Argo CD reads comes from the local repo, via the cluster.**
 
-This contradicts the spec and the spec should be amended once Phase 3 lands.
+This is a standing rule, not a preference, and it supersedes the spec's Q1 seeding sentence.
+The spec must be amended to match.
 
-Q1 says the init container clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses.
-That mechanism is a script the user runs after apply, so Terraform cannot supply the token at init-container time, and a private repo would make the first apply fail.
-Instead the init container runs `git init --bare` only, and a new `make git-seed` target streams `git bundle create - --all` from the local repo into the pod.
-This removes the PAT from the cluster entirely, removes the dependency on GitHub being reachable from a private subnet, and reuses the exact primitive the sync watcher already needs, just in the other direction.
+**"Self-contained" is not "simulated."** The in-cluster server runs genuine git and Argo CD does a genuine clone and a genuine sync.
+Nothing here is a mock.
+What changes is the location of the remote, from `github.com` to `git-server.git.svc.cluster.local`, and nothing else.
+The distinction is the whole learning value: if the GitOps step were faked, scenario 03 would be teaching a simulation of a skill instead of the skill.
+
+**How it works.** The init container runs `git init --bare` only.
+A `make git-seed` target streams `git bundle create - --all` from the local repo into the pod over `kubectl exec`.
+That one primitive, `git bundle`, is used inward to seed and outward to save progress, so there is no second mechanism to build or maintain.
+
+**Why the spec's version cannot work anyway.** Q1 says the init container clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses.
+That mechanism is a script the user runs _after_ apply, so Terraform cannot supply the token at init-container time, and a private repo would make the first apply fail.
+Seeding from the laptop removes the PAT from the cluster entirely, removes the dependency on GitHub being reachable from a private subnet, and seeds exactly what is on disk rather than whatever was last pushed.
 The readiness gate the spec actually cared about is preserved and strengthened: the probe requires a `.seeded` marker, so until the bundle lands the Service has no endpoints and Argo retries cleanly instead of syncing a half-served repo.
+
+**What the rule forbids:**
+
+- Argo CD reading any repoURL outside the cluster. This deletes rung 5 from Task 3.2's fallback ladder rather than merely deprioritising it, so a failure at rung 4 cannot slide back into the thing the rule rejects.
+- A GitHub credential in the cluster. The drill path never calls `make argo-repo`.
+- `scripts/gen-argocd-app.py` reading the user's git remote on the drill path. It generates from `cluster_git_url`.
+
+**What the rule does not forbid**, stated so nobody over-applies it: container images still come from `docker.io` and `ghcr.io`, and the kind acceptance test pulls Argo's install manifest from `raw.githubusercontent.com`.
+Those are network but they are not git and they are not the sync path.
+The rule governs what Argo reads, not whether the cluster has egress.
+
+**`scripts/argo-repo.py` is kept, not deleted.** It exists for `scenarios/09-gitops-argocd.md`, which teaches manual PAT-and-UI repo registration against real GitHub, and that lesson ships today.
+The drill simply never calls it.
+Whether 09's lesson survives contact with cluster git is a decision for when 09 is ported, not now.
 
 ## Where each language runs, and why
 
@@ -70,24 +93,30 @@ Task 1.1 Steps 6-7 build a shared fixture set of deliberately-invalid TOML, and 
 
 Each phase is an independently reviewable deliverable and is intended to become one work-order ticket under a single epic.
 
-| Phase | Deliverable                                               | Cost                | Needs approval |
-| ----- | --------------------------------------------------------- | ------------------- | -------------- |
-| 0     | Local sandbox harness + the Argo-clones-cluster-git spike | $0 (kind)           | no             |
-| 1     | Answers TOML as the single source of truth                | $0                  | no             |
-| 2     | The grader                                                | $0 (Podman)         | no             |
-| 3     | Terraform: cluster git                                    | $0 (ministack)      | no             |
-| 4     | Terraform: ALB, shared IngressGroup, source-IP SG         | $0 (ministack)      | no             |
-| 5     | The mothership GUI - **first visual**                     | $0 (Podman + kind)  | no             |
-| 6     | Session lifecycle, watcher, Makefile handover             | $0 (kind)           | no             |
-| 7     | Live verification on real EKS                             | ~$1 for a 30h cycle | **YES**        |
+| Phase | Deliverable                                       | Cost                | Needs approval |
+| ----- | ------------------------------------------------- | ------------------- | -------------- |
+| 0     | Local sandbox harness                             | $0 (kind)           | no             |
+| 1     | Answers TOML as the single source of truth        | $0                  | no             |
+| 2     | The grader                                        | $0 (Podman)         | no             |
+| 3     | Terraform: cluster git                            | $0 (ministack)      | no             |
+| 4     | Terraform: ALB, shared IngressGroup, source-IP SG | $0 (ministack)      | no             |
+| 5     | The mothership GUI - **first visual**             | $0 (Podman + kind)  | no             |
+| 6     | Session lifecycle, watcher, Makefile handover     | $0 (kind)           | no             |
+| 7     | Live verification on real EKS                     | ~$1 for a 30h cycle | **YES**        |
 
-**Phase 0 gates everything.** If Argo CD will not clone from an in-cluster git server, Phases 3, 5 and 6 change shape and this plan gets revised before any of them start.
+**The one live risk is in Task 3.2**, not in Phase 0. Whether Argo CD will clone from an in-cluster git server over plain HTTP is unproven, and it is the assumption the whole GitOps half rests on. It is validated as Task 3.2's acceptance test on kind, at $0, against the manifests that actually ship. Task 3.2 carries a ranked fallback ladder so a failure there is a menu pick rather than a redesign. See "The cluster git protocol risk" inside Task 3.2.
 
 **First visual is Phase 5, Task 5.3**, served from a Vite dev server in Podman on a probed port in 30000+, per the container-sandbox skill's single-container preview pattern. No cluster and no AWS needed to look at it.
 
 ---
 
-## Phase 0: Local sandbox harness and the Argo spike
+## Phase 0: Local sandbox harness
+
+This phase used to contain a second task, a standalone spike that stood a git server up on kind, pointed Argo at it, recorded a verdict and then deleted itself. It was cut deliberately.
+
+The reasoning: the spike built the same manifest Task 3.2 builds, proved it, threw it away, and then Task 3.2 rebuilt it in Terraform. Writing it twice bought nothing, because a negative result never killed the design - it only ever meant "swap the container." A gate is the wrong instrument for a risk whose worst case is a substitution.
+
+What the spike was genuinely protecting against is preserved and strengthened, not dropped. It moved into Task 3.2 as an acceptance test rather than a prerequisite, so the validation runs on kind at $0 against the manifests that actually ship, and the fallback options are written down in advance instead of being researched at the moment of failure. See "The cluster git protocol risk" in Task 3.2.
 
 ### Task 0.1: Kind sandbox harness and its documentation
 
@@ -329,217 +358,6 @@ Kind clusters survive reboots and each one holds a container plus its images. Al
 git add scripts/kind-sandbox.sh tests/kind-sandbox.sh Makefile.test .gitignore .claude/skills/container-sandbox/SKILL.md
 git commit -m "test: kind sandbox harness for \$0 local cluster testing"
 ````
-
----
-
-### Task 0.2: The Argo-clones-cluster-git spike
-
-The entire GitOps half of the design rests on Argo CD being able to clone from a git server running inside the same cluster over plain HTTP with no credentials. This task proves or disproves that on kind before any Terraform is written. Its output is a decision record, not code that ships.
-
-**Files:**
-
-- Create: `docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md`
-- Create: `spike/argo-cluster-git/git-server.yaml` (throwaway; deleted in Step 8)
-- Create: `spike/argo-cluster-git/application.yaml` (throwaway; deleted in Step 8)
-
-**Interfaces:**
-
-- Consumes: `scripts/kind-sandbox.sh` from Task 0.1.
-- Produces: a written verdict that Phase 3 depends on, plus the exact confirmed values for: the git protocol (`http` dumb vs `git-http-backend` smart), the in-cluster `repoURL` Argo accepts, and whether `git update-server-info` is required per push.
-
-- [ ] **Step 1: Bring the sandbox up and install Argo CD**
-
-```bash
-make -f Makefile.test kind-up
-export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
-```
-
-Expected: `deployment "argocd-repo-server" successfully rolled out`.
-
-- [ ] **Step 2: Stand up a dumb-HTTP git server serving this repo**
-
-Create `spike/argo-cluster-git/git-server.yaml`. Dumb HTTP is tried first because it is a static nginx serving a directory, which is the smallest thing that could possibly work and has no CGI to configure.
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: git
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: git-nginx
-  namespace: git
-data:
-  default.conf: |
-    server {
-      listen 8080;
-      root /srv;
-      autoindex on;
-      location / {
-        try_files $uri $uri/ =404;
-      }
-    }
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: git-server
-  namespace: git
-spec:
-  replicas: 1
-  selector:
-    matchLabels: { app: git-server }
-  template:
-    metadata:
-      labels: { app: git-server }
-    spec:
-      initContainers:
-        - name: init-repo
-          image: alpine/git:latest
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -e
-              git init --bare /srv/repo.git
-              touch /srv/repo.git/git-daemon-export-ok
-              git -C /srv/repo.git update-server-info
-          volumeMounts:
-            - { name: repo, mountPath: /srv }
-      containers:
-        - name: nginx
-          image: nginx:1.27-alpine
-          ports:
-            - { name: http, containerPort: 8080 }
-          volumeMounts:
-            - { name: repo, mountPath: /srv }
-            - { name: conf, mountPath: /etc/nginx/conf.d }
-          readinessProbe:
-            httpGet: { path: /repo.git/info/refs, port: http }
-            initialDelaySeconds: 2
-            periodSeconds: 3
-      volumes:
-        - { name: repo, emptyDir: {} }
-        - { name: conf, configMap: { name: git-nginx } }
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: git-server
-  namespace: git
-spec:
-  selector: { app: git-server }
-  ports:
-    - { name: http, port: 80, targetPort: http }
-```
-
-Apply it and wait:
-
-```bash
-kubectl apply -f spike/argo-cluster-git/git-server.yaml
-kubectl -n git rollout status deploy/git-server --timeout=120s
-```
-
-- [ ] **Step 3: Seed the bare repo by streaming a bundle in**
-
-This is the mechanism Phase 3 will ship, so proving it here proves two things at once.
-
-```bash
-POD=$(kubectl -n git get pod -l app=git-server -o name | head -1)
-git bundle create - --all \
-  | kubectl -n git exec -i "$POD" -c nginx -- /bin/sh -c 'cat > /tmp/seed.bundle'
-kubectl -n git exec "$POD" -c nginx -- /bin/sh -c '
-  apk add --no-cache git >/dev/null 2>&1
-  git -C /srv/repo.git fetch /tmp/seed.bundle "refs/heads/*:refs/heads/*"
-  git -C /srv/repo.git symbolic-ref HEAD refs/heads/main
-  git -C /srv/repo.git update-server-info
-  ls /srv/repo.git/info/refs'
-```
-
-Expected: the final `ls` prints `/srv/repo.git/info/refs`. Record whether `apk add git` was needed, because if it was, the shipped image must bundle git rather than install it at runtime.
-
-- [ ] **Step 4: Point an Argo Application at it**
-
-Create `spike/argo-cluster-git/application.yaml`:
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: spike-practice-app
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: http://git-server.git.svc.cluster.local/repo.git
-    targetRevision: main
-    path: helm/practice-app
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: spike-app
-  syncPolicy:
-    syncOptions:
-      - CreateNamespace=true
-```
-
-```bash
-kubectl apply -f spike/argo-cluster-git/application.yaml
-sleep 20
-kubectl -n argocd get application spike-practice-app \
-  -o jsonpath='{.status.sync.status}{"\n"}{.status.conditions}{"\n"}'
-```
-
-Expected on success: sync status is `OutOfSync` (not `Unknown`) and `.status.conditions` is empty, meaning Argo cloned and rendered the chart but has not synced because sync is manual.
-
-- [ ] **Step 5: Read the repo-server logs, which is where the truth is**
-
-```bash
-kubectl -n argocd logs deploy/argocd-repo-server --tail=60 | grep -iE 'git|clone|fail|error'
-```
-
-Expected on success: a successful `git ls-remote` / fetch against the in-cluster URL. Expected on failure: `dumb http transport does not support shallow capabilities` or similar, which is the known failure mode of dumb HTTP and the trigger for Step 6.
-
-- [ ] **Step 6: If dumb HTTP failed, retry with smart HTTP**
-
-Argo CD clones with `--depth 1` by default, and the dumb HTTP transport does not support shallow fetch. If Step 5 shows that error, replace the nginx container in `git-server.yaml` with `git http-backend` behind `fcgiwrap`, or the simpler route: swap the whole container for `docker.io/rockstorm/git-server` or an image running `git daemon`. Whichever works, re-run Steps 3 to 5 and record which one.
-
-Fallback if smart HTTP is also a fight: set `spec.source.directory` aside and test whether Argo's `ARGOCD_GIT_ATTEMPTS`/no-shallow behaviour can be configured via the `argocd-cm` key `reposerver.git.request.timeout` and the repo-server `--disable-shallow-clone`-equivalent. Record what was needed.
-
-- [ ] **Step 7: Write the decision record**
-
-Create `docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md` covering, with the actual command output pasted in:
-
-- Verdict: does Argo CD clone from in-cluster git, yes or no.
-- The exact working `repoURL`.
-- Which protocol won (dumb HTTP, smart HTTP via `git-http-backend`, or `git://`), and the error that ruled the others out.
-- Whether `git update-server-info` must run after every push, which determines whether Phase 3 needs a post-receive hook.
-- Whether the serving image must ship `git` on PATH.
-- Argo CD version tested, and the kind node image version.
-- Anything that would change the Phase 3 or Phase 6 design.
-
-- [ ] **Step 8: Tear the spike down**
-
-A spike's output is an answer. The manifests do not ship.
-
-```bash
-rm -rf spike/
-make -f Makefile.test kind-down
-```
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md
-git commit -m "docs: record the argo-clones-cluster-git spike result"
-```
-
-- [ ] **Step 10: Stop and report**
-
-If the verdict is negative, do not start Phase 3. Report the finding and the options, and let the user pick a new direction. If positive, continue.
 
 ---
 
@@ -2886,9 +2704,16 @@ And add a new block after `# ---- practice app plumbing ----`:
 drill_ingress_group_name = "daily-eks-practice-ops"  # any name; all ops Ingresses must match it
 # WHO CAN REACH THE DRILL GUI. This is an unauthenticated web terminal running as
 # cluster-admin, so leaving it open is not a mild misconfiguration - it is a remote
-# shell on your cluster. Set it to YOUR public /32 and update it when your IP moves.
+# shell on your cluster.
+#
+# The single entry "auto" resolves to your current public /32 every time bootstrap.py
+# runs, so a DHCP lease change can never silently lock you out. Prefer it.
+# A literal CIDR still works and is what you want for a static IP or for CI, where
+# "your IP" is not a meaningful idea.
+#   drill_allowed_cidrs = ["auto"]              <- resolved at plan time
+#   drill_allowed_cidrs = ["203.0.113.10/32"]   <- pinned
 # Find yours with: curl -s https://checkip.amazonaws.com
-drill_allowed_cidrs = ["203.0.113.10/32"]   # generic default: ["<your-public-ip>/32"]; NEVER ["0.0.0.0/0"]
+drill_allowed_cidrs = ["auto"]   # generic default: ["auto"]; NEVER ["0.0.0.0/0"]
 ```
 
 - [ ] **Step 2: Declare them in the env, with no defaults**
@@ -2954,21 +2779,157 @@ Expected: PASS. It will fail with "No value for required variable" only if the g
 
 - [ ] **Step 8: Tell the user to update their real config**
 
-`scripts/config.toml` is git-ignored and hand-maintained. Print the three lines they need to add and their own public IP:
+`scripts/config.toml` is git-ignored and hand-maintained. Print the three lines they need to add:
 
 ```bash
 echo "Add to the [common] table in scripts/config.toml:"
 echo "  enable_cluster_git       = true"
 echo "  drill_ingress_group_name = \"daily-eks-practice-ops\""
-echo "  drill_allowed_cidrs      = [\"$(curl -s https://checkip.amazonaws.com | tr -d '\n')/32\"]"
+echo "  drill_allowed_cidrs      = [\"auto\"]"
 ```
+
+Print `"auto"` rather than resolving their address here. The resolver added in Steps 9 to 11 does it at plan time, and echoing a personal IP into a terminal transcript is a leak the sentinel exists to avoid.
 
 Do not write to `scripts/config.toml` without asking. It holds their account-specific values.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Write the failing test for the `"auto"` resolver**
+
+Create `tests/test_resolve_auto_cidrs.py`:
+
+```python
+"""bootstrap.py resolves the "auto" CIDR sentinel to the caller's public /32.
+
+The drill ALB's allow list is the only control on an unauthenticated cluster-admin
+terminal, so a stale entry is a lockout and a wrong entry is an exposure. These tests
+pin the three behaviours that matter: literals are never touched, "auto" becomes a
+/32, and a failed lookup is loud rather than silently wide open.
+"""
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import bootstrap  # noqa: E402
+
+
+class ResolveAutoCidrs(unittest.TestCase):
+    def test_literal_cidrs_pass_through_untouched(self):
+        cfg = {"drill_allowed_cidrs": ["203.0.113.10/32", "198.51.100.0/24"]}
+        bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg["drill_allowed_cidrs"], ["203.0.113.10/32", "198.51.100.0/24"])
+
+    def test_auto_becomes_the_public_slash_32(self):
+        cfg = {"drill_allowed_cidrs": ["auto"]}
+        with mock.patch.object(bootstrap, "public_ip", return_value="203.0.113.10"):
+            bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg["drill_allowed_cidrs"], ["203.0.113.10/32"])
+
+    def test_auto_mixed_with_literals_resolves_only_the_sentinel(self):
+        cfg = {"drill_allowed_cidrs": ["auto", "198.51.100.0/24"]}
+        with mock.patch.object(bootstrap, "public_ip", return_value="203.0.113.10"):
+            bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg["drill_allowed_cidrs"], ["203.0.113.10/32", "198.51.100.0/24"])
+
+    def test_lookup_failure_exits_instead_of_dropping_the_entry(self):
+        cfg = {"drill_allowed_cidrs": ["auto"]}
+        with mock.patch.object(bootstrap, "public_ip", return_value=None):
+            with self.assertRaises(SystemExit):
+                bootstrap.resolve_auto_cidrs(cfg)
+
+    def test_key_absent_is_a_no_op(self):
+        cfg = {"region": "us-east-2"}
+        bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg, {"region": "us-east-2"})
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+The fourth test is the important one. If a lookup failure quietly dropped `"auto"` from the list, the allow list would become empty; if it fell back to a wildcard, it would become open. Both are worse than refusing to run.
+
+- [ ] **Step 10: Run it to verify it fails**
 
 ```bash
-git add scripts/config.example.toml terraform/
+python3 -m unittest tests.test_resolve_auto_cidrs -v
+```
+
+Expected: FAIL with `AttributeError: module 'bootstrap' has no attribute 'resolve_auto_cidrs'`.
+
+- [ ] **Step 11: Implement the resolver**
+
+In `scripts/bootstrap.py`, add after `deep_merge()`:
+
+```python
+def public_ip() -> str | None:
+    """This machine's public IPv4 as the internet sees it, or None.
+
+    Uses AWS's checkip because the tfvars this feeds are consumed by an AWS security
+    group, so the address that matters is the one AWS observes. Stdlib only - the repo
+    deliberately has no Python dependencies.
+    """
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("https://checkip.amazonaws.com", timeout=10) as r:
+            ip = r.read().decode().strip()
+    except Exception:
+        return None
+    try:
+        ipaddress.IPv4Address(ip)
+    except ValueError:
+        return None
+    return ip
+
+
+def resolve_auto_cidrs(merged: dict) -> None:
+    """Replace the "auto" sentinel in drill_allowed_cidrs with this machine's /32.
+
+    Residential addresses are DHCP-assigned, so a pinned literal goes stale on a lease
+    change and locks you out of your own drill with no error message - the browser just
+    hangs. Resolving at plan time means the allow list cannot drift from reality.
+
+    Literals are left alone: a static IP or a CI runner has no meaningful "your IP".
+    """
+    cidrs = merged.get("drill_allowed_cidrs")
+    if not isinstance(cidrs, list) or "auto" not in cidrs:
+        return
+    ip = public_ip()
+    if ip is None:
+        sys.exit(
+            "bootstrap: drill_allowed_cidrs is [\\"auto\\"] but your public IP could not be "
+            "determined (no network?). Set a literal CIDR in scripts/config.toml, or retry."
+        )
+    merged["drill_allowed_cidrs"] = [f"{ip}/32" if c == "auto" else c for c in cidrs]
+    log(f"bootstrap: drill_allowed_cidrs \\"auto\\" resolved to your current public /32")
+```
+
+Add `import ipaddress` to the imports at the top of the file.
+
+Note the log line does not print the address. It goes into the tfvars, which are git-ignored, and terminal output is the more exposed of the two.
+
+Call it in `main()` immediately after `merged` is built and validated, so both the `--print` path and the tfvars write see resolved values:
+
+```python
+    if not merged:
+        sys.exit(f"bootstrap: no config found for env '{env}'")
+
+    resolve_auto_cidrs(merged)
+```
+
+- [ ] **Step 12: Run the test to verify it passes**
+
+```bash
+python3 -m unittest tests.test_resolve_auto_cidrs -v
+```
+
+Expected: 5 tests, PASS. Only `test_auto_becomes_the_public_slash_32` and the mixed case touch the network, and both mock it, so the suite stays offline.
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add scripts/config.example.toml scripts/bootstrap.py tests/test_resolve_auto_cidrs.py terraform/
 git commit -m "feat: config values for cluster git and the drill ALB"
 ```
 
@@ -2976,7 +2937,30 @@ git commit -m "feat: config values for cluster git and the drill ALB"
 
 ### Task 3.2: The cluster git server
 
-An nginx pod serving a bare repo over the protocol Task 0.2 proved, in namespace `git`, with a readiness probe that only passes once the repo is genuinely seeded.
+A pod serving a bare repo in namespace `git`, with a readiness probe that only passes once the repo is genuinely seeded, plus the kind test that proves Argo CD can actually read it.
+
+**The cluster git protocol risk.**
+This task carries the one genuinely unproven assumption in the plan: that Argo CD will clone from a git server inside the same cluster, over plain HTTP, with no credentials.
+
+Why it is not obvious. Argo's repo-server clones with `--depth 1`. Shallow fetch is a capability of the _smart_ HTTP transport. A bare repo served by static nginx is _dumb_ HTTP, which does not implement it, so Step 7 may fail with `dumb http transport does not support shallow capabilities` or similar.
+
+Why it is not a gate. A failure never invalidates the design, it only changes which container serves the repo. So instead of proving it in a throwaway spike first, Step 7 proves it on kind against the manifests that ship, and the alternatives are ranked here in advance:
+
+| #   | Option                                                        | Fidelity                               | Cost of switching                                       | What it costs you                                          |
+| --- | ------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| 1   | Dumb HTTP, static nginx over a bare repo (what Step 1 writes) | full GitOps                            | baseline                                                | may fail on Argo's `--depth 1` shallow clone               |
+| 2   | Smart HTTP: `git http-backend` CGI behind `fcgiwrap`          | full GitOps                            | one ConfigMap and one image swap                        | nothing functional; more container config to read          |
+| 3   | `git daemon` on 9418, `git://` repoURL                        | full GitOps                            | one image swap, plus confirming Argo accepts the scheme | nothing, if Argo takes `git://`                            |
+| 4   | Gitea with the sqlite backend                                 | full GitOps **and a browsable web UI** | ~150MB image and a handful of env vars                  | more moving parts; arguably an upgrade for a learning repo |
+| 5   | No Argo; the drill server runs `helm upgrade` on submit       | **simulated**                          | rewrites Phase 6                                        | the entire GitOps lesson                                   |
+
+Work down the ladder in order.
+
+Rung 5 is the floor, not a peer of the others: there are three better rungs above it and it is the only one that stops teaching GitOps. Do not reach for it because it is quick.
+
+**"Argo reads GitHub directly" is deliberately absent from this ladder.** It was rung 5 in an earlier draft and was deleted, not demoted, because the self-contained git rule at the top of this plan forbids it. Leaving it on the ladder would mean a failure at rung 4 could slide straight back into the thing the rule rejects. If every rung here fails, that is a conversation with the user, not a licence to point Argo at github.com.
+
+If the ladder is entered at all, record which rung won and why in a comment at the top of `cluster-git.tf`, and report it to the user before continuing to Task 3.3, because rungs 3 to 5 change `cluster_git_url` and therefore Task 3.3's Argo Application.
 
 **Files:**
 
@@ -2986,7 +2970,7 @@ An nginx pod serving a bare repo over the protocol Task 0.2 proved, in namespace
 
 **Interfaces:**
 
-- Consumes: `enable_cluster_git` from Task 3.1; the protocol verdict from Task 0.2.
+- Consumes: `enable_cluster_git` from Task 3.1; `scripts/kind-sandbox.sh` from Task 0.1.
 - Produces:
   - Namespace `git`, a `git-server` Deployment, Service `git-server` on port 80, PVC `git-repo`, ConfigMap `git-nginx`.
   - Platform module outputs: `cluster_git_url` (string, `http://git-server.git.svc.cluster.local/repo.git`, empty when disabled), `cluster_git_namespace` (string), `cluster_git_deployment` (string). Stack forwards all three; the env re-exports them so `make git-seed` can find the pod without hardcoding names.
@@ -3159,7 +3143,7 @@ resource "kubectl_manifest" "git_service" {
 }
 ```
 
-**If Task 0.2 concluded dumb HTTP does not work**, replace the `nginx` container with whatever the spike proved, keep the `/healthz`-from-disk readiness gate (adapt the path), and note the change in a comment citing the spike doc.
+This is rung 1 of the ladder. Do not pre-emptively climb it: write the simple thing, and let Step 7 tell you whether it holds. If Step 7 sends you up the ladder, keep the `/healthz`-from-disk readiness gate no matter which rung you land on (adapt the path if the new server has a different docroot), because that gate is what stops Argo syncing a half-served repo and it is independent of the protocol.
 
 - [ ] **Step 2: Add the outputs**
 
@@ -3222,7 +3206,74 @@ kubectl -n git get endpoints git-server
 
 Expected: the Deployment rolls out, and `endpoints` shows **no addresses**, because `/healthz` 503s until `.seeded` exists. That empty endpoint list is the whole point of the probe - confirm it before moving on.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Seed it, and prove Argo CD can read it - the acceptance test**
+
+Step 6 proved Kubernetes accepts the manifests. This proves the thing the manifests exist for. This is the assumption named in "The cluster git protocol risk" above, and it is the gate on Task 3.3.
+
+Still on the same kind cluster:
+
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
+```
+
+Seed the bare repo by streaming a bundle in. This is the mechanism Task 3.3 ships, so running it here proves the server and the seeding path in one pass:
+
+```bash
+POD=$(kubectl -n git get pod -l app=git-server -o name | head -1)
+git bundle create - --all \
+  | kubectl -n git exec -i "$POD" -c nginx -- /bin/sh -c 'cat > /tmp/seed.bundle'
+kubectl -n git exec "$POD" -c nginx -- /bin/sh -c '
+  command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1
+  git -C /srv/repo.git fetch --force /tmp/seed.bundle "refs/heads/*:refs/heads/*"
+  git -C /srv/repo.git symbolic-ref HEAD refs/heads/main
+  git -C /srv/repo.git update-server-info
+  date -u +%Y-%m-%dT%H:%M:%SZ > /srv/repo.git/.seeded'
+kubectl -n git get endpoints git-server
+```
+
+Expected: `endpoints` now shows **one address**. The probe flipping from zero to one endpoints on the `.seeded` marker is the ordering guarantee working. Record whether `apk add git` was needed, because if it was, the shipped image must bundle `git` rather than install it at runtime on a cluster that may have no egress.
+
+Now point an Argo Application at it:
+
+```bash
+kubectl apply -f - <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cluster-git-acceptance
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: http://git-server.git.svc.cluster.local/repo.git
+    targetRevision: main
+    path: helm/practice-app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: acceptance-app
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+YAML
+sleep 20
+kubectl -n argocd get application cluster-git-acceptance \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.conditions}{"\n"}'
+kubectl -n argocd logs deploy/argocd-repo-server --tail=60 | grep -iE 'git|clone|fail|error'
+```
+
+**Expected on success:** sync status is `OutOfSync`, not `Unknown`, and `.status.conditions` is empty. That combination means Argo cloned the repo and rendered the chart, and is only holding back because sync is manual. The repo-server log shows a successful `ls-remote` or fetch against the in-cluster URL.
+
+**Expected on failure:** sync status `Unknown` with a `ComparisonError` condition, and the repo-server log carrying the reason. If that reason mentions shallow capabilities or the dumb transport, go to rung 2 of the ladder, redo Steps 1 and 4 to 7, and record which rung won. Report to the user before starting Task 3.3 if you landed anywhere below rung 2, because rungs 3 to 6 change `cluster_git_url`.
+
+Tear down when the verdict is in:
+
+```bash
+make -f Makefile.test kind-down
+```
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add terraform/modules/platform/cluster-git.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf
@@ -3460,7 +3511,13 @@ def source_repo_url() -> str:
     return repo_https_url()
 ```
 
-Use `source_repo_url()` where `repo_https_url()` is currently called to build `spec.source.repoURL`. Leave `scripts/argo-repo.py` alone: it registers the GitHub credential, which is still needed for the push half of scenarios 09 and 12.
+Use `source_repo_url()` where `repo_https_url()` is currently called to build `spec.source.repoURL`.
+
+Two notes on how this sits with the self-contained git rule at the top of this plan.
+
+The GitHub fallback is not a violation. It is the pre-drill path, reached only when `enable_cluster_git = false`, which is how the repo behaves today for anyone who never turns the drill on. On the drill path the toggle is on and the fallback is unreachable. What the rule forbids is Argo reading GitHub _while a drill is running_, and that cannot happen here.
+
+Leave `scripts/argo-repo.py` alone. It registers the GitHub credential, which is still needed for the push half of scenarios 09 and 12, and `scenarios/09-gitops-argocd.md` teaches that registration as its lesson. The drill simply never calls `make argo-repo`. Deleting the script to satisfy the rule would break a scenario that ships today, in service of a rule about a scenario that does not exist yet.
 
 - [ ] **Step 6: Add the Makefile target and wire the ordering**
 
@@ -3546,6 +3603,22 @@ git commit -m "feat: seed cluster git from the local clone and point Argo CD at 
 One internet-facing ALB shared by every ops UI, restricted to the user's own IP, with a teardown path that does not orphan it.
 
 ### Task 4.1: The shared IngressGroup and the source-IP security group
+
+**Source IP is the only control, deliberately, and here is the trigger to revisit that.**
+
+The spec's Condition 3 says it plainly: without the security group the drill GUI is an unauthenticated web terminal running as `cluster-admin`, reachable by anyone who finds the hostname, over plain HTTP. There is no second layer. That makes the value of `drill_allowed_cidrs` load-bearing in a way a normal firewall rule is not.
+
+Adding application-level auth (a shared secret checked by the Fastify server on every request and websocket upgrade, seeded from `config.toml`) was considered and **deferred** on 2026-08-19. It is cheap, roughly 30 lines in Task 5.1, needs no ACM certificate and no domain, and would turn "found the hostname" into "found the hostname and the token". It was deferred because the deployment target was checked and found to be a residential connection with a **directly assigned** public IPv4 rather than one behind carrier-grade NAT, so the configured `/32` genuinely identifies one machine.
+
+That check is what makes source-IP-only defensible, and it is also exactly what stops being true in these cases. **Add the shared secret before drilling from any of them:**
+
+- A cafe, hotel, airport, or any shared or guest network.
+- A phone tether or any mobile carrier connection, which is almost always carrier-NAT.
+- A corporate network, where the egress IP is the whole company.
+- A commercial VPN exit node, which is shared with every other user of that node.
+- Any second person using this platform, which is also the point where the spec's ALB OIDC growth path stops being premature.
+
+In all of those the allow list stops meaning "my laptop" and starts meaning "everyone sharing this egress address", against a resource whose worst case is a root shell on the cluster.
 
 **Files:**
 
@@ -3673,10 +3746,118 @@ make -f Makefile.test ministack
 
 Expected: the plan FAILS with the precondition message naming `drill_allowed_cidrs`. Restore the real value afterwards. Ask the user before editing `scripts/config.toml`; if they would rather not, note that the guard is untested and say so plainly.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Add `make drill-allow`, the lockout recovery path**
+
+The `"auto"` sentinel from Task 3.1 keeps the allow list fresh at plan time, but it only runs when you plan. If a DHCP lease rotates while the cluster is up, the GUI stops answering mid-drill and the only fix so far is a full `terraform apply` on a billing cluster to change one firewall rule. This target fixes just the rule.
+
+Add to `Makefile`, near the other cluster-side targets, and add `drill-allow` to the `.PHONY` list:
+
+```make
+drill-allow: ## Re-point the drill ALB security group at your CURRENT public IP
+	@$(PYTHON) scripts/drill-allow.py
+```
+
+Create `scripts/drill-allow.py`:
+
+```python
+#!/usr/bin/env python3
+"""Re-point the drill ALB security group at this machine's current public IP.
+
+Residential addresses are DHCP-assigned. When the lease rotates mid-drill the GUI
+simply stops answering - no error, the browser just hangs - and the fix would
+otherwise be a full `terraform apply` on a cluster that is billing by the hour, to
+change one firewall rule. This does only the rule.
+
+Terraform stays the source of truth: the next `make plan` re-reads config.toml,
+re-resolves "auto", and converges to the same place. This is the fast path, not a
+second owner of the resource.
+"""
+import ipaddress
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+from bootstrap import public_ip  # noqa: E402  - single definition, shared
+
+
+def tf_output(name: str) -> str:
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "output", "-raw", name],
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def aws(*args: str) -> dict:
+    cmd = ["aws", *args, "--output", "json"]
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit(f"drill-allow: {' '.join(cmd)} failed:\\n{out.stderr.strip()}")
+    return json.loads(out.stdout) if out.stdout.strip() else {}
+
+
+def main() -> int:
+    sg = tf_output("drill_alb_security_group_id")
+    if not sg:
+        sys.exit("drill-allow: no drill ALB security group in state - is the cluster up?")
+
+    ip = public_ip()
+    if ip is None:
+        sys.exit("drill-allow: could not determine your public IP (no network?).")
+    want = f"{ip}/32"
+
+    desc = aws("ec2", "describe-security-groups", "--group-ids", sg)
+    perms = desc["SecurityGroups"][0]["IpPermissions"]
+    have = {
+        r["CidrIp"]
+        for p in perms
+        if p.get("FromPort") == 80
+        for r in p.get("IpRanges", [])
+    }
+
+    if have == {want}:
+        print(f"drill-allow: already correct, nothing to do ({len(have)} rule)")
+        return 0
+
+    for stale in have - {want}:
+        aws("ec2", "revoke-security-group-ingress", "--group-id", sg,
+            "--protocol", "tcp", "--port", "80", "--cidr", stale)
+        print("drill-allow: revoked a stale rule")
+
+    if want not in have:
+        aws("ec2", "authorize-security-group-ingress", "--group-id", sg,
+            "--protocol", "tcp", "--port", "80", "--cidr", want)
+        print("drill-allow: authorised your current public /32")
+
+    print("drill-allow: done. Terraform will converge to the same state on the next plan.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+Two deliberate choices. It never prints the address, matching Task 3.1's reasoning that terminal output is more exposed than the git-ignored files the value normally lives in. And it revokes stale rules rather than only adding, because an allow list that accumulates every cafe you have ever worked from is not an allow list.
+
+- [ ] **Step 7: Test it without AWS**
+
+There is no cluster, so exercise the failure path and the parsing, which is where the bugs would be:
 
 ```bash
-git add terraform/modules/platform/drill-ingress.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf
+python3 scripts/drill-allow.py
+```
+
+Expected: exits non-zero with `no drill ALB security group in state - is the cluster up?`. That confirms the terraform-output lookup, the guard, and the import of `public_ip` from `bootstrap` all work. The AWS calls themselves are verified in Phase 7 Step 3, which is the first time a real security group exists.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add terraform/modules/platform/drill-ingress.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf scripts/drill-allow.py Makefile
 git commit -m "feat: source-restricted security group for the shared ops ALB"
 ```
 
@@ -5061,35 +5242,235 @@ git commit -m "feat: native Argo CD widget and the reverse proxy for full-app in
 
 **Files:**
 
-- Create: `drill/Containerfile`, `drill/.containerignore`
+- Create: `drill/Containerfile`, `.containerignore` (repo root, because the build context is the repo root)
+- Create: `scripts/drill-image.py`, `.github/workflows/drill-image.yml`
 - Create: `terraform/modules/platform/drill-gui.tf`
-- Modify: `terraform/modules/platform/drill-ingress.tf` (add the Ingress)
-- Test: kind deploy
+- Modify: `terraform/modules/platform/drill-ingress.tf` (add the Ingress), `Makefile` (add `drill-image`), `scripts/config.example.toml`
+- Test: kind deploy, plus the `.containerignore` assertion in Step 3
 
 **Interfaces:**
 
 - Consumes: `drill_alb_security_group_id`, `drill_ingress_group_name` from Task 4.1; `cluster_git_url` from Task 3.2.
 - Produces:
-  - A published image (GHCR, tag from the git sha) running the Fastify server with the built web app.
+  - A **public** GHCR package under the user's own account, tagged with the short git sha and `latest`, running the Fastify server with the built web app.
+  - `make drill-image` (local publish) and `.github/workflows/drill-image.yml` (publish on push to `main`, using the automatic `GITHUB_TOKEN`, no PAT).
   - Namespace `practice-drill`, ServiceAccount `drill` bound to `cluster-admin`, Deployment `drill-gui`, Service on 8090, PVC `drill-workspace` (15 GB gp3), and an Ingress in the shared group.
   - New config value `drill_gui_image` threaded like the others.
 
-- [ ] **Step 1: Write the Containerfile**
+**Where the image is published, and what it costs to get there.**
+
+The image goes to **GHCR under the user's own account**, as a **public** package, referenced through the `drill_gui_image` config value.
+
+Public rather than private is a deliberate choice with a short justification. GHCR packages are private by default even when the repo is public, and a private package means an `imagePullSecret` in the cluster holding a GitHub credential that has to be created, rotated and cleaned up. That cost buys nothing here: the repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image contains nothing a reader could not already read. Public package, no pull secret, one fewer credential in the cluster.
+
+`drill_gui_image` must be a config value, not a constant. `CLAUDE.md` forbids repo-owner strings outside git-ignored `scripts/config.toml`, and `ghcr.io/<username>/...` is exactly such a string.
+
+**No multi-arch.** `ami_type` is `AL2023_x86_64_STANDARD` on `t3.medium`, and Podman on WSL2 builds `amd64` natively. A single-arch build is correct. Do not reach for buildx or `--platform`; if the node group is ever moved to Graviton, that is the moment to revisit and not before.
+
+- [ ] **Step 1: Add `drill_gui_image` to the config template**
+
+In `scripts/config.example.toml`, in the drill platform block added by Task 3.1:
+
+```toml
+# The drill GUI image, in YOUR OWN registry. Published by `make drill-image`
+# (local) or by .github/workflows/drill-image.yml (on push to main).
+# Make the GHCR package PUBLIC so the cluster needs no imagePullSecret - this
+# repo is public and the answer key is already committed, so the image holds
+# nothing that is not already readable.
+drill_gui_image = "ghcr.io/<your-github-username>/daily-eks-practice-drill-gui"
+```
+
+Thread it through env -> stack -> platform exactly as Task 3.1 Steps 2 to 5 did, with no `default =`. The tag is supplied separately at deploy time from the git sha, so this value is the repository path only.
+
+- [ ] **Step 2: Write the Containerfile and a deny-by-default `.containerignore`**
 
 Multi-stage: build the workspaces, then a slim runtime carrying `node`, `tmux`, `git`, `kubectl` and `helm` on PATH, because the terminal is only useful if the tools the card asks for are there. Run as a non-root user with a writable `/workspace`.
 
-- [ ] **Step 2: Write the Kubernetes manifests**
+**The build context is the repo root, not `drill/`.** The grader reads `scenarios/answers/<scenario>.toml` at runtime, and those live outside `drill/`. Widening the context is what makes `.containerignore` security-critical rather than a build-speed optimisation: with the root in scope, `scripts/config.toml` is in scope, and that file holds the AWS account id, the profile name and the operator's public IP. Baking it into a **public** image would publish all three.
+
+So `.containerignore` denies everything and allows two paths, rather than listing things to exclude:
+
+```
+# Deny by default. An exclude-list leaks the next secret file somebody adds;
+# an allow-list cannot. Only these two trees have any business in the image.
+*
+!drill/
+!scenarios/answers/
+```
+
+Create it at the repo root as `.containerignore`, not under `drill/`, because that is where the context now is.
+
+- [ ] **Step 3: Prove the ignore file actually holds**
+
+An allow-list `.containerignore` is worth nothing unproven, and this is the one build failure that ships a credential rather than breaking a pipeline.
+
+```bash
+podman build -t localhost/drill-gui:dev -f drill/Containerfile .
+podman run --rm --entrypoint /bin/sh localhost/drill-gui:dev -c \
+  'ls /app/scripts/config.toml /app/.kubeconfig-daily-eks-practice 2>&1; ls /app/scenarios/answers/'
+```
+
+Expected: both secret paths report `No such file or directory`, and `03.toml` is listed. If `config.toml` is present, stop and fix `.containerignore` before pushing anything anywhere.
+
+- [ ] **Step 4: Authenticate to GHCR, preferring the path with no token to store**
+
+Three ways in, in order of preference. Take the first that works and record which one in the commit message.
+
+**4a - extend the `gh` login the repo already relies on.** This is the default. It adds the `write:packages` scope to the OAuth token `gh` already holds, so there is no token to create, paste, store or rotate, and `gh` keeps it out of any file in this repo. `scripts/argo-repo.py` already depends on `gh auth token` working, so if this repo functions at all, this path is available.
+
+```bash
+gh auth refresh -h github.com -s write:packages
+gh auth token | podman login ghcr.io -u "$(gh api user -q .login)" --password-stdin
+```
+
+Expected: `Login Succeeded!`. If `gh auth refresh` opens a browser, that is normal - it is re-consenting the existing login with one more scope.
+
+**4b - a classic personal access token.** Use this when `gh` is unavailable, or when the refresh is refused (some org SSO configurations block scope changes on an existing grant). Fine-grained tokens are not a reliable substitute here; GHCR writes expect a classic token, so do not spend time fighting a fine-grained one.
+
+Give the user these steps verbatim rather than paraphrasing, because the settings page is easy to land on the wrong version of:
+
+1. Go to `https://github.com/settings/tokens` and confirm the heading says **Tokens (classic)**. If it says "Fine-grained tokens", switch tabs.
+2. **Generate new token** -> **Generate new token (classic)**.
+3. Note: `daily-eks-practice drill GUI image push`.
+4. Expiration: 90 days. Not "no expiration" - this token can publish packages under their account.
+5. Scopes: tick **`write:packages`** only. It auto-selects `read:packages` and `repo`; leave those, untick everything else.
+6. **Generate token**, then copy it. GitHub shows it exactly once.
+7. Log in without the token ever touching a file in this repo or a shell history entry:
+
+```bash
+read -rsp "GHCR token: " GHCR_TOKEN && echo
+echo "$GHCR_TOKEN" | podman login ghcr.io -u <your-github-username> --password-stdin
+unset GHCR_TOKEN
+```
+
+`read -rs` keeps it off the screen, and because it is never typed as an argument it never reaches `~/.zsh_history`. Do not put this token in `scripts/config.toml`; that file is read by `bootstrap.py` and written into `config.auto.tfvars.json`, and a registry credential has no business in Terraform state.
+
+**4c - GitHub Actions, which needs no token at all.** Added in Step 5. This is the long-term answer, because it builds the image from what is on `main` rather than from whatever happened to be on someone's laptop.
+
+- [ ] **Step 5: Add `make drill-image` and the CI workflow**
+
+Add to `Makefile`, and to `.PHONY`:
+
+```make
+drill-image: ## Build and push the drill GUI image to your own registry
+	@$(PYTHON) scripts/drill-image.py
+```
+
+Create `scripts/drill-image.py`:
+
+```python
+#!/usr/bin/env python3
+"""Build and push the drill GUI image to the registry named in config.toml.
+
+The image reference is config-driven because it contains a GitHub username, which
+CLAUDE.md keeps out of the repo. The tag is the short git sha so a running pod can
+always be traced back to a commit - :latest cannot answer "what is actually running".
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def run(*cmd: str) -> None:
+    print("+ " + " ".join(cmd))
+    if subprocess.run(cmd, cwd=REPO).returncode != 0:
+        sys.exit(f"drill-image: {cmd[0]} failed")
+
+
+def main() -> int:
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "--print", "drill_gui_image"],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        sys.exit("drill-image: drill_gui_image is not set in scripts/config.toml")
+    image = out.stdout.strip()
+    if "<" in image:
+        sys.exit(f"drill-image: drill_gui_image is still the placeholder ({image}) - set it to your own registry")
+
+    sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()
+    if dirty:
+        print("drill-image: WARNING - working tree is dirty, this tag will not reproduce from git")
+
+    run("podman", "build", "-t", f"{image}:{sha}", "-t", f"{image}:latest", "-f", "drill/Containerfile", ".")
+    run("podman", "push", f"{image}:{sha}")
+    run("podman", "push", f"{image}:latest")
+    print(f"drill-image: pushed {image}:{sha}")
+    print("drill-image: if this is the first push, make the package PUBLIC at")
+    print("  https://github.com/users/<you>/packages -> the package -> Package settings -> Change visibility")
+    print("  Otherwise the cluster will need an imagePullSecret it is not configured for.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+Then create `.github/workflows/drill-image.yml`. This is path 4c, and it uses the automatic `GITHUB_TOKEN` - no PAT, no repository secret to manage:
+
+```yaml
+name: drill GUI image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "drill/**"
+      - "scenarios/answers/**"
+      - ".github/workflows/drill-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercase, because the owner may have capitals and registry paths may not.
+      - name: Compute the image reference
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/daily-eks-practice-drill-gui" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: drill/Containerfile
+          push: true
+          tags: |
+            ${{ steps.img.outputs.ref }}:${{ github.sha }}
+            ${{ steps.img.outputs.ref }}:latest
+```
+
+The workflow derives the owner from `GITHUB_REPOSITORY_OWNER` rather than hardcoding it, so no username is committed here either. `paths:` keeps it from rebuilding on every documentation commit.
+
+- [ ] **Step 6: Write the Kubernetes manifests**
 
 `cluster-admin` is deliberate and worth the comment: read-only cannot do scenario 10's break/fix, which is the whole reason that scenario exists. The 15 GB gp3 PVC costs about 1.6 cents for a 10-hour drill; size is irrelevant here and orphaning is the real risk, which Task 4.2's pre-destroy already covers.
 
 The Ingress carries `alb.ingress.kubernetes.io/group.name` set to `drill_ingress_group_name` and `alb.ingress.kubernetes.io/security-groups` set to the source-restricted SG. Without the group annotation every ops Ingress provisions its own ALB, which is the difference between one load balancer and three.
 
-- [ ] **Step 3: Deploy to kind and click through it**
+- [ ] **Step 7: Deploy to kind and click through it**
 
 ```bash
 make -f Makefile.test kind-up
 export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
-podman build -t localhost/drill-gui:dev -f drill/Containerfile drill/
+podman build -t localhost/drill-gui:dev -f drill/Containerfile .
 kind load docker-image localhost/drill-gui:dev --name daily-eks-drill-sandbox
 kubectl apply -f <rendered manifests>
 kubectl -n practice-drill port-forward svc/drill-gui 8090:8090
@@ -5097,12 +5478,14 @@ kubectl -n practice-drill port-forward svc/drill-gui 8090:8090
 
 Expected: the GUI loads at `http://localhost:8090`, the terminal attaches, and `kubectl get nodes` works from inside it. **Second point to show the user**, this time running the way it will actually run.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add drill/Containerfile drill/.containerignore terraform/modules/platform/drill-gui.tf terraform/modules/platform/drill-ingress.tf scripts/config.example.toml terraform/
+git add drill/Containerfile .containerignore scripts/drill-image.py .github/workflows/drill-image.yml Makefile terraform/modules/platform/drill-gui.tf terraform/modules/platform/drill-ingress.tf scripts/config.example.toml terraform/
 git commit -m "feat: drill GUI image and in-cluster deployment behind the shared ALB"
 ```
+
+Record in the commit message which of 4a, 4b or 4c was used to authenticate, so the next person does not rediscover that one of them was blocked.
 
 ---
 
@@ -5314,6 +5697,8 @@ make argo-sync
 
 Confirm: exactly **one** ALB exists, not three (the shared IngressGroup working); the GUI is reachable from the user's IP and refused from anywhere else (the SG working); the PVC bound a real EBS volume; and Argo is reading `http://git-server.git.svc.cluster.local/repo.git` rather than GitHub.
 
+Also run `make drill-allow` here. This is the first time a real security group exists, so it is the first time the AWS calls in `scripts/drill-allow.py` are exercised at all - Task 4.1 Step 7 could only reach the guard. Run it twice: the first run should report either a revoke-and-authorise or `already correct`, and the second must report `already correct, nothing to do`. A second run that changes something means the comparison logic is wrong and the target would churn the rule on every invocation.
+
 - [ ] **Step 4: Actually drill scenario 03 end to end**
 
 This is the point of the whole vertical slice. Work through all six tasks in the GUI, submit real answers, get real verdicts, and confirm task 5 shows Argo putting the bad version back after a `rollout undo`. Note anything that felt wrong - the standard here is pixel perfection and a terminal that feels good, not just green checks.
@@ -5342,7 +5727,7 @@ Say plainly what passed, what did not, and what was skipped. A kind pass is nece
 
 Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions-design.md`.
 
-**Spec coverage.** Every section maps to a task. Vocabulary and the autosave/commit/push split -> Tasks 5.3 and 6.2. Startup dependency chain -> Task 5.4's `checkDependencies`. Makefile handover -> Task 6.4. Q1 (one Argo source) -> Tasks 0.2, 3.2, 3.3. Q2 (save file, not diary) -> Task 6.1. Q2a (the watcher) -> Task 6.2. Q3 (ALB with three conditions) -> Tasks 4.1 and 4.2; the shared IngressGroup lands in Task 5.5 with the Ingress that needs it. Q4 (contextual integrations) -> Task 5.4. Q5 (one long-lived pod, append-only sessions) -> Tasks 5.5 and 6.1. Q6 (TypeScript both ends) -> Task 2.1. Q7 (refusal and port 8090) -> Tasks 6.4 and 5.1. Build-time items: `drill-progress/` in `.gitignore` -> Task 6.1 Step 1, before the directory can exist; three config values -> Task 3.1; port 8090 -> `config.ts`. Answers TOML as source of truth generating the HTML -> Phase 1. Semantic grading with the alias table -> Phase 2. `cluster-admin` -> Task 5.5. Concurrent-scenario refusal -> Task 6.3. Exit and tear down from the GUI -> Task 6.5. Testing section -> grader unit tests (Phase 2), byte-identical generator test (Task 1.2), `make -f Makefile.test test` kept passing throughout, the spike (Task 0.2), and live drilling (Phase 7 Step 4).
+**Spec coverage.** Every section maps to a task. Vocabulary and the autosave/commit/push split -> Tasks 5.3 and 6.2. Startup dependency chain -> Task 5.4's `checkDependencies`. Makefile handover -> Task 6.4. Q1 (one Argo source) -> Tasks 3.2 and 3.3. Q2 (save file, not diary) -> Task 6.1. Q2a (the watcher) -> Task 6.2. Q3 (ALB with three conditions) -> Tasks 4.1 and 4.2; the shared IngressGroup lands in Task 5.5 with the Ingress that needs it. Q4 (contextual integrations) -> Task 5.4. Q5 (one long-lived pod, append-only sessions) -> Tasks 5.5 and 6.1. Q6 (TypeScript both ends) -> Task 2.1. Q7 (refusal and port 8090) -> Tasks 6.4 and 5.1. Build-time items: `drill-progress/` in `.gitignore` -> Task 6.1 Step 1, before the directory can exist; three config values -> Task 3.1; port 8090 -> `config.ts`. Answers TOML as source of truth generating the HTML -> Phase 1. Semantic grading with the alias table -> Phase 2. `cluster-admin` -> Task 5.5. Concurrent-scenario refusal -> Task 6.3. Exit and tear down from the GUI -> Task 6.5. Testing section -> grader unit tests (Phase 2), byte-identical generator test (Task 1.2), `make -f Makefile.test test` kept passing throughout, the Argo acceptance test on kind (Task 3.2 Step 7), and live drilling (Phase 7 Step 4).
 
 **Two known gaps, both deliberate.** Phases 6.1 through 6.5 and Tasks 5.4 and 5.5 are specified at interface-and-intent level rather than with full TDD code blocks, because they depend on choices Phase 5's first visual will change - panel layout, what the session state actually needs to carry, and what the user says when they see it. Expanding them now would be writing code against a UI nobody has looked at. **Expand them into full step-by-step tasks after Task 5.3's review**, before those tickets are cut. The second gap: Task 5.4's proxy is designed and stubbed but only exercised when scenario 07 is ported, exactly as the spec says.
 
@@ -5356,4 +5741,4 @@ Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions
 
 Scenario 03 is one of twelve. The other eleven are ported one at a time, each getting its own answers TOML and whatever grader kinds it needs, and each may extend the schema - which is why `schema = 1` and the `grader` discriminator exist. Scenario 04's card also needs rewriting, because the platform ALB is now the ops plane: it becomes "join the existing ALB with a new Ingress, then stand up an NLB separately to feel the difference", which is closer to what you would actually do at work than provisioning a load balancer from scratch.
 
-One spec amendment to make once Phase 3 lands: the cluster git seeding mechanism, documented under "One deviation from the spec" at the top of this plan. The language split is not an amendment, because the spec never assigned the grader a language; it is written up under "Where each language runs, and why" as a decision this plan made.
+One spec amendment to make: the self-contained git rule, documented under "The self-contained git rule" at the top of this plan. It supersedes the spec's Q1 sentence about an init container cloning GitHub with a token, and it is a standing rule rather than a one-off deviation, so the spec should not be left saying the opposite. The language split is not an amendment, because the spec never assigned the grader a language; it is written up under "Where each language runs, and why" as a decision this plan made.
