@@ -67,10 +67,12 @@ Add the shared-secret check (about 30 lines in Task 5.1, no ACM or domain needed
 GHCR under the user's own account, as a **public** package, referenced through the `drill_gui_image` config value (never hardcoded - it contains a username, and `CLAUDE.md` keeps those out of the repo).
 Public rather than private because the repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image holds nothing new. That removes the need for an `imagePullSecret` and one more credential in the cluster.
 
-Three auth paths, documented in Task 5.5 Step 4, in preference order.
-**4a `gh auth refresh -h github.com -s write:packages`** is the default: it adds the scope to the token `gh` already holds, so there is nothing to create or store, and `scripts/argo-repo.py` already proves `gh auth token` works here.
-**4b a classic PAT** with `write:packages`, click-by-click steps included, for when `gh` is unavailable or org SSO refuses the scope change. Fine-grained tokens are not a reliable substitute for GHCR writes - do not fight one.
-**4c GitHub Actions with the automatic `GITHUB_TOKEN`** and `permissions: packages: write`, which needs no PAT at all and is the long-term answer.
+**Auth is settled and is now a global constraint, not a Task 5.5 detail: never create a personal access token.**
+Extend the grant `gh` already holds - `gh auth refresh -h github.com -s <scope>` - for any GitHub scope this project ever needs.
+A PAT is a second credential with its own expiry that must be stored somewhere, and every candidate is bad: `scripts/config.toml` is serialised into Terraform state, a shell export lands in history, a dotfile is one `git add -A` from being committed.
+`gh auth refresh` is **interactive** and blocks on a browser, so **you cannot run it** - print the command and have the user run it, then confirm with `gh auth status`.
+A classic PAT is an escape hatch for when org SSO refuses the refresh, never a first choice. Fine-grained tokens do not work for GHCR writes - do not fight one.
+In CI no credential is involved: the workflow uses the automatic `GITHUB_TOKEN` with `permissions: packages: write`.
 
 Two gaps this exposed and fixed in Task 5.5. The build context had to widen from `drill/` to the repo root, because the grader reads `scenarios/answers/*.toml`. That makes `.containerignore` security-critical, since `scripts/config.toml` would otherwise be baked into a public image - so it is **deny-by-default** (`*`, then `!drill/`, `!scenarios/answers/`) and Step 3 asserts the secret paths are absent from the built image.
 Single-arch amd64 only. Nodes are `t3.medium` / `AL2023_x86_64_STANDARD`; do not reach for buildx.
