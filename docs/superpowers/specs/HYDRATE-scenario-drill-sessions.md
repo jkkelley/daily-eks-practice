@@ -24,7 +24,8 @@ Stage 3 is what adds branch creation, PR submission and branch cleanup, so do no
 - Design phase is **complete**. All seven open questions (Q1-Q7, plus Q2a) are resolved and recorded in the spec.
 - Implementation plan is **complete** and on main: `docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md`, 8 phases, 21 tasks.
 - The architecture diagram lives at `docs/architecture/drill-platform.html` and matches the spec. It was moved out of `.lavish/`, which is git-ignored at `.gitignore:27` and could never reach the remote.
-- The plan records **two deliberate deviations from the spec** at the top: cluster git is seeded by streaming a `git bundle` in from the laptop rather than by an init container cloning GitHub with a PAT, and the grader is TypeScript rather than Python. Read that section before treating any spec sentence as final.
+- The plan records **one deliberate deviation from the spec** at the top: cluster git is seeded by streaming a `git bundle` in from the laptop rather than by an init container cloning GitHub with a PAT. Read that section before treating Q1's seeding sentence as final.
+- The plan also has a **"Where each language runs, and why"** section. That is not a deviation - the spec never said which language grades. TypeScript runs in the cluster (the whole GUI, including the grader); Python is laptop-side CLI glue the Makefile calls and is never in the container image. Read it before wondering why a TypeScript app has Python next to it.
 - **Phases 6.1-6.5 and Tasks 5.4-5.5 are specified at interface level, not full TDD steps**, on purpose: they depend on what the user says when they first see the UI at Task 5.3. Expand them after that review, before those tickets are cut.
 
 **One-paragraph summary of what we are building:**
