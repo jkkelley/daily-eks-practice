@@ -12,3 +12,5 @@ Pull one when you want to extend the playground.
 - An Argo CD app-of-apps layout once there is more than one chart.
 - Per-scenario answer capture: a lightweight way to log the commands/output you actually used for each task while drilling live (separate from the sealed `PRACTICE_ANSWERS.html`), so you have your own history to review later.
 - Interactive per-scenario "testing pod": `make scenario N=NN` execs you into (or spins up) a scenario-scoped pod in-cluster you can work from, potentially with progressive hints and a place to record your answers as you go, instead of just printing the card to your terminal.
+- Easter eggs for people who actually read the code: undocumented commands, hidden flags, and alternate paths that only turn up if you go looking.
+  The first one is an off-menu way to tear the whole drill down from the terminal, mirroring the GUI's exit-and-teardown button.
