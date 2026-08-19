@@ -5242,35 +5242,235 @@ git commit -m "feat: native Argo CD widget and the reverse proxy for full-app in
 
 **Files:**
 
-- Create: `drill/Containerfile`, `drill/.containerignore`
+- Create: `drill/Containerfile`, `.containerignore` (repo root, because the build context is the repo root)
+- Create: `scripts/drill-image.py`, `.github/workflows/drill-image.yml`
 - Create: `terraform/modules/platform/drill-gui.tf`
-- Modify: `terraform/modules/platform/drill-ingress.tf` (add the Ingress)
-- Test: kind deploy
+- Modify: `terraform/modules/platform/drill-ingress.tf` (add the Ingress), `Makefile` (add `drill-image`), `scripts/config.example.toml`
+- Test: kind deploy, plus the `.containerignore` assertion in Step 3
 
 **Interfaces:**
 
 - Consumes: `drill_alb_security_group_id`, `drill_ingress_group_name` from Task 4.1; `cluster_git_url` from Task 3.2.
 - Produces:
-  - A published image (GHCR, tag from the git sha) running the Fastify server with the built web app.
+  - A **public** GHCR package under the user's own account, tagged with the short git sha and `latest`, running the Fastify server with the built web app.
+  - `make drill-image` (local publish) and `.github/workflows/drill-image.yml` (publish on push to `main`, using the automatic `GITHUB_TOKEN`, no PAT).
   - Namespace `practice-drill`, ServiceAccount `drill` bound to `cluster-admin`, Deployment `drill-gui`, Service on 8090, PVC `drill-workspace` (15 GB gp3), and an Ingress in the shared group.
   - New config value `drill_gui_image` threaded like the others.
 
-- [ ] **Step 1: Write the Containerfile**
+**Where the image is published, and what it costs to get there.**
+
+The image goes to **GHCR under the user's own account**, as a **public** package, referenced through the `drill_gui_image` config value.
+
+Public rather than private is a deliberate choice with a short justification. GHCR packages are private by default even when the repo is public, and a private package means an `imagePullSecret` in the cluster holding a GitHub credential that has to be created, rotated and cleaned up. That cost buys nothing here: the repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image contains nothing a reader could not already read. Public package, no pull secret, one fewer credential in the cluster.
+
+`drill_gui_image` must be a config value, not a constant. `CLAUDE.md` forbids repo-owner strings outside git-ignored `scripts/config.toml`, and `ghcr.io/<username>/...` is exactly such a string.
+
+**No multi-arch.** `ami_type` is `AL2023_x86_64_STANDARD` on `t3.medium`, and Podman on WSL2 builds `amd64` natively. A single-arch build is correct. Do not reach for buildx or `--platform`; if the node group is ever moved to Graviton, that is the moment to revisit and not before.
+
+- [ ] **Step 1: Add `drill_gui_image` to the config template**
+
+In `scripts/config.example.toml`, in the drill platform block added by Task 3.1:
+
+```toml
+# The drill GUI image, in YOUR OWN registry. Published by `make drill-image`
+# (local) or by .github/workflows/drill-image.yml (on push to main).
+# Make the GHCR package PUBLIC so the cluster needs no imagePullSecret - this
+# repo is public and the answer key is already committed, so the image holds
+# nothing that is not already readable.
+drill_gui_image = "ghcr.io/<your-github-username>/daily-eks-practice-drill-gui"
+```
+
+Thread it through env -> stack -> platform exactly as Task 3.1 Steps 2 to 5 did, with no `default =`. The tag is supplied separately at deploy time from the git sha, so this value is the repository path only.
+
+- [ ] **Step 2: Write the Containerfile and a deny-by-default `.containerignore`**
 
 Multi-stage: build the workspaces, then a slim runtime carrying `node`, `tmux`, `git`, `kubectl` and `helm` on PATH, because the terminal is only useful if the tools the card asks for are there. Run as a non-root user with a writable `/workspace`.
 
-- [ ] **Step 2: Write the Kubernetes manifests**
+**The build context is the repo root, not `drill/`.** The grader reads `scenarios/answers/<scenario>.toml` at runtime, and those live outside `drill/`. Widening the context is what makes `.containerignore` security-critical rather than a build-speed optimisation: with the root in scope, `scripts/config.toml` is in scope, and that file holds the AWS account id, the profile name and the operator's public IP. Baking it into a **public** image would publish all three.
+
+So `.containerignore` denies everything and allows two paths, rather than listing things to exclude:
+
+```
+# Deny by default. An exclude-list leaks the next secret file somebody adds;
+# an allow-list cannot. Only these two trees have any business in the image.
+*
+!drill/
+!scenarios/answers/
+```
+
+Create it at the repo root as `.containerignore`, not under `drill/`, because that is where the context now is.
+
+- [ ] **Step 3: Prove the ignore file actually holds**
+
+An allow-list `.containerignore` is worth nothing unproven, and this is the one build failure that ships a credential rather than breaking a pipeline.
+
+```bash
+podman build -t localhost/drill-gui:dev -f drill/Containerfile .
+podman run --rm --entrypoint /bin/sh localhost/drill-gui:dev -c \
+  'ls /app/scripts/config.toml /app/.kubeconfig-daily-eks-practice 2>&1; ls /app/scenarios/answers/'
+```
+
+Expected: both secret paths report `No such file or directory`, and `03.toml` is listed. If `config.toml` is present, stop and fix `.containerignore` before pushing anything anywhere.
+
+- [ ] **Step 4: Authenticate to GHCR, preferring the path with no token to store**
+
+Three ways in, in order of preference. Take the first that works and record which one in the commit message.
+
+**4a - extend the `gh` login the repo already relies on.** This is the default. It adds the `write:packages` scope to the OAuth token `gh` already holds, so there is no token to create, paste, store or rotate, and `gh` keeps it out of any file in this repo. `scripts/argo-repo.py` already depends on `gh auth token` working, so if this repo functions at all, this path is available.
+
+```bash
+gh auth refresh -h github.com -s write:packages
+gh auth token | podman login ghcr.io -u "$(gh api user -q .login)" --password-stdin
+```
+
+Expected: `Login Succeeded!`. If `gh auth refresh` opens a browser, that is normal - it is re-consenting the existing login with one more scope.
+
+**4b - a classic personal access token.** Use this when `gh` is unavailable, or when the refresh is refused (some org SSO configurations block scope changes on an existing grant). Fine-grained tokens are not a reliable substitute here; GHCR writes expect a classic token, so do not spend time fighting a fine-grained one.
+
+Give the user these steps verbatim rather than paraphrasing, because the settings page is easy to land on the wrong version of:
+
+1. Go to `https://github.com/settings/tokens` and confirm the heading says **Tokens (classic)**. If it says "Fine-grained tokens", switch tabs.
+2. **Generate new token** -> **Generate new token (classic)**.
+3. Note: `daily-eks-practice drill GUI image push`.
+4. Expiration: 90 days. Not "no expiration" - this token can publish packages under their account.
+5. Scopes: tick **`write:packages`** only. It auto-selects `read:packages` and `repo`; leave those, untick everything else.
+6. **Generate token**, then copy it. GitHub shows it exactly once.
+7. Log in without the token ever touching a file in this repo or a shell history entry:
+
+```bash
+read -rsp "GHCR token: " GHCR_TOKEN && echo
+echo "$GHCR_TOKEN" | podman login ghcr.io -u <your-github-username> --password-stdin
+unset GHCR_TOKEN
+```
+
+`read -rs` keeps it off the screen, and because it is never typed as an argument it never reaches `~/.zsh_history`. Do not put this token in `scripts/config.toml`; that file is read by `bootstrap.py` and written into `config.auto.tfvars.json`, and a registry credential has no business in Terraform state.
+
+**4c - GitHub Actions, which needs no token at all.** Added in Step 5. This is the long-term answer, because it builds the image from what is on `main` rather than from whatever happened to be on someone's laptop.
+
+- [ ] **Step 5: Add `make drill-image` and the CI workflow**
+
+Add to `Makefile`, and to `.PHONY`:
+
+```make
+drill-image: ## Build and push the drill GUI image to your own registry
+	@$(PYTHON) scripts/drill-image.py
+```
+
+Create `scripts/drill-image.py`:
+
+```python
+#!/usr/bin/env python3
+"""Build and push the drill GUI image to the registry named in config.toml.
+
+The image reference is config-driven because it contains a GitHub username, which
+CLAUDE.md keeps out of the repo. The tag is the short git sha so a running pod can
+always be traced back to a commit - :latest cannot answer "what is actually running".
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def run(*cmd: str) -> None:
+    print("+ " + " ".join(cmd))
+    if subprocess.run(cmd, cwd=REPO).returncode != 0:
+        sys.exit(f"drill-image: {cmd[0]} failed")
+
+
+def main() -> int:
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "--print", "drill_gui_image"],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        sys.exit("drill-image: drill_gui_image is not set in scripts/config.toml")
+    image = out.stdout.strip()
+    if "<" in image:
+        sys.exit(f"drill-image: drill_gui_image is still the placeholder ({image}) - set it to your own registry")
+
+    sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()
+    if dirty:
+        print("drill-image: WARNING - working tree is dirty, this tag will not reproduce from git")
+
+    run("podman", "build", "-t", f"{image}:{sha}", "-t", f"{image}:latest", "-f", "drill/Containerfile", ".")
+    run("podman", "push", f"{image}:{sha}")
+    run("podman", "push", f"{image}:latest")
+    print(f"drill-image: pushed {image}:{sha}")
+    print("drill-image: if this is the first push, make the package PUBLIC at")
+    print("  https://github.com/users/<you>/packages -> the package -> Package settings -> Change visibility")
+    print("  Otherwise the cluster will need an imagePullSecret it is not configured for.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+Then create `.github/workflows/drill-image.yml`. This is path 4c, and it uses the automatic `GITHUB_TOKEN` - no PAT, no repository secret to manage:
+
+```yaml
+name: drill GUI image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "drill/**"
+      - "scenarios/answers/**"
+      - ".github/workflows/drill-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lowercase, because the owner may have capitals and registry paths may not.
+      - name: Compute the image reference
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/daily-eks-practice-drill-gui" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: drill/Containerfile
+          push: true
+          tags: |
+            ${{ steps.img.outputs.ref }}:${{ github.sha }}
+            ${{ steps.img.outputs.ref }}:latest
+```
+
+The workflow derives the owner from `GITHUB_REPOSITORY_OWNER` rather than hardcoding it, so no username is committed here either. `paths:` keeps it from rebuilding on every documentation commit.
+
+- [ ] **Step 6: Write the Kubernetes manifests**
 
 `cluster-admin` is deliberate and worth the comment: read-only cannot do scenario 10's break/fix, which is the whole reason that scenario exists. The 15 GB gp3 PVC costs about 1.6 cents for a 10-hour drill; size is irrelevant here and orphaning is the real risk, which Task 4.2's pre-destroy already covers.
 
 The Ingress carries `alb.ingress.kubernetes.io/group.name` set to `drill_ingress_group_name` and `alb.ingress.kubernetes.io/security-groups` set to the source-restricted SG. Without the group annotation every ops Ingress provisions its own ALB, which is the difference between one load balancer and three.
 
-- [ ] **Step 3: Deploy to kind and click through it**
+- [ ] **Step 7: Deploy to kind and click through it**
 
 ```bash
 make -f Makefile.test kind-up
 export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
-podman build -t localhost/drill-gui:dev -f drill/Containerfile drill/
+podman build -t localhost/drill-gui:dev -f drill/Containerfile .
 kind load docker-image localhost/drill-gui:dev --name daily-eks-drill-sandbox
 kubectl apply -f <rendered manifests>
 kubectl -n practice-drill port-forward svc/drill-gui 8090:8090
@@ -5278,12 +5478,14 @@ kubectl -n practice-drill port-forward svc/drill-gui 8090:8090
 
 Expected: the GUI loads at `http://localhost:8090`, the terminal attaches, and `kubectl get nodes` works from inside it. **Second point to show the user**, this time running the way it will actually run.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add drill/Containerfile drill/.containerignore terraform/modules/platform/drill-gui.tf terraform/modules/platform/drill-ingress.tf scripts/config.example.toml terraform/
+git add drill/Containerfile .containerignore scripts/drill-image.py .github/workflows/drill-image.yml Makefile terraform/modules/platform/drill-gui.tf terraform/modules/platform/drill-ingress.tf scripts/config.example.toml terraform/
 git commit -m "feat: drill GUI image and in-cluster deployment behind the shared ALB"
 ```
+
+Record in the commit message which of 4a, 4b or 4c was used to authenticate, so the next person does not rediscover that one of them was blocked.
 
 ---
 

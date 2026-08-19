@@ -14,7 +14,7 @@ Do not re-litigate anything already recorded there.
 
 1. **Spec** (`superpowers:brainstorming`) -> `docs/superpowers/specs/2026-08-19-scenario-drill-sessions-design.md`. **Done.**
 2. **Implementation plan** (`superpowers:writing-plans`) -> `docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md`. **Done.**
-3. **Tickets** (`work-order` skill) -> an epic with one child per plan phase, plus the dependency graph. **Not started - this is the next step.**
+3. **Tickets** (`work-order` skill) -> an epic with one child per plan phase, plus the dependency graph. **Not started - this is the next step, and nothing now blocks it.**
 
 Stage 3 is what adds branch creation, PR submission and branch cleanup, so do not hand-write tickets and do not skip to implementation without them. The script writes the ticket, never the model.
 
@@ -28,7 +28,7 @@ Stage 3 is what adds branch creation, PR submission and branch cleanup, so do no
 - The plan also has a **"Where each language runs, and why"** section. That is not a deviation - the spec never said which language grades. TypeScript runs in the cluster (the whole GUI, including the grader); Python is laptop-side CLI glue the Makefile calls and is never in the container image. Read it before wondering why a TypeScript app has Python next to it.
 - **Phases 6.1-6.5 and Tasks 5.4-5.5 are specified at interface level, not full TDD steps**, on purpose: they depend on what the user says when they first see the UI at Task 5.3. Expand them after that review, before those tickets are cut.
 
-**Four open questions.** Work through them in order, one at a time. Do not assume an answer or bundle them.
+**The four open questions are all ANSWERED.** Kept here with their reasoning, because each answer changed the plan. Do not re-litigate them.
 
 **Q1 - Run the Phase 0 spike first, or cut work-order tickets first? ANSWERED: neither. The spike was cut.**
 The user's call: do not spike, record the risk with pre-decided fallbacks, and surface it at the roadblock.
@@ -63,8 +63,17 @@ Source IP is the *only* control on an unauthenticated cluster-admin web terminal
 That was checked on 2026-08-19: the deployment target is a residential connection with a directly-assigned public IPv4, not carrier-grade NAT, so the /32 genuinely identifies one machine and source-IP-only is defensible.
 Add the shared-secret check (about 30 lines in Task 5.1, no ACM or domain needed) before drilling from a cafe, a tether, a corporate network, a commercial VPN, or as soon as a second person uses the platform. In all of those the /32 stops meaning "my laptop".
 
-**Q4 - Where the drill GUI container image gets published.**
-Needed at Phase 5.5. GHCR under their account is the assumption but has not been confirmed.
+**Q4 - Where the drill GUI container image gets published. ANSWERED.**
+GHCR under the user's own account, as a **public** package, referenced through the `drill_gui_image` config value (never hardcoded - it contains a username, and `CLAUDE.md` keeps those out of the repo).
+Public rather than private because the repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image holds nothing new. That removes the need for an `imagePullSecret` and one more credential in the cluster.
+
+Three auth paths, documented in Task 5.5 Step 4, in preference order.
+**4a `gh auth refresh -h github.com -s write:packages`** is the default: it adds the scope to the token `gh` already holds, so there is nothing to create or store, and `scripts/argo-repo.py` already proves `gh auth token` works here.
+**4b a classic PAT** with `write:packages`, click-by-click steps included, for when `gh` is unavailable or org SSO refuses the scope change. Fine-grained tokens are not a reliable substitute for GHCR writes - do not fight one.
+**4c GitHub Actions with the automatic `GITHUB_TOKEN`** and `permissions: packages: write`, which needs no PAT at all and is the long-term answer.
+
+Two gaps this exposed and fixed in Task 5.5. The build context had to widen from `drill/` to the repo root, because the grader reads `scenarios/answers/*.toml`. That makes `.containerignore` security-critical, since `scripts/config.toml` would otherwise be baked into a public image - so it is **deny-by-default** (`*`, then `!drill/`, `!scenarios/answers/`) and Step 3 asserts the secret paths are absent from the built image.
+Single-arch amd64 only. Nodes are `t3.medium` / `AL2023_x86_64_STANDARD`; do not reach for buildx.
 
 **One-paragraph summary of what we are building:**
 `make scenario N=03` stops printing a Markdown card and instead converges a drill session.
