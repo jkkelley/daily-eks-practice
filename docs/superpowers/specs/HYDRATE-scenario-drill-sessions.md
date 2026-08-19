@@ -28,6 +28,26 @@ Stage 3 is what adds branch creation, PR submission and branch cleanup, so do no
 - The plan also has a **"Where each language runs, and why"** section. That is not a deviation - the spec never said which language grades. TypeScript runs in the cluster (the whole GUI, including the grader); Python is laptop-side CLI glue the Makefile calls and is never in the container image. Read it before wondering why a TypeScript app has Python next to it.
 - **Phases 6.1-6.5 and Tasks 5.4-5.5 are specified at interface level, not full TDD steps**, on purpose: they depend on what the user says when they first see the UI at Task 5.3. Expand them after that review, before those tickets are cut.
 
+**Four open questions, asked but not yet answered.** Work through them in order, one at a time. Do not assume an answer or bundle them.
+
+**Q1 - Run the Phase 0 spike first, or cut work-order tickets first?**
+Asked, awaiting an answer. This is the only one that blocks anything today.
+Recommendation was **spike first**: Phase 0 asks whether Argo CD will clone from an in-cluster git server over plain HTTP, and the known failure mode is real (Argo clones with `--depth 1`, and dumb HTTP does not support shallow fetch).
+If it fails, the fix is a different git server and that rewrites Task 3.2's manifests, `git-seed.py`'s unbundle script, and the readiness probe path.
+Cutting tickets first means cutting three that get rewritten.
+The counter-argument, stated honestly at the time: the spike **is** Ticket 0.2, so running it outside work-order slightly breaks the pipeline. Cutting the epic now and executing 0.2 first is the same order with more bookkeeping and amended 3.x tickets rather than wrong ones.
+Either works.
+
+**Q2 - Amend the spec to match the seeding deviation, or leave the plan as the record?**
+Low stakes. The plan documents the change and why; the spec still says the init container clones GitHub with a token.
+
+**Q3 - The user's public IP, for `drill_allowed_cidrs`.**
+Needed at Phase 4. It lives in `scripts/config.toml`, which is git-ignored and hand-maintained.
+**Do not edit that file without asking.** Print the line and their IP (`curl -s https://checkip.amazonaws.com`) and let them paste it.
+
+**Q4 - Where the drill GUI container image gets published.**
+Needed at Phase 5.5. GHCR under their account is the assumption but has not been confirmed.
+
 **One-paragraph summary of what we are building:**
 `make scenario N=03` stops printing a Markdown card and instead converges a drill session.
 A single long-lived in-cluster GUI pod (the "mothership") serves a terminal, a Monaco editor, an answers panel and a help panel, and is the only surface the user works from.
