@@ -2704,9 +2704,16 @@ And add a new block after `# ---- practice app plumbing ----`:
 drill_ingress_group_name = "daily-eks-practice-ops"  # any name; all ops Ingresses must match it
 # WHO CAN REACH THE DRILL GUI. This is an unauthenticated web terminal running as
 # cluster-admin, so leaving it open is not a mild misconfiguration - it is a remote
-# shell on your cluster. Set it to YOUR public /32 and update it when your IP moves.
+# shell on your cluster.
+#
+# The single entry "auto" resolves to your current public /32 every time bootstrap.py
+# runs, so a DHCP lease change can never silently lock you out. Prefer it.
+# A literal CIDR still works and is what you want for a static IP or for CI, where
+# "your IP" is not a meaningful idea.
+#   drill_allowed_cidrs = ["auto"]              <- resolved at plan time
+#   drill_allowed_cidrs = ["203.0.113.10/32"]   <- pinned
 # Find yours with: curl -s https://checkip.amazonaws.com
-drill_allowed_cidrs = ["203.0.113.10/32"]   # generic default: ["<your-public-ip>/32"]; NEVER ["0.0.0.0/0"]
+drill_allowed_cidrs = ["auto"]   # generic default: ["auto"]; NEVER ["0.0.0.0/0"]
 ```
 
 - [ ] **Step 2: Declare them in the env, with no defaults**
@@ -2772,21 +2779,157 @@ Expected: PASS. It will fail with "No value for required variable" only if the g
 
 - [ ] **Step 8: Tell the user to update their real config**
 
-`scripts/config.toml` is git-ignored and hand-maintained. Print the three lines they need to add and their own public IP:
+`scripts/config.toml` is git-ignored and hand-maintained. Print the three lines they need to add:
 
 ```bash
 echo "Add to the [common] table in scripts/config.toml:"
 echo "  enable_cluster_git       = true"
 echo "  drill_ingress_group_name = \"daily-eks-practice-ops\""
-echo "  drill_allowed_cidrs      = [\"$(curl -s https://checkip.amazonaws.com | tr -d '\n')/32\"]"
+echo "  drill_allowed_cidrs      = [\"auto\"]"
 ```
+
+Print `"auto"` rather than resolving their address here. The resolver added in Steps 9 to 11 does it at plan time, and echoing a personal IP into a terminal transcript is a leak the sentinel exists to avoid.
 
 Do not write to `scripts/config.toml` without asking. It holds their account-specific values.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Write the failing test for the `"auto"` resolver**
+
+Create `tests/test_resolve_auto_cidrs.py`:
+
+```python
+"""bootstrap.py resolves the "auto" CIDR sentinel to the caller's public /32.
+
+The drill ALB's allow list is the only control on an unauthenticated cluster-admin
+terminal, so a stale entry is a lockout and a wrong entry is an exposure. These tests
+pin the three behaviours that matter: literals are never touched, "auto" becomes a
+/32, and a failed lookup is loud rather than silently wide open.
+"""
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import bootstrap  # noqa: E402
+
+
+class ResolveAutoCidrs(unittest.TestCase):
+    def test_literal_cidrs_pass_through_untouched(self):
+        cfg = {"drill_allowed_cidrs": ["203.0.113.10/32", "198.51.100.0/24"]}
+        bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg["drill_allowed_cidrs"], ["203.0.113.10/32", "198.51.100.0/24"])
+
+    def test_auto_becomes_the_public_slash_32(self):
+        cfg = {"drill_allowed_cidrs": ["auto"]}
+        with mock.patch.object(bootstrap, "public_ip", return_value="203.0.113.10"):
+            bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg["drill_allowed_cidrs"], ["203.0.113.10/32"])
+
+    def test_auto_mixed_with_literals_resolves_only_the_sentinel(self):
+        cfg = {"drill_allowed_cidrs": ["auto", "198.51.100.0/24"]}
+        with mock.patch.object(bootstrap, "public_ip", return_value="203.0.113.10"):
+            bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg["drill_allowed_cidrs"], ["203.0.113.10/32", "198.51.100.0/24"])
+
+    def test_lookup_failure_exits_instead_of_dropping_the_entry(self):
+        cfg = {"drill_allowed_cidrs": ["auto"]}
+        with mock.patch.object(bootstrap, "public_ip", return_value=None):
+            with self.assertRaises(SystemExit):
+                bootstrap.resolve_auto_cidrs(cfg)
+
+    def test_key_absent_is_a_no_op(self):
+        cfg = {"region": "us-east-2"}
+        bootstrap.resolve_auto_cidrs(cfg)
+        self.assertEqual(cfg, {"region": "us-east-2"})
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+The fourth test is the important one. If a lookup failure quietly dropped `"auto"` from the list, the allow list would become empty; if it fell back to a wildcard, it would become open. Both are worse than refusing to run.
+
+- [ ] **Step 10: Run it to verify it fails**
 
 ```bash
-git add scripts/config.example.toml terraform/
+python3 -m unittest tests.test_resolve_auto_cidrs -v
+```
+
+Expected: FAIL with `AttributeError: module 'bootstrap' has no attribute 'resolve_auto_cidrs'`.
+
+- [ ] **Step 11: Implement the resolver**
+
+In `scripts/bootstrap.py`, add after `deep_merge()`:
+
+```python
+def public_ip() -> str | None:
+    """This machine's public IPv4 as the internet sees it, or None.
+
+    Uses AWS's checkip because the tfvars this feeds are consumed by an AWS security
+    group, so the address that matters is the one AWS observes. Stdlib only - the repo
+    deliberately has no Python dependencies.
+    """
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("https://checkip.amazonaws.com", timeout=10) as r:
+            ip = r.read().decode().strip()
+    except Exception:
+        return None
+    try:
+        ipaddress.IPv4Address(ip)
+    except ValueError:
+        return None
+    return ip
+
+
+def resolve_auto_cidrs(merged: dict) -> None:
+    """Replace the "auto" sentinel in drill_allowed_cidrs with this machine's /32.
+
+    Residential addresses are DHCP-assigned, so a pinned literal goes stale on a lease
+    change and locks you out of your own drill with no error message - the browser just
+    hangs. Resolving at plan time means the allow list cannot drift from reality.
+
+    Literals are left alone: a static IP or a CI runner has no meaningful "your IP".
+    """
+    cidrs = merged.get("drill_allowed_cidrs")
+    if not isinstance(cidrs, list) or "auto" not in cidrs:
+        return
+    ip = public_ip()
+    if ip is None:
+        sys.exit(
+            "bootstrap: drill_allowed_cidrs is [\\"auto\\"] but your public IP could not be "
+            "determined (no network?). Set a literal CIDR in scripts/config.toml, or retry."
+        )
+    merged["drill_allowed_cidrs"] = [f"{ip}/32" if c == "auto" else c for c in cidrs]
+    log(f"bootstrap: drill_allowed_cidrs \\"auto\\" resolved to your current public /32")
+```
+
+Add `import ipaddress` to the imports at the top of the file.
+
+Note the log line does not print the address. It goes into the tfvars, which are git-ignored, and terminal output is the more exposed of the two.
+
+Call it in `main()` immediately after `merged` is built and validated, so both the `--print` path and the tfvars write see resolved values:
+
+```python
+    if not merged:
+        sys.exit(f"bootstrap: no config found for env '{env}'")
+
+    resolve_auto_cidrs(merged)
+```
+
+- [ ] **Step 12: Run the test to verify it passes**
+
+```bash
+python3 -m unittest tests.test_resolve_auto_cidrs -v
+```
+
+Expected: 5 tests, PASS. Only `test_auto_becomes_the_public_slash_32` and the mixed case touch the network, and both mock it, so the suite stays offline.
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add scripts/config.example.toml scripts/bootstrap.py tests/test_resolve_auto_cidrs.py terraform/
 git commit -m "feat: config values for cluster git and the drill ALB"
 ```
 
@@ -3461,6 +3604,22 @@ One internet-facing ALB shared by every ops UI, restricted to the user's own IP,
 
 ### Task 4.1: The shared IngressGroup and the source-IP security group
 
+**Source IP is the only control, deliberately, and here is the trigger to revisit that.**
+
+The spec's Condition 3 says it plainly: without the security group the drill GUI is an unauthenticated web terminal running as `cluster-admin`, reachable by anyone who finds the hostname, over plain HTTP. There is no second layer. That makes the value of `drill_allowed_cidrs` load-bearing in a way a normal firewall rule is not.
+
+Adding application-level auth (a shared secret checked by the Fastify server on every request and websocket upgrade, seeded from `config.toml`) was considered and **deferred** on 2026-08-19. It is cheap, roughly 30 lines in Task 5.1, needs no ACM certificate and no domain, and would turn "found the hostname" into "found the hostname and the token". It was deferred because the deployment target was checked and found to be a residential connection with a **directly assigned** public IPv4 rather than one behind carrier-grade NAT, so the configured `/32` genuinely identifies one machine.
+
+That check is what makes source-IP-only defensible, and it is also exactly what stops being true in these cases. **Add the shared secret before drilling from any of them:**
+
+- A cafe, hotel, airport, or any shared or guest network.
+- A phone tether or any mobile carrier connection, which is almost always carrier-NAT.
+- A corporate network, where the egress IP is the whole company.
+- A commercial VPN exit node, which is shared with every other user of that node.
+- Any second person using this platform, which is also the point where the spec's ALB OIDC growth path stops being premature.
+
+In all of those the allow list stops meaning "my laptop" and starts meaning "everyone sharing this egress address", against a resource whose worst case is a root shell on the cluster.
+
 **Files:**
 
 - Create: `terraform/modules/platform/drill-ingress.tf`
@@ -3587,10 +3746,118 @@ make -f Makefile.test ministack
 
 Expected: the plan FAILS with the precondition message naming `drill_allowed_cidrs`. Restore the real value afterwards. Ask the user before editing `scripts/config.toml`; if they would rather not, note that the guard is untested and say so plainly.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Add `make drill-allow`, the lockout recovery path**
+
+The `"auto"` sentinel from Task 3.1 keeps the allow list fresh at plan time, but it only runs when you plan. If a DHCP lease rotates while the cluster is up, the GUI stops answering mid-drill and the only fix so far is a full `terraform apply` on a billing cluster to change one firewall rule. This target fixes just the rule.
+
+Add to `Makefile`, near the other cluster-side targets, and add `drill-allow` to the `.PHONY` list:
+
+```make
+drill-allow: ## Re-point the drill ALB security group at your CURRENT public IP
+	@$(PYTHON) scripts/drill-allow.py
+```
+
+Create `scripts/drill-allow.py`:
+
+```python
+#!/usr/bin/env python3
+"""Re-point the drill ALB security group at this machine's current public IP.
+
+Residential addresses are DHCP-assigned. When the lease rotates mid-drill the GUI
+simply stops answering - no error, the browser just hangs - and the fix would
+otherwise be a full `terraform apply` on a cluster that is billing by the hour, to
+change one firewall rule. This does only the rule.
+
+Terraform stays the source of truth: the next `make plan` re-reads config.toml,
+re-resolves "auto", and converges to the same place. This is the fast path, not a
+second owner of the resource.
+"""
+import ipaddress
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+from bootstrap import public_ip  # noqa: E402  - single definition, shared
+
+
+def tf_output(name: str) -> str:
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "output", "-raw", name],
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def aws(*args: str) -> dict:
+    cmd = ["aws", *args, "--output", "json"]
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit(f"drill-allow: {' '.join(cmd)} failed:\\n{out.stderr.strip()}")
+    return json.loads(out.stdout) if out.stdout.strip() else {}
+
+
+def main() -> int:
+    sg = tf_output("drill_alb_security_group_id")
+    if not sg:
+        sys.exit("drill-allow: no drill ALB security group in state - is the cluster up?")
+
+    ip = public_ip()
+    if ip is None:
+        sys.exit("drill-allow: could not determine your public IP (no network?).")
+    want = f"{ip}/32"
+
+    desc = aws("ec2", "describe-security-groups", "--group-ids", sg)
+    perms = desc["SecurityGroups"][0]["IpPermissions"]
+    have = {
+        r["CidrIp"]
+        for p in perms
+        if p.get("FromPort") == 80
+        for r in p.get("IpRanges", [])
+    }
+
+    if have == {want}:
+        print(f"drill-allow: already correct, nothing to do ({len(have)} rule)")
+        return 0
+
+    for stale in have - {want}:
+        aws("ec2", "revoke-security-group-ingress", "--group-id", sg,
+            "--protocol", "tcp", "--port", "80", "--cidr", stale)
+        print("drill-allow: revoked a stale rule")
+
+    if want not in have:
+        aws("ec2", "authorize-security-group-ingress", "--group-id", sg,
+            "--protocol", "tcp", "--port", "80", "--cidr", want)
+        print("drill-allow: authorised your current public /32")
+
+    print("drill-allow: done. Terraform will converge to the same state on the next plan.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+Two deliberate choices. It never prints the address, matching Task 3.1's reasoning that terminal output is more exposed than the git-ignored files the value normally lives in. And it revokes stale rules rather than only adding, because an allow list that accumulates every cafe you have ever worked from is not an allow list.
+
+- [ ] **Step 7: Test it without AWS**
+
+There is no cluster, so exercise the failure path and the parsing, which is where the bugs would be:
 
 ```bash
-git add terraform/modules/platform/drill-ingress.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf
+python3 scripts/drill-allow.py
+```
+
+Expected: exits non-zero with `no drill ALB security group in state - is the cluster up?`. That confirms the terraform-output lookup, the guard, and the import of `public_ip` from `bootstrap` all work. The AWS calls themselves are verified in Phase 7 Step 3, which is the first time a real security group exists.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add terraform/modules/platform/drill-ingress.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf scripts/drill-allow.py Makefile
 git commit -m "feat: source-restricted security group for the shared ops ALB"
 ```
 
@@ -5227,6 +5494,8 @@ make argo-sync
 - [ ] **Step 3: Verify the AWS-shaped things kind could not**
 
 Confirm: exactly **one** ALB exists, not three (the shared IngressGroup working); the GUI is reachable from the user's IP and refused from anywhere else (the SG working); the PVC bound a real EBS volume; and Argo is reading `http://git-server.git.svc.cluster.local/repo.git` rather than GitHub.
+
+Also run `make drill-allow` here. This is the first time a real security group exists, so it is the first time the AWS calls in `scripts/drill-allow.py` are exercised at all - Task 4.1 Step 7 could only reach the guard. Run it twice: the first run should report either a revoke-and-authorise or `already correct`, and the second must report `already correct, nothing to do`. A second run that changes something means the comparison logic is wrong and the target would churn the rule on every invocation.
 
 - [ ] **Step 4: Actually drill scenario 03 end to end**
 

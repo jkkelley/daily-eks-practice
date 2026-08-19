@@ -52,9 +52,16 @@ What the rule forbids: Argo reading any repoURL outside the cluster, a GitHub cr
 What it does **not** forbid: container images from `docker.io`/`ghcr.io`, and the kind test pulling Argo's install manifest from `raw.githubusercontent.com`. The rule governs what Argo reads, not cluster egress.
 `scripts/argo-repo.py` is **kept, not deleted** - `scenarios/09-gitops-argocd.md` teaches manual PAT registration as its lesson and ships today. The drill just never calls it.
 
-**Q3 - The user's public IP, for `drill_allowed_cidrs`.**
-Needed at Phase 4. It lives in `scripts/config.toml`, which is git-ignored and hand-maintained.
-**Do not edit that file without asking.** Print the line and their IP (`curl -s https://checkip.amazonaws.com`) and let them paste it.
+**Q3 - The user's public IP, for `drill_allowed_cidrs`. ANSWERED.**
+Never ask for the literal address and never print one. `drill_allowed_cidrs = ["auto"]` is the answer.
+`bootstrap.py` gains `public_ip()` and `resolve_auto_cidrs()` (Task 3.1 Steps 9-13) which resolve the sentinel to the current public /32 at plan time, so a DHCP lease change cannot silently lock the user out. A literal CIDR still works for a static IP or CI.
+`make drill-allow` (Task 4.1 Step 6, `scripts/drill-allow.py`) is the mid-drill recovery path: it fixes just the security group rule instead of a full apply on a billing cluster, and revokes stale rules rather than accumulating them.
+`scripts/config.toml` is still git-ignored and hand-maintained. **Do not edit it without asking.**
+
+**Auth is deferred, not forgotten, and the trigger is written into Task 4.1.**
+Source IP is the *only* control on an unauthenticated cluster-admin web terminal.
+That was checked on 2026-08-19: the deployment target is a residential connection with a directly-assigned public IPv4, not carrier-grade NAT, so the /32 genuinely identifies one machine and source-IP-only is defensible.
+Add the shared-secret check (about 30 lines in Task 5.1, no ACM or domain needed) before drilling from a cafe, a tether, a corporate network, a commercial VPN, or as soon as a second person uses the platform. In all of those the /32 stops meaning "my laptop".
 
 **Q4 - Where the drill GUI container image gets published.**
 Needed at Phase 5.5. GHCR under their account is the assumption but has not been confirmed.
