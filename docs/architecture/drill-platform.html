@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drill Platform - Cluster Architecture</title>
+    <style>
+      :root[data-theme="dark"] {
+        --bg: #10141a; --panel: #171c26; --panel-2: #1c2230; --border: #2a3140;
+        --fg: #e6e6e6; --dim: #9aa5b1; --accent: #7aa2f7; --good: #9ece6a;
+        --warn: #e0af68; --bad: #f7768e; --code-bg: #0d1117;
+      }
+      :root[data-theme="light"] {
+        --bg: #f7f8fa; --panel: #ffffff; --panel-2: #f0f3f7; --border: #d8dee6;
+        --fg: #1a2330; --dim: #5b6673; --accent: #2f5fd0; --good: #3d7a1f;
+        --warn: #a06400; --bad: #c0392b; --code-bg: #eef1f5;
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg);
+        max-width: 1060px; margin: 0 auto; padding: 2rem 1.25rem 6rem; line-height: 1.55;
+      }
+      h1 { font-size: 1.5rem; margin: 0 0 0.3rem; }
+      h1 span { color: var(--accent); }
+      h2 {
+        font-size: 1.05rem; margin: 2.4rem 0 0.9rem;
+        padding-bottom: 0.4rem; border-bottom: 1px solid var(--border);
+      }
+      p, li { font-size: 0.92rem; }
+      .dim { color: var(--dim); }
+      .lede { color: var(--dim); margin: 0 0 1.4rem; font-size: 0.95rem; }
+      code {
+        font-family: ui-monospace, monospace; background: var(--code-bg);
+        padding: 0.08rem 0.32rem; border-radius: 4px; font-size: 0.86em;
+      }
+      .badge {
+        display: inline-block; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em;
+        padding: 0.08rem 0.4rem; border-radius: 4px; vertical-align: middle;
+        margin-left: 0.4rem; white-space: nowrap;
+      }
+      .b-new { background: rgba(122,162,247,0.16); color: var(--accent); border: 1px solid rgba(122,162,247,0.4); }
+      .b-has { background: transparent; color: var(--dim); border: 1px solid var(--border); }
+
+      .tree {
+        font-family: ui-monospace, monospace; font-size: 0.81rem; line-height: 1.72;
+        background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+        padding: 1.1rem 1.2rem; overflow-x: auto;
+      }
+      .tree .row { white-space: nowrap; }
+      .tw { color: var(--dim); }
+      .ns { color: var(--accent); font-weight: 700; }
+      .ns-new { color: var(--good); font-weight: 700; }
+      .note { color: var(--dim); font-style: italic; }
+      .tree .grp { margin: 0.5rem 0 0; }
+      .tree hr { border: 0; border-top: 1px dashed var(--border); margin: 0.85rem 0; }
+
+      .tbl-wrap { overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; font-size: 0.85rem; min-width: 560px; }
+      th, td { text-align: left; padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+      th { color: var(--dim); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+      tbody tr:hover { background: var(--panel-2); }
+
+      .d {
+        background: var(--panel); border: 1px solid var(--border);
+        border-left: 3px solid var(--good); border-radius: 8px;
+        padding: 0.8rem 1.05rem; margin: 0.7rem 0;
+      }
+      .d h4 { margin: 0 0 0.3rem; font-size: 0.92rem; }
+      .d h4 .n { color: var(--good); font-family: ui-monospace, monospace; margin-right: 0.45rem; }
+      .d p { margin: 0.3rem 0; }
+      .rej { color: var(--dim); font-size: 0.86rem; margin-top: 0.4rem; }
+      .rej b { color: var(--warn); font-weight: 600; }
+
+      .flow {
+        font-family: ui-monospace, monospace; font-size: 0.8rem;
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto;
+      }
+      #toggle {
+        position: fixed; top: 1rem; right: 1rem; padding: 0.35rem 0.75rem;
+        border-radius: 8px; border: 1px solid var(--border); background: var(--panel);
+        color: var(--fg); cursor: pointer; font-size: 0.8rem;
+      }
+      .legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--dim); margin: 0.8rem 0 0; }
+    </style>
+  </head>
+  <body>
+    <button id="toggle">light</button>
+
+    <h1>Drill platform <span>/</span> cluster architecture</h1>
+    <p class="lede">
+      Matches <code>docs/superpowers/specs/2026-08-19-scenario-drill-sessions-design.md</code>.
+      All seven design questions are resolved - nothing on this page is open.
+      Scope is <strong>scenario 03 only</strong>; the other eleven get ported one at a time.
+    </p>
+
+    <h2>The tree</h2>
+    <div class="tree">
+      <div class="row"><span class="tw">your browser</span></div>
+      <div class="row"><span class="tw">└─</span> ALB <span class="note">shared IngressGroup · source-IP restricted SG · one host, path-routed</span></div>
+      <div class="row"><span class="tw">   │</span></div>
+
+      <hr />
+
+      <div class="row"><strong>EKS cluster</strong> <span class="note">(us-east-2, 2x t3.medium SPOT)</span></div>
+      <div class="row"><span class="tw">   │</span></div>
+
+      <div class="grp">
+      <div class="row"><span class="tw">   ├─ ns</span> <span class="ns-new">practice-drill</span> <span class="badge b-new">NEW</span></div>
+      <div class="row"><span class="tw">   │    ├─</span> deploy <strong>drill-gui</strong> <span class="note">the mothership · one long-lived pod · :8090</span></div>
+      <div class="row"><span class="tw">   │    │    ├─</span> web UI <span class="note">terminal · Monaco editor · answers · help</span></div>
+      <div class="row"><span class="tw">   │    │    ├─</span> PTY <span class="note">node-pty into tmux - both terminal views attach to one session</span></div>
+      <div class="row"><span class="tw">   │    │    ├─</span> grader <span class="note">observes what you actually run; no submission form</span></div>
+      <div class="row"><span class="tw">   │    │    ├─</span> native widgets <span class="note">built from Argo + Prometheus APIs</span></div>
+      <div class="row"><span class="tw">   │    │    └─</span> reverse proxy <span class="note">/argo/* /grafana/* - same-origin, token-injected</span></div>
+      <div class="row"><span class="tw">   │    ├─</span> svc <strong>drill-gui</strong> <span class="note">ClusterIP :8090</span></div>
+      <div class="row"><span class="tw">   │    ├─</span> pvc <strong>workspace</strong> <span class="note">gp3 · working tree + PTY logs · deleted BEFORE the cluster</span></div>
+      <div class="row"><span class="tw">   │    ├─</span> cm <strong>drill-state</strong> <span class="note">live session state · dies with the cluster</span></div>
+      <div class="row"><span class="tw">   │    └─</span> sa <strong>drill</strong> <span class="tw">→</span> ClusterRoleBinding <span class="tw">→</span> <strong>cluster-admin</strong></div>
+      </div>
+
+      <div class="grp">
+      <div class="row"><span class="tw">   ├─ ns</span> <span class="ns-new">git</span> <span class="badge b-new">NEW</span> <span class="note">permanent platform infra, built at make up</span></div>
+      <div class="row"><span class="tw">   │    ├─</span> deploy <strong>git-server</strong> <span class="note">init container clones from GitHub, then serves</span></div>
+      <div class="row"><span class="tw">   │    ├─</span> svc <strong>drill-git</strong></div>
+      <div class="row"><span class="tw">   │    └─</span> readinessProbe <span class="note">no endpoints until refs are complete</span></div>
+      </div>
+
+      <div class="grp">
+      <div class="row"><span class="tw">   ├─ ns</span> <span class="ns">argocd</span> <span class="badge b-has">exists</span></div>
+      <div class="row"><span class="tw">   │    ├─</span> argocd-server · repo-server · application-controller · redis</div>
+      <div class="row"><span class="tw">   │    └─</span> app <strong>practice-app</strong> <span class="tw">→</span> cluster git <span class="note">ONE Application, permanently</span></div>
+      </div>
+
+      <div class="grp">
+      <div class="row"><span class="tw">   ├─ ns</span> <span class="ns">practice-app</span> <span class="badge b-has">exists</span> <span class="note">what every scenario mutates</span></div>
+      <div class="row"><span class="tw">   │    └─</span> frontend (nginx) · backend (postgrest) · db-seed job · practice-db secret</div>
+      </div>
+
+      <div class="grp">
+      <div class="row"><span class="tw">   ├─ ns</span> <span class="ns">monitoring</span> <span class="badge b-has">exists</span> <span class="note">surfaced contextually, when a scenario needs it</span></div>
+      <div class="row"><span class="tw">   │    └─</span> prometheus · grafana · alertmanager · kube-state-metrics</div>
+      </div>
+
+      <div class="grp">
+      <div class="row"><span class="tw">   └─ ns</span> <span class="ns">kube-system</span> <span class="badge b-has">exists</span></div>
+      <div class="row"><span class="tw">        └─</span> vpc-cni · coredns · kube-proxy · ebs-csi · metrics-server · aws-lb-controller</div>
+      </div>
+
+      <hr />
+
+      <div class="row"><strong>outside the cluster</strong></div>
+      <div class="row"><span class="tw">   ├─</span> RDS postgres <span class="note">db.t4g.micro</span></div>
+      <div class="row"><span class="tw">   ├─</span> S3 practice bucket <span class="note">IRSA scenario</span></div>
+      <div class="row"><span class="tw">   ├─</span> GitHub <span class="note">upstream `origin` for cluster git</span></div>
+      <div class="row"><span class="tw">   └─</span> your laptop <span class="note"><code>make up</code> / <code>make down</code> · <code>drill-progress/</code> · sync watcher</span></div>
+    </div>
+
+    <div class="legend">
+      <span><span class="badge b-new">NEW</span> we build it</span>
+      <span><span class="badge b-has">exists</span> already running today</span>
+    </div>
+
+    <h2>Vocabulary</h2>
+    <p class="dim" style="margin-top:0">Four things in this design are "the repo". These terms are used precisely.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Term</th><th>Lives</th><th>Holds</th></tr></thead>
+        <tbody>
+          <tr><td><strong>local repo</strong></td><td>your laptop</td><td>the project + <code>drill-progress/</code> (gitignored)</td></tr>
+          <tr><td><strong>workspace</strong></td><td>PVC in the drill pod</td><td>the checked-out chart you edit in the GUI</td></tr>
+          <tr><td><strong>cluster git</strong></td><td>ns <code>git</code></td><td>what Argo CD actually reads</td></tr>
+          <tr><td><strong>GitHub</strong></td><td>github.com</td><td><code>origin</code> for both</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="flow" style="margin-top:0.9rem">
+      autosave <span class="tw">──▶</span> <strong>workspace</strong> <span class="note">Argo sees nothing. you cannot lose work.</span><br />
+      commit &nbsp;&nbsp;<span class="tw">──▶</span> <strong>cluster git</strong> <span class="note">Argo syncs. this is the moment things happen.</span><br />
+      push &nbsp;&nbsp;&nbsp;&nbsp;<span class="tw">──▶</span> <strong>GitHub</strong> <span class="note">deliberate. only scenarios 09 and 12 need it.</span>
+    </div>
+
+    <h2>Who talks to whom</h2>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>From</th><th>To</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>browser</td><td>ALB <span class="tw">→</span> drill-gui</td><td>the whole environment - terminal, editor, answers, help</td></tr>
+          <tr><td>drill-gui</td><td>kube API <span class="dim">(<code>drill</code> SA)</span></td><td>grade against live state; mutate for break/fix cards</td></tr>
+          <tr><td>drill-gui</td><td>argocd + prometheus APIs</td><td>native status widgets, and the reverse proxy for full apps</td></tr>
+          <tr><td>drill-gui PTY</td><td>kube API</td><td>your real <code>kubectl</code>, which the grader observes</td></tr>
+          <tr><td>argocd controller</td><td>drill-git</td><td>clone + poll the chart you edit in the browser</td></tr>
+          <tr><td>argocd controller</td><td>ns practice-app</td><td>sync - this is what stomps <code>rollout undo</code></td></tr>
+          <tr><td>laptop watcher</td><td>kube API <span class="dim">(watch)</span></td><td>re-bundle <code>drill-progress/</code> on every task pass</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Startup order and handover</h2>
+    <div class="flow">
+      EKS cluster <span class="tw">──▶</span> cluster git <span class="tw">──▶</span> Argo CD <span class="tw">──▶</span> practice-app<br />
+      <span class="tw">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(GUI starts independently and reports what it waits on)</span>
+    </div>
+    <p style="margin-top:0.9rem">
+      The Makefile is <strong>demoted, never archived</strong> - if the GUI is the only way in and it breaks, there is no way in.
+      <code>make up</code>/<code>down</code>/<code>kubeconfig</code> stay on the laptop forever; you cannot create a cluster from a pod that
+      does not exist, nor destroy the floor you stand on. Everything else moves into the GUI, and those targets refuse while the
+      GUI holds the wheel - explaining <em>what</em> they would break, with <code>FORCE=1</code> as the escape hatch.
+    </p>
+
+    <h2>Decisions</h2>
+
+    <div class="d">
+      <h4><span class="n">Q1</span>Argo CD reads exactly one source, forever</h4>
+      <p>Cluster git is permanent platform infra built at <code>make up</code>. One Application, always. GitHub becomes its upstream, so scenarios 09 and 12 keep a real push/pull loop.</p>
+      <p class="rej"><b>Rejected:</b> swapping two Applications per drill, retiring the GitHub Application, a separate namespace. All three <em>manage</em> a conflict that need not exist.</p>
+    </div>
+
+    <div class="d">
+      <h4><span class="n">Q2</span>Progress is a save file, not a diary</h4>
+      <p>Curriculum progress is a <code>git bundle</code> in <code>drill-progress/</code> on your laptop, gitignored. Live session state is a ConfigMap. Resume <em>converges to a declared state</em> rather than replaying actions.</p>
+      <p class="rej"><b>Rejected:</b> a DrillProgress CRD, etcd snapshots (unavailable on EKS), Velero, pushing drill branches to GitHub, a database.</p>
+    </div>
+
+    <div class="d">
+      <h4><span class="n">Q2a</span>A watcher syncs on every task pass</h4>
+      <p>Kubernetes watch API, not polling. The bundle is streamed out with <code>kubectl exec ... git bundle create -</code>, so no port-forward is held open. Atomic temp-file writes. Lifecycle is part of the session apply.</p>
+    </div>
+
+    <div class="d">
+      <h4><span class="n">Q3</span>Internet-facing ALB, three conditions</h4>
+      <p>~$1 per 30-hour cycle. Shared IngressGroup so everything future joins <em>one</em> ALB. A pre-destroy hook, because the controller owns the ALB and Terraform cannot sequence its deletion. Source-IP restricted SG, without which this is an unauthenticated cluster-admin web terminal on the public internet.</p>
+      <p class="rej"><b>Deferred:</b> ALB OIDC auth - needs HTTPS → ACM → a Route53 domain not currently configured. It is the multi-user growth path.</p>
+    </div>
+
+    <div class="d">
+      <h4><span class="n">Q4</span>Integrations are contextual, and mostly not iframes</h4>
+      <p>Native widgets from the Argo and Prometheus APIs are preferred - they look like this app. Grafana <code>d-solo</code> for single charts. Reverse proxy for full apps when the lesson <em>is</em> the app.</p>
+      <p class="rej"><b>Why one host, path-routed:</b> subdomain-per-app cannot be wrapped - different origins block framing and cookies.</p>
+    </div>
+
+    <div class="d">
+      <h4><span class="n">Q5</span>One long-lived pod; sessions are append-only</h4>
+      <p><code>make scenario N=NN</code> switches what the mothership is doing, it does not build a new pod. Redoing a scenario creates a <em>new</em> session in a results table with running totals. Nothing is overwritten.</p>
+    </div>
+
+    <div class="d">
+      <h4><span class="n">Q6</span>TypeScript both ends</h4>
+      <p>Fastify + <code>node-pty</code> + <code>@kubernetes/client-node</code> behind React + Vite + xterm.js + Monaco. Shared websocket message types make protocol mismatches compile errors.</p>
+      <p class="rej"><b>Rejected:</b> hand-rolling RFC6455 - only ever justified by the stdlib-only constraint, which died when we chose to build an image.</p>
+    </div>
+
+    <div class="d">
+      <h4><span class="n">Q7</span>Refuse and explain, with an escape hatch</h4>
+      <p>Locked targets name the consequence, not just the refusal. <code>FORCE=1</code> overrides, so a stale lock never forces you to destroy a cluster mid-drill. GUI on 8090, clear of <code>argo-ui</code> (8080) and <code>grafana-ui</code> (3000).</p>
+    </div>
+
+    <h2>Known unknown</h2>
+    <div class="d" style="border-left-color: var(--warn)">
+      <h4>The Argo-clones-cluster-git spike is unproven</h4>
+      <p>
+        The entire GitOps half of this design rests on Argo CD successfully cloning from the in-cluster git server over the
+        chosen protocol. Git supports it and Argo shells out to git, but this is assumed rather than demonstrated. It belongs
+        at the <strong>front</strong> of the implementation plan. Fallback if it fails is a proper HTTP git backend in the pod -
+        more moving parts, not a redesign.
+      </p>
+    </div>
+
+    <script>
+      const t = document.getElementById("toggle");
+      t.addEventListener("click", () => {
+        const r = document.documentElement;
+        const next = r.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        r.setAttribute("data-theme", next);
+        t.textContent = next === "dark" ? "light" : "dark";
+      });
+    </script>
+  </body>
+</html>
