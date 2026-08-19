@@ -28,15 +28,43 @@ Copied verbatim from the spec and `CLAUDE.md`. Every task's requirements implici
 - Ports already taken: `make argo-ui` uses 8080, `make grafana-ui` uses 3000. The drill GUI uses **8090**.
 - Local tooling confirmed present: `kind` (/usr/local/bin/kind), `minikube`, `kubectl`, `podman` 4.9.3, `node` v20.20.2, `npm`, `python3` 3.12.3, `jq`, `tmux`. **`helm` is NOT installed on the host** and must run in Podman via `docker.io/alpine/helm:latest`.
 
-## Deviations from the spec, with reasoning
+## One deviation from the spec
 
-Two places where building it revealed a better answer than the spec recorded. Both are deliberate and both are implemented by this plan; the spec should be amended to match once Phase 3 lands.
+**Cluster git is seeded by streaming a bundle in, not by an init container cloning GitHub.**
 
-**1. Cluster git is seeded by streaming a bundle in, not by an init container cloning GitHub.**
-The spec's Q1 says the init container clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses. That mechanism is a script the user runs after apply, so Terraform cannot supply the token at init-container time, and a private repo would make the first apply fail. Instead the init container runs `git init --bare` only, and a new `make git-seed` target streams `git bundle create - --all` from the local repo into the pod. This removes the PAT from the cluster entirely, removes the dependency on GitHub being reachable from a private subnet, and reuses the exact primitive the sync watcher already needs, just in the other direction. The readiness gate the spec actually cared about is preserved and strengthened: the probe requires a `.seeded` marker, so until the bundle lands the Service has no endpoints and Argo retries cleanly instead of syncing a half-served repo.
+This contradicts the spec and the spec should be amended once Phase 3 lands.
 
-**2. The grader is TypeScript, not Python.**
-The spec picked TOML because the repo is stdlib-only Python, and separately picked TypeScript for the app. It never said which language grades. Grading happens per submission inside the GUI's Node process, so putting the grader in Python would mean shelling out to a Python runtime from the app image for every submission. Instead the TOML file itself is the cross-language contract: Python reads it to render `PRACTICE_ANSWERS.html` and never grades; TypeScript reads it to grade and never renders. Two consumers, one source of truth, no runtime coupling.
+Q1 says the init container clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses.
+That mechanism is a script the user runs after apply, so Terraform cannot supply the token at init-container time, and a private repo would make the first apply fail.
+Instead the init container runs `git init --bare` only, and a new `make git-seed` target streams `git bundle create - --all` from the local repo into the pod.
+This removes the PAT from the cluster entirely, removes the dependency on GitHub being reachable from a private subnet, and reuses the exact primitive the sync watcher already needs, just in the other direction.
+The readiness gate the spec actually cared about is preserved and strengthened: the probe requires a `.seeded` marker, so until the bundle lands the Service has no endpoints and Argo retries cleanly instead of syncing a half-served repo.
+
+## Where each language runs, and why
+
+The spec settled that the app is TypeScript on both ends (Q6) and that answers are TOML (because the repo is stdlib-only Python and `tomllib` is already used by `scripts/bootstrap.py`).
+It did not say which language does the grading, so this plan decides it. Recording the split here because "the repo is Python and the app is TypeScript" is the kind of thing that reads as a contradiction until the line between them is drawn explicitly.
+
+| Runs where                      | Language   | What                                                                                                                             |
+| ------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| In the cluster, in the pod      | TypeScript | `drill/web` (React, xterm.js, Monaco) and `drill/server` (Fastify, PTY, **the grader**, the proxy)                               |
+| On the laptop, called by `make` | Python     | `bootstrap.py`, `git-seed.py`, `pre-destroy.py`, `progress.py`, `drill-watch.py`, `scenario.py`, `handover.py`, `gen-answers.py` |
+
+**Python is never in the container image and never serves a byte to the browser.**
+It is the same laptop-side CLI glue every script in `scripts/` already is.
+It stays Python because `make up` currently needs only `python3`, and `bootstrap.py` is what generates the tfvars; moving that to TypeScript would make Node a prerequisite for bringing up a cluster, which is a real regression for a repo whose pitch is "clone it and `make up`".
+
+**The grader is TypeScript because of where it runs, not because Python was rejected.**
+Grading happens per submission inside the GUI's Node process. A Python grader would mean shipping a Python runtime in the app image and shelling out to it on every submission, for nothing.
+
+**The TOML file is the boundary between them.**
+Python reads it to render `PRACTICE_ANSWERS.html` and never grades.
+TypeScript reads it to grade and never renders.
+Two consumers, one source of truth, no runtime coupling.
+
+**Known wart: the TOML is validated twice**, in `scripts/answers.py::_validate()` and `drill/server/src/grader/answers.ts::validate()`.
+If the two drift, a file can pass generation and fail grading, which is the worst of both.
+Task 1.1 Steps 6-7 build a shared fixture set of deliberately-invalid TOML, and Task 2.4 Step 6 runs the same files through the TypeScript validator, so drift becomes a test failure rather than a support ticket.
 
 ## Phase map
 
@@ -983,11 +1011,76 @@ def _validate_hints(task: dict, where: str) -> None:
 Run: `python3 tests/test_answers.py`
 Expected: PASS on all assertions, ending `answers: 11 passed, 0 failed`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Create the shared invalid-TOML fixtures**
+
+The TOML is read by two validators in two languages: this one, and `drill/server/src/grader/answers.ts` in Task 2.4.
+Two implementations of one ruleset drift, and when they drift a file passes generation and fails grading, which is the worst of both.
+The fix is one fixture set that both must reject, so drift becomes a test failure instead of a support ticket.
+
+Create `tests/fixtures/answers-invalid/`, one file per rule, each named after the rule it breaks:
+
+```
+tests/fixtures/answers-invalid/
+  schema-too-new.toml        # schema = 2
+  no-tasks.toml              # valid header, no [[tasks]]
+  unknown-grader.toml        # grader = "vibes"
+  duplicate-task-id.toml     # two tasks with id = "1"
+  command-without-accept.toml
+  command-accept-without-verb.toml
+  file-without-key.toml
+  prose-without-must-include.toml
+  hint-without-text.toml
+  empty-title.toml
+```
+
+Each file is a minimal valid document with exactly one thing wrong, so a rejection can only be caused by the rule under test.
+For example `tests/fixtures/answers-invalid/unknown-grader.toml`:
+
+```toml
+schema   = 1
+scenario = "99"
+title    = "fixture"
+time     = "x"
+needs    = "x"
+ticket   = "x"
+
+[[tasks]]
+id     = "1"
+prompt = "p"
+grader = "vibes"
+```
+
+Add the conformance test to `tests/test_answers.py`:
+
+```python
+def test_every_invalid_fixture_is_rejected():
+    """The same fixtures are run through the TypeScript validator in Task 2.4.
+    If one side accepts what the other rejects, the two loaders have drifted."""
+    fixtures = sorted((ROOT / "tests" / "fixtures" / "answers-invalid").glob("*.toml"))
+    if not fixtures:
+        bad("no invalid fixtures found - the conformance set is the drift alarm")
+        return
+    for path in fixtures:
+        try:
+            answers.load_path(path)
+        except answers.AnswersError:
+            ok(f"{path.name} rejected")
+        else:
+            bad(f"{path.name} was ACCEPTED - the validator is missing a rule")
+```
+
+Register it in `main()`'s tuple alongside the others.
+
+- [ ] **Step 7: Run it**
+
+Run: `python3 tests/test_answers.py`
+Expected: PASS, with one line per fixture. Any fixture that is accepted means the validator is missing that rule; fix the validator, not the fixture.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add scenarios/answers/03.toml scripts/answers.py tests/test_answers.py
-git commit -m "feat: answers TOML schema and loader for scenario 03"
+git add scenarios/answers/03.toml scripts/answers.py tests/test_answers.py tests/fixtures/answers-invalid/
+git commit -m "feat: answers TOML schema, loader, and cross-language conformance fixtures"
 ```
 
 ---
@@ -2705,8 +2798,41 @@ test("the real scenario 03 answers file loads and validates", async () => {
 });
 ```
 
+Then add the other half of the conformance set from Task 1.1, so the two validators are pinned to each other rather than merely both existing:
+
+```typescript
+import { readdir } from "node:fs/promises";
+import { AnswersError } from "./answers.ts";
+
+/**
+ * The same fixtures scripts/answers.py rejects in tests/test_answers.py.
+ *
+ * Two implementations of one ruleset drift. When they drift, a TOML file passes
+ * generation and fails grading, or worse, passes grading with a rule silently
+ * unenforced. This turns that drift into a red test on whichever side moved.
+ */
+test("every invalid fixture is rejected here too", async () => {
+  const dir = "../../tests/fixtures/answers-invalid";
+  const files = (await readdir(dir)).filter((f) => f.endsWith(".toml"));
+  assert.ok(
+    files.length > 0,
+    "no fixtures found - the conformance set is the drift alarm",
+  );
+
+  for (const file of files) {
+    await assert.rejects(
+      () => loadAnswers(file.replace(/\.toml$/, ""), dir),
+      AnswersError,
+      `${file} was ACCEPTED by the TypeScript validator but rejected by the Python one`,
+    );
+  }
+});
+```
+
 Run: `make -f Makefile.test drill-test`
-Expected: PASS. If the path resolution fails inside the container, the mount is `/app` and the repo root is its parent, which is not mounted. Fix by mounting the repo root instead: change `NODE` in `Makefile.test` to mount `$(CURDIR)` at `/repo` with `-w /repo/drill`, and pass `../scenarios/answers`.
+Expected: PASS, with every fixture rejected. A fixture that passes here means this validator is missing a rule `scripts/answers.py` has; add the rule, never delete the fixture.
+
+If the path resolution fails inside the container, the mount is `/app` and the repo root is its parent, which is not mounted. Fix by mounting the repo root instead: change `NODE` in `Makefile.test` to mount `$(CURDIR)` at `/repo` with `-w /repo/drill`, and use `../scenarios/answers` and `../tests/fixtures/answers-invalid`. Do this once here; Tasks 5.1 onward assume the repo-root mount.
 
 - [ ] **Step 7: Commit**
 
@@ -5230,4 +5356,4 @@ Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions
 
 Scenario 03 is one of twelve. The other eleven are ported one at a time, each getting its own answers TOML and whatever grader kinds it needs, and each may extend the schema - which is why `schema = 1` and the `grader` discriminator exist. Scenario 04's card also needs rewriting, because the platform ALB is now the ops plane: it becomes "join the existing ALB with a new Ingress, then stand up an NLB separately to feel the difference", which is closer to what you would actually do at work than provisioning a load balancer from scratch.
 
-Two spec amendments to make once Phase 3 lands: the cluster git seeding mechanism and the grader's language, both documented under "Deviations from the spec" at the top of this plan.
+One spec amendment to make once Phase 3 lands: the cluster git seeding mechanism, documented under "One deviation from the spec" at the top of this plan. The language split is not an amendment, because the spec never assigned the grader a language; it is written up under "Where each language runs, and why" as a decision this plan made.
