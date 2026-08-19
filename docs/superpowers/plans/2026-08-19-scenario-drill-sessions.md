@@ -70,24 +70,30 @@ Task 1.1 Steps 6-7 build a shared fixture set of deliberately-invalid TOML, and 
 
 Each phase is an independently reviewable deliverable and is intended to become one work-order ticket under a single epic.
 
-| Phase | Deliverable                                               | Cost                | Needs approval |
-| ----- | --------------------------------------------------------- | ------------------- | -------------- |
-| 0     | Local sandbox harness + the Argo-clones-cluster-git spike | $0 (kind)           | no             |
-| 1     | Answers TOML as the single source of truth                | $0                  | no             |
-| 2     | The grader                                                | $0 (Podman)         | no             |
-| 3     | Terraform: cluster git                                    | $0 (ministack)      | no             |
-| 4     | Terraform: ALB, shared IngressGroup, source-IP SG         | $0 (ministack)      | no             |
-| 5     | The mothership GUI - **first visual**                     | $0 (Podman + kind)  | no             |
-| 6     | Session lifecycle, watcher, Makefile handover             | $0 (kind)           | no             |
-| 7     | Live verification on real EKS                             | ~$1 for a 30h cycle | **YES**        |
+| Phase | Deliverable                                       | Cost                | Needs approval |
+| ----- | ------------------------------------------------- | ------------------- | -------------- |
+| 0     | Local sandbox harness                             | $0 (kind)           | no             |
+| 1     | Answers TOML as the single source of truth        | $0                  | no             |
+| 2     | The grader                                        | $0 (Podman)         | no             |
+| 3     | Terraform: cluster git                            | $0 (ministack)      | no             |
+| 4     | Terraform: ALB, shared IngressGroup, source-IP SG | $0 (ministack)      | no             |
+| 5     | The mothership GUI - **first visual**             | $0 (Podman + kind)  | no             |
+| 6     | Session lifecycle, watcher, Makefile handover     | $0 (kind)           | no             |
+| 7     | Live verification on real EKS                     | ~$1 for a 30h cycle | **YES**        |
 
-**Phase 0 gates everything.** If Argo CD will not clone from an in-cluster git server, Phases 3, 5 and 6 change shape and this plan gets revised before any of them start.
+**The one live risk is in Task 3.2**, not in Phase 0. Whether Argo CD will clone from an in-cluster git server over plain HTTP is unproven, and it is the assumption the whole GitOps half rests on. It is validated as Task 3.2's acceptance test on kind, at $0, against the manifests that actually ship. Task 3.2 carries a ranked fallback ladder so a failure there is a menu pick rather than a redesign. See "The cluster git protocol risk" inside Task 3.2.
 
 **First visual is Phase 5, Task 5.3**, served from a Vite dev server in Podman on a probed port in 30000+, per the container-sandbox skill's single-container preview pattern. No cluster and no AWS needed to look at it.
 
 ---
 
-## Phase 0: Local sandbox harness and the Argo spike
+## Phase 0: Local sandbox harness
+
+This phase used to contain a second task, a standalone spike that stood a git server up on kind, pointed Argo at it, recorded a verdict and then deleted itself. It was cut deliberately.
+
+The reasoning: the spike built the same manifest Task 3.2 builds, proved it, threw it away, and then Task 3.2 rebuilt it in Terraform. Writing it twice bought nothing, because a negative result never killed the design - it only ever meant "swap the container." A gate is the wrong instrument for a risk whose worst case is a substitution.
+
+What the spike was genuinely protecting against is preserved and strengthened, not dropped. It moved into Task 3.2 as an acceptance test rather than a prerequisite, so the validation runs on kind at $0 against the manifests that actually ship, and the fallback options are written down in advance instead of being researched at the moment of failure. See "The cluster git protocol risk" in Task 3.2.
 
 ### Task 0.1: Kind sandbox harness and its documentation
 
@@ -329,217 +335,6 @@ Kind clusters survive reboots and each one holds a container plus its images. Al
 git add scripts/kind-sandbox.sh tests/kind-sandbox.sh Makefile.test .gitignore .claude/skills/container-sandbox/SKILL.md
 git commit -m "test: kind sandbox harness for \$0 local cluster testing"
 ````
-
----
-
-### Task 0.2: The Argo-clones-cluster-git spike
-
-The entire GitOps half of the design rests on Argo CD being able to clone from a git server running inside the same cluster over plain HTTP with no credentials. This task proves or disproves that on kind before any Terraform is written. Its output is a decision record, not code that ships.
-
-**Files:**
-
-- Create: `docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md`
-- Create: `spike/argo-cluster-git/git-server.yaml` (throwaway; deleted in Step 8)
-- Create: `spike/argo-cluster-git/application.yaml` (throwaway; deleted in Step 8)
-
-**Interfaces:**
-
-- Consumes: `scripts/kind-sandbox.sh` from Task 0.1.
-- Produces: a written verdict that Phase 3 depends on, plus the exact confirmed values for: the git protocol (`http` dumb vs `git-http-backend` smart), the in-cluster `repoURL` Argo accepts, and whether `git update-server-info` is required per push.
-
-- [ ] **Step 1: Bring the sandbox up and install Argo CD**
-
-```bash
-make -f Makefile.test kind-up
-export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
-```
-
-Expected: `deployment "argocd-repo-server" successfully rolled out`.
-
-- [ ] **Step 2: Stand up a dumb-HTTP git server serving this repo**
-
-Create `spike/argo-cluster-git/git-server.yaml`. Dumb HTTP is tried first because it is a static nginx serving a directory, which is the smallest thing that could possibly work and has no CGI to configure.
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: git
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: git-nginx
-  namespace: git
-data:
-  default.conf: |
-    server {
-      listen 8080;
-      root /srv;
-      autoindex on;
-      location / {
-        try_files $uri $uri/ =404;
-      }
-    }
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: git-server
-  namespace: git
-spec:
-  replicas: 1
-  selector:
-    matchLabels: { app: git-server }
-  template:
-    metadata:
-      labels: { app: git-server }
-    spec:
-      initContainers:
-        - name: init-repo
-          image: alpine/git:latest
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -e
-              git init --bare /srv/repo.git
-              touch /srv/repo.git/git-daemon-export-ok
-              git -C /srv/repo.git update-server-info
-          volumeMounts:
-            - { name: repo, mountPath: /srv }
-      containers:
-        - name: nginx
-          image: nginx:1.27-alpine
-          ports:
-            - { name: http, containerPort: 8080 }
-          volumeMounts:
-            - { name: repo, mountPath: /srv }
-            - { name: conf, mountPath: /etc/nginx/conf.d }
-          readinessProbe:
-            httpGet: { path: /repo.git/info/refs, port: http }
-            initialDelaySeconds: 2
-            periodSeconds: 3
-      volumes:
-        - { name: repo, emptyDir: {} }
-        - { name: conf, configMap: { name: git-nginx } }
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: git-server
-  namespace: git
-spec:
-  selector: { app: git-server }
-  ports:
-    - { name: http, port: 80, targetPort: http }
-```
-
-Apply it and wait:
-
-```bash
-kubectl apply -f spike/argo-cluster-git/git-server.yaml
-kubectl -n git rollout status deploy/git-server --timeout=120s
-```
-
-- [ ] **Step 3: Seed the bare repo by streaming a bundle in**
-
-This is the mechanism Phase 3 will ship, so proving it here proves two things at once.
-
-```bash
-POD=$(kubectl -n git get pod -l app=git-server -o name | head -1)
-git bundle create - --all \
-  | kubectl -n git exec -i "$POD" -c nginx -- /bin/sh -c 'cat > /tmp/seed.bundle'
-kubectl -n git exec "$POD" -c nginx -- /bin/sh -c '
-  apk add --no-cache git >/dev/null 2>&1
-  git -C /srv/repo.git fetch /tmp/seed.bundle "refs/heads/*:refs/heads/*"
-  git -C /srv/repo.git symbolic-ref HEAD refs/heads/main
-  git -C /srv/repo.git update-server-info
-  ls /srv/repo.git/info/refs'
-```
-
-Expected: the final `ls` prints `/srv/repo.git/info/refs`. Record whether `apk add git` was needed, because if it was, the shipped image must bundle git rather than install it at runtime.
-
-- [ ] **Step 4: Point an Argo Application at it**
-
-Create `spike/argo-cluster-git/application.yaml`:
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: spike-practice-app
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: http://git-server.git.svc.cluster.local/repo.git
-    targetRevision: main
-    path: helm/practice-app
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: spike-app
-  syncPolicy:
-    syncOptions:
-      - CreateNamespace=true
-```
-
-```bash
-kubectl apply -f spike/argo-cluster-git/application.yaml
-sleep 20
-kubectl -n argocd get application spike-practice-app \
-  -o jsonpath='{.status.sync.status}{"\n"}{.status.conditions}{"\n"}'
-```
-
-Expected on success: sync status is `OutOfSync` (not `Unknown`) and `.status.conditions` is empty, meaning Argo cloned and rendered the chart but has not synced because sync is manual.
-
-- [ ] **Step 5: Read the repo-server logs, which is where the truth is**
-
-```bash
-kubectl -n argocd logs deploy/argocd-repo-server --tail=60 | grep -iE 'git|clone|fail|error'
-```
-
-Expected on success: a successful `git ls-remote` / fetch against the in-cluster URL. Expected on failure: `dumb http transport does not support shallow capabilities` or similar, which is the known failure mode of dumb HTTP and the trigger for Step 6.
-
-- [ ] **Step 6: If dumb HTTP failed, retry with smart HTTP**
-
-Argo CD clones with `--depth 1` by default, and the dumb HTTP transport does not support shallow fetch. If Step 5 shows that error, replace the nginx container in `git-server.yaml` with `git http-backend` behind `fcgiwrap`, or the simpler route: swap the whole container for `docker.io/rockstorm/git-server` or an image running `git daemon`. Whichever works, re-run Steps 3 to 5 and record which one.
-
-Fallback if smart HTTP is also a fight: set `spec.source.directory` aside and test whether Argo's `ARGOCD_GIT_ATTEMPTS`/no-shallow behaviour can be configured via the `argocd-cm` key `reposerver.git.request.timeout` and the repo-server `--disable-shallow-clone`-equivalent. Record what was needed.
-
-- [ ] **Step 7: Write the decision record**
-
-Create `docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md` covering, with the actual command output pasted in:
-
-- Verdict: does Argo CD clone from in-cluster git, yes or no.
-- The exact working `repoURL`.
-- Which protocol won (dumb HTTP, smart HTTP via `git-http-backend`, or `git://`), and the error that ruled the others out.
-- Whether `git update-server-info` must run after every push, which determines whether Phase 3 needs a post-receive hook.
-- Whether the serving image must ship `git` on PATH.
-- Argo CD version tested, and the kind node image version.
-- Anything that would change the Phase 3 or Phase 6 design.
-
-- [ ] **Step 8: Tear the spike down**
-
-A spike's output is an answer. The manifests do not ship.
-
-```bash
-rm -rf spike/
-make -f Makefile.test kind-down
-```
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md
-git commit -m "docs: record the argo-clones-cluster-git spike result"
-```
-
-- [ ] **Step 10: Stop and report**
-
-If the verdict is negative, do not start Phase 3. Report the finding and the options, and let the user pick a new direction. If positive, continue.
 
 ---
 
@@ -2976,7 +2771,25 @@ git commit -m "feat: config values for cluster git and the drill ALB"
 
 ### Task 3.2: The cluster git server
 
-An nginx pod serving a bare repo over the protocol Task 0.2 proved, in namespace `git`, with a readiness probe that only passes once the repo is genuinely seeded.
+A pod serving a bare repo in namespace `git`, with a readiness probe that only passes once the repo is genuinely seeded, plus the kind test that proves Argo CD can actually read it.
+
+**The cluster git protocol risk.**
+This task carries the one genuinely unproven assumption in the plan: that Argo CD will clone from a git server inside the same cluster, over plain HTTP, with no credentials.
+
+Why it is not obvious. Argo's repo-server clones with `--depth 1`. Shallow fetch is a capability of the _smart_ HTTP transport. A bare repo served by static nginx is _dumb_ HTTP, which does not implement it, so Step 7 may fail with `dumb http transport does not support shallow capabilities` or similar.
+
+Why it is not a gate. A failure never invalidates the design, it only changes which container serves the repo. So instead of proving it in a throwaway spike first, Step 7 proves it on kind against the manifests that ship, and the alternatives are ranked here in advance:
+
+| #   | Option                                                        | Fidelity                               | Cost of switching                                       | What it costs you                                                                                |
+| --- | ------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 1   | Dumb HTTP, static nginx over a bare repo (what Step 1 writes) | full GitOps                            | baseline                                                | may fail on Argo's `--depth 1` shallow clone                                                     |
+| 2   | Smart HTTP: `git http-backend` CGI behind `fcgiwrap`          | full GitOps                            | one ConfigMap and one image swap                        | nothing functional; more container config to read                                                |
+| 3   | `git daemon` on 9418, `git://` repoURL                        | full GitOps                            | one image swap, plus confirming Argo accepts the scheme | nothing, if Argo takes `git://`                                                                  |
+| 4   | Gitea with the sqlite backend                                 | full GitOps **and a browsable web UI** | ~150MB image and a handful of env vars                  | more moving parts; arguably an upgrade for a learning repo                                       |
+| 5   | Argo reads GitHub directly (the spec's original position)     | full GitOps                            | revert the seeding deviation                            | needs a PAT in the cluster and egress to github.com, which is exactly what the deviation removed |
+| 6   | No Argo; the drill server runs `helm upgrade` on submit       | **simulated**                          | rewrites Phase 6                                        | the entire GitOps lesson                                                                         |
+
+Work down the ladder in order. Rung 6 is the floor, not a peer of the others: there are four better rungs above it and it is the only one that stops teaching GitOps. If the ladder is entered at all, record which rung won and why in a comment at the top of `cluster-git.tf`, and report it to the user before continuing to Task 3.3, because rungs 3 to 6 change `cluster_git_url` and therefore Task 3.3's Argo Application.
 
 **Files:**
 
@@ -2986,7 +2799,7 @@ An nginx pod serving a bare repo over the protocol Task 0.2 proved, in namespace
 
 **Interfaces:**
 
-- Consumes: `enable_cluster_git` from Task 3.1; the protocol verdict from Task 0.2.
+- Consumes: `enable_cluster_git` from Task 3.1; `scripts/kind-sandbox.sh` from Task 0.1.
 - Produces:
   - Namespace `git`, a `git-server` Deployment, Service `git-server` on port 80, PVC `git-repo`, ConfigMap `git-nginx`.
   - Platform module outputs: `cluster_git_url` (string, `http://git-server.git.svc.cluster.local/repo.git`, empty when disabled), `cluster_git_namespace` (string), `cluster_git_deployment` (string). Stack forwards all three; the env re-exports them so `make git-seed` can find the pod without hardcoding names.
@@ -3159,7 +2972,7 @@ resource "kubectl_manifest" "git_service" {
 }
 ```
 
-**If Task 0.2 concluded dumb HTTP does not work**, replace the `nginx` container with whatever the spike proved, keep the `/healthz`-from-disk readiness gate (adapt the path), and note the change in a comment citing the spike doc.
+This is rung 1 of the ladder. Do not pre-emptively climb it: write the simple thing, and let Step 7 tell you whether it holds. If Step 7 sends you up the ladder, keep the `/healthz`-from-disk readiness gate no matter which rung you land on (adapt the path if the new server has a different docroot), because that gate is what stops Argo syncing a half-served repo and it is independent of the protocol.
 
 - [ ] **Step 2: Add the outputs**
 
@@ -3222,7 +3035,74 @@ kubectl -n git get endpoints git-server
 
 Expected: the Deployment rolls out, and `endpoints` shows **no addresses**, because `/healthz` 503s until `.seeded` exists. That empty endpoint list is the whole point of the probe - confirm it before moving on.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Seed it, and prove Argo CD can read it - the acceptance test**
+
+Step 6 proved Kubernetes accepts the manifests. This proves the thing the manifests exist for. This is the assumption named in "The cluster git protocol risk" above, and it is the gate on Task 3.3.
+
+Still on the same kind cluster:
+
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
+```
+
+Seed the bare repo by streaming a bundle in. This is the mechanism Task 3.3 ships, so running it here proves the server and the seeding path in one pass:
+
+```bash
+POD=$(kubectl -n git get pod -l app=git-server -o name | head -1)
+git bundle create - --all \
+  | kubectl -n git exec -i "$POD" -c nginx -- /bin/sh -c 'cat > /tmp/seed.bundle'
+kubectl -n git exec "$POD" -c nginx -- /bin/sh -c '
+  command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1
+  git -C /srv/repo.git fetch --force /tmp/seed.bundle "refs/heads/*:refs/heads/*"
+  git -C /srv/repo.git symbolic-ref HEAD refs/heads/main
+  git -C /srv/repo.git update-server-info
+  date -u +%Y-%m-%dT%H:%M:%SZ > /srv/repo.git/.seeded'
+kubectl -n git get endpoints git-server
+```
+
+Expected: `endpoints` now shows **one address**. The probe flipping from zero to one endpoints on the `.seeded` marker is the ordering guarantee working. Record whether `apk add git` was needed, because if it was, the shipped image must bundle `git` rather than install it at runtime on a cluster that may have no egress.
+
+Now point an Argo Application at it:
+
+```bash
+kubectl apply -f - <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cluster-git-acceptance
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: http://git-server.git.svc.cluster.local/repo.git
+    targetRevision: main
+    path: helm/practice-app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: acceptance-app
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+YAML
+sleep 20
+kubectl -n argocd get application cluster-git-acceptance \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.conditions}{"\n"}'
+kubectl -n argocd logs deploy/argocd-repo-server --tail=60 | grep -iE 'git|clone|fail|error'
+```
+
+**Expected on success:** sync status is `OutOfSync`, not `Unknown`, and `.status.conditions` is empty. That combination means Argo cloned the repo and rendered the chart, and is only holding back because sync is manual. The repo-server log shows a successful `ls-remote` or fetch against the in-cluster URL.
+
+**Expected on failure:** sync status `Unknown` with a `ComparisonError` condition, and the repo-server log carrying the reason. If that reason mentions shallow capabilities or the dumb transport, go to rung 2 of the ladder, redo Steps 1 and 4 to 7, and record which rung won. Report to the user before starting Task 3.3 if you landed anywhere below rung 2, because rungs 3 to 6 change `cluster_git_url`.
+
+Tear down when the verdict is in:
+
+```bash
+make -f Makefile.test kind-down
+```
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add terraform/modules/platform/cluster-git.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf
@@ -5342,7 +5222,7 @@ Say plainly what passed, what did not, and what was skipped. A kind pass is nece
 
 Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions-design.md`.
 
-**Spec coverage.** Every section maps to a task. Vocabulary and the autosave/commit/push split -> Tasks 5.3 and 6.2. Startup dependency chain -> Task 5.4's `checkDependencies`. Makefile handover -> Task 6.4. Q1 (one Argo source) -> Tasks 0.2, 3.2, 3.3. Q2 (save file, not diary) -> Task 6.1. Q2a (the watcher) -> Task 6.2. Q3 (ALB with three conditions) -> Tasks 4.1 and 4.2; the shared IngressGroup lands in Task 5.5 with the Ingress that needs it. Q4 (contextual integrations) -> Task 5.4. Q5 (one long-lived pod, append-only sessions) -> Tasks 5.5 and 6.1. Q6 (TypeScript both ends) -> Task 2.1. Q7 (refusal and port 8090) -> Tasks 6.4 and 5.1. Build-time items: `drill-progress/` in `.gitignore` -> Task 6.1 Step 1, before the directory can exist; three config values -> Task 3.1; port 8090 -> `config.ts`. Answers TOML as source of truth generating the HTML -> Phase 1. Semantic grading with the alias table -> Phase 2. `cluster-admin` -> Task 5.5. Concurrent-scenario refusal -> Task 6.3. Exit and tear down from the GUI -> Task 6.5. Testing section -> grader unit tests (Phase 2), byte-identical generator test (Task 1.2), `make -f Makefile.test test` kept passing throughout, the spike (Task 0.2), and live drilling (Phase 7 Step 4).
+**Spec coverage.** Every section maps to a task. Vocabulary and the autosave/commit/push split -> Tasks 5.3 and 6.2. Startup dependency chain -> Task 5.4's `checkDependencies`. Makefile handover -> Task 6.4. Q1 (one Argo source) -> Tasks 3.2 and 3.3. Q2 (save file, not diary) -> Task 6.1. Q2a (the watcher) -> Task 6.2. Q3 (ALB with three conditions) -> Tasks 4.1 and 4.2; the shared IngressGroup lands in Task 5.5 with the Ingress that needs it. Q4 (contextual integrations) -> Task 5.4. Q5 (one long-lived pod, append-only sessions) -> Tasks 5.5 and 6.1. Q6 (TypeScript both ends) -> Task 2.1. Q7 (refusal and port 8090) -> Tasks 6.4 and 5.1. Build-time items: `drill-progress/` in `.gitignore` -> Task 6.1 Step 1, before the directory can exist; three config values -> Task 3.1; port 8090 -> `config.ts`. Answers TOML as source of truth generating the HTML -> Phase 1. Semantic grading with the alias table -> Phase 2. `cluster-admin` -> Task 5.5. Concurrent-scenario refusal -> Task 6.3. Exit and tear down from the GUI -> Task 6.5. Testing section -> grader unit tests (Phase 2), byte-identical generator test (Task 1.2), `make -f Makefile.test test` kept passing throughout, the Argo acceptance test on kind (Task 3.2 Step 7), and live drilling (Phase 7 Step 4).
 
 **Two known gaps, both deliberate.** Phases 6.1 through 6.5 and Tasks 5.4 and 5.5 are specified at interface-and-intent level rather than with full TDD code blocks, because they depend on choices Phase 5's first visual will change - panel layout, what the session state actually needs to carry, and what the user says when they see it. Expanding them now would be writing code against a UI nobody has looked at. **Expand them into full step-by-step tasks after Task 5.3's review**, before those tickets are cut. The second gap: Task 5.4's proxy is designed and stubbed but only exercised when scenario 07 is ported, exactly as the spec says.
 

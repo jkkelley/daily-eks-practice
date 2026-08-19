@@ -28,15 +28,15 @@ Stage 3 is what adds branch creation, PR submission and branch cleanup, so do no
 - The plan also has a **"Where each language runs, and why"** section. That is not a deviation - the spec never said which language grades. TypeScript runs in the cluster (the whole GUI, including the grader); Python is laptop-side CLI glue the Makefile calls and is never in the container image. Read it before wondering why a TypeScript app has Python next to it.
 - **Phases 6.1-6.5 and Tasks 5.4-5.5 are specified at interface level, not full TDD steps**, on purpose: they depend on what the user says when they first see the UI at Task 5.3. Expand them after that review, before those tickets are cut.
 
-**Four open questions, asked but not yet answered.** Work through them in order, one at a time. Do not assume an answer or bundle them.
+**Four open questions.** Work through them in order, one at a time. Do not assume an answer or bundle them.
 
-**Q1 - Run the Phase 0 spike first, or cut work-order tickets first?**
-Asked, awaiting an answer. This is the only one that blocks anything today.
-Recommendation was **spike first**: Phase 0 asks whether Argo CD will clone from an in-cluster git server over plain HTTP, and the known failure mode is real (Argo clones with `--depth 1`, and dumb HTTP does not support shallow fetch).
-If it fails, the fix is a different git server and that rewrites Task 3.2's manifests, `git-seed.py`'s unbundle script, and the readiness probe path.
-Cutting tickets first means cutting three that get rewritten.
-The counter-argument, stated honestly at the time: the spike **is** Ticket 0.2, so running it outside work-order slightly breaks the pipeline. Cutting the epic now and executing 0.2 first is the same order with more bookkeeping and amended 3.x tickets rather than wrong ones.
-Either works.
+**Q1 - Run the Phase 0 spike first, or cut work-order tickets first? ANSWERED: neither. The spike was cut.**
+The user's call: do not spike, record the risk with pre-decided fallbacks, and surface it at the roadblock.
+The correction I gave, which they accepted: dropping the spike does not move the discovery to Phase 3, it moves it to Phase 7 on real EKS, because `ministack` proves Terraform _plans_ and never runs a pod, so only a real cluster can tell you whether Argo clones.
+The resolution: **Task 0.2 was deleted**, and the validation moved into **Task 3.2 Step 7** as that task's acceptance test rather than a prerequisite. Same kind cluster, same commands, $0, but validating the manifests that ship instead of a throwaway.
+Task 3.2 now carries a **six-rung fallback ladder** under "The cluster git protocol risk": dumb HTTP nginx, smart HTTP via `git-http-backend`, `git daemon`, Gitea, Argo-reads-GitHub, and finally helm-on-submit with no Argo.
+Rung 6 is the floor and is the only rung that stops teaching GitOps. Work down in order; report to the user before Task 3.3 if you land below rung 2, because rungs 3 to 6 change `cluster_git_url`.
+Phase 0 is now a single task, the kind harness.
 
 **Q2 - Amend the spec to match the seeding deviation, or leave the plan as the record?**
 Low stakes. The plan documents the change and why; the spec still says the init container clones GitHub with a token.
@@ -57,7 +57,7 @@ Scope is **scenario 03 only**; the other eleven get ported one at a time afterwa
 
 **Before cutting tickets, know these:**
 
-- **Phase 0 gates everything.** The Argo-clones-cluster-git spike is still unproven. It runs on kind for $0 and its verdict changes the shape of Phases 3, 5 and 6. Nothing downstream starts until it is answered.
+- **Nothing gates everything any more.** The one live risk is Argo-clones-cluster-git, and it lives inside Task 3.2 as that task's acceptance test with a ranked fallback ladder. Phases 1 and 2 do not depend on it at all.
 - **Everything is faked locally first.** kind for cluster behaviour, ministack for Terraform, Podman for node and helm. Phase 7 is the only phase that touches AWS, and it is gated on explicit user approval with the cost stated (about $6.50 for a 30-hour cycle).
 - **The first visual is Phase 5 Task 5.3**, a Vite dev server in Podman on a probed port. No cluster, no AWS. Stop there and show the user before building the remaining panels.
 - `CLAUDE.md` hard rules still apply: no Terraform defaults, everything config-driven through `scripts/config.toml`, no PII committed, test through the container sandbox, never touch real AWS without explicit approval.
