@@ -103,7 +103,7 @@ Each phase is an independently reviewable deliverable and is intended to become 
 | 4     | Terraform: ALB, shared IngressGroup, source-IP SG | $0 (ministack)      | no             |
 | 5     | The mothership GUI - **first visual**             | $0 (Podman + kind)  | no             |
 | 6     | Session lifecycle, watcher, Makefile handover     | $0 (kind)           | no             |
-| 7     | Live verification on real EKS                     | ~$1 for a 30h cycle | **YES**        |
+| 7     | Live verification on real EKS                     | ~$6.50 for a 30h cycle | **YES**     |
 
 **The one live risk is in Task 3.2**, not in Phase 0. Whether Argo CD will clone from an in-cluster git server over plain HTTP is unproven, and it is the assumption the whole GitOps half rests on. It is validated as Task 3.2's acceptance test on kind, at $0, against the manifests that actually ship. Task 3.2 carries a ranked fallback ladder so a failure there is a menu pick rather than a redesign. See "The cluster git protocol risk" inside Task 3.2.
 
