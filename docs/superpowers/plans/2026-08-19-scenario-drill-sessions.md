@@ -20,6 +20,7 @@ Copied verbatim from the spec and `CLAUDE.md`. Every task's requirements implici
 - **No real AWS without explicit user approval.** Phases 0-6 are $0 and run entirely on kind + Podman + ministack. Phase 7 is the only phase that touches AWS, and it is gated on the user saying yes.
 - **Fake it locally first.** Terraform changes go through ministack (`make -f Makefile.test ministack`) per the vendored `.claude/skills/container-sandbox/SKILL.md`. Cluster behaviour goes through kind. Node and helm run inside Podman; there is no local `helm` binary and `npm install` never runs on the host.
 - **No PII in git.** No AWS account ids, profile names, real domains, CIDRs, or repo-owner strings outside `scripts/config.toml` and generated files. `argocd/generated/` and `drill-progress/` are git-ignored.
+- **Never create a personal access token.** When a GitHub scope is missing, extend the grant `gh` already holds: `gh auth refresh -h github.com -s <scope>`. Settled 2026-08-19 and it applies to every scope this project ever needs, not just `write:packages`. A PAT is a second credential with its own expiry that has to be stored somewhere, and every candidate is bad: `scripts/config.toml` is serialised into Terraform state, a shell export lands in history, a dotfile is one `git add -A` from being committed. `gh auth refresh` is interactive and blocks on a browser, so an agent cannot run it - print the command for the user. A classic PAT is an escape hatch for when org SSO refuses the refresh, never a first choice.
 - **Cost discipline.** Anything that bills gets a cleanup step: the drill PVC must be deleted before `terraform destroy`, and Ingresses must be deleted and the ALB confirmed gone before `terraform destroy`.
 - **Plain dashes, never em dashes**, in every file this plan creates or edits.
 - **One full sentence per line** in long Markdown files.
@@ -5312,22 +5313,30 @@ podman run --rm --entrypoint /bin/sh localhost/drill-gui:dev -c \
 
 Expected: both secret paths report `No such file or directory`, and `03.toml` is listed. If `config.toml` is present, stop and fix `.containerignore` before pushing anything anywhere.
 
-- [ ] **Step 4: Authenticate to GHCR, preferring the path with no token to store**
+- [ ] **Step 4: Authenticate to GHCR by extending the existing `gh` grant**
 
-Three ways in, in order of preference. Take the first that works and record which one in the commit message.
+**This is the decision, not a preference: scope the token `gh` already holds. Do not create a personal access token.**
 
-**4a - extend the `gh` login the repo already relies on.** This is the default. It adds the `write:packages` scope to the OAuth token `gh` already holds, so there is no token to create, paste, store or rotate, and `gh` keeps it out of any file in this repo. `scripts/argo-repo.py` already depends on `gh auth token` working, so if this repo functions at all, this path is available.
+Settled 2026-08-19, and it applies to any future GHCR or GitHub API scope this project needs, not just this one.
 
 ```bash
 gh auth refresh -h github.com -s write:packages
 gh auth token | podman login ghcr.io -u "$(gh api user -q .login)" --password-stdin
 ```
 
-Expected: `Login Succeeded!`. If `gh auth refresh` opens a browser, that is normal - it is re-consenting the existing login with one more scope.
+Expected: `Login Succeeded!`. The refresh preserves the scopes already granted and adds the one named, and it mints a replacement token - which matters only because `scripts/argo-repo.py` calls `gh auth token`, and it will simply pick up the new one.
 
-**4b - a classic personal access token.** Use this when `gh` is unavailable, or when the refresh is refused (some org SSO configurations block scope changes on an existing grant). Fine-grained tokens are not a reliable substitute here; GHCR writes expect a classic token, so do not spend time fighting a fine-grained one.
+`gh auth refresh` is **interactive**. It prints a one-time code and blocks until it is entered in a browser, so an agent cannot run it. Print the command and have the user run it, then confirm with `gh auth status` that `write:packages` appears in the scopes line.
 
-Give the user these steps verbatim rather than paraphrasing, because the settings page is easy to land on the wrong version of:
+Why this rather than a PAT, so nobody re-opens it:
+
+- **Nothing new to store.** A PAT has to live somewhere, and every candidate is worse: `scripts/config.toml` gets serialised into `config.auto.tfvars.json` and thus into Terraform state, a shell export leaks into `~/.zsh_history`, and a dotfile is one `git add -A` from being committed. `gh` keeps its token in its own config outside this repo.
+- **Nothing new to rotate.** A PAT is a second credential with its own expiry, and the failure mode is a 90-day-later `denied` that nobody connects to the token they made in August.
+- **Already proven here.** `scripts/argo-repo.py` depends on `gh auth token` working, so this path is not a new dependency, it is the one the repo already has.
+
+**Escape hatch, not an option.** If `gh auth refresh` is refused - some org SSO configurations block scope changes on an existing grant - a classic PAT with `write:packages` is the only way through. Reach for it only after the refresh has actually failed, and say plainly that it was forced. Fine-grained tokens are not a substitute; GHCR writes expect a classic token, so do not spend time fighting a fine-grained one.
+
+Steps, verbatim, because the settings page is easy to land on the wrong version of:
 
 1. Go to `https://github.com/settings/tokens` and confirm the heading says **Tokens (classic)**. If it says "Fine-grained tokens", switch tabs.
 2. **Generate new token** -> **Generate new token (classic)**.
@@ -5345,7 +5354,7 @@ unset GHCR_TOKEN
 
 `read -rs` keeps it off the screen, and because it is never typed as an argument it never reaches `~/.zsh_history`. Do not put this token in `scripts/config.toml`; that file is read by `bootstrap.py` and written into `config.auto.tfvars.json`, and a registry credential has no business in Terraform state.
 
-**4c - GitHub Actions, which needs no token at all.** Added in Step 5. This is the long-term answer, because it builds the image from what is on `main` rather than from whatever happened to be on someone's laptop.
+**In CI, no credential is involved at all.** The workflow added in Step 5 uses the automatic `GITHUB_TOKEN` with `permissions: packages: write`. That is the long-term answer for publishing, because it builds from what is on `main` rather than from whatever happened to be on someone's laptop. The `gh` scope above is for iterating locally.
 
 - [ ] **Step 5: Add `make drill-image` and the CI workflow**
 
@@ -5485,7 +5494,7 @@ git add drill/Containerfile .containerignore scripts/drill-image.py .github/work
 git commit -m "feat: drill GUI image and in-cluster deployment behind the shared ALB"
 ```
 
-Record in the commit message which of 4a, 4b or 4c was used to authenticate, so the next person does not rediscover that one of them was blocked.
+If the classic-PAT escape hatch was used, say so in the commit message along with what blocked `gh auth refresh`, so the next person does not rediscover it.
 
 ---
 
