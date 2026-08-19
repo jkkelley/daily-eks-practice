@@ -1,0 +1,5233 @@
+# Scenario Drill Sessions Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Turn `make scenario N=03` from a card-printer into a converged drill session driven from an in-cluster GUI that grades task by task and can restore you to where you left off.
+
+**Architecture:** A permanent in-cluster git server in namespace `git` is the only source Argo CD ever reads, seeded by streaming a `git bundle` in from the local repo. A single long-lived `drill-gui` pod in namespace `practice-drill` serves a terminal, a Monaco editor, an answers panel and a help panel over one ALB. Session state lives in a ConfigMap; curriculum progress lives in gitignored `drill-progress/` on the laptop as append-only sessions of `git bundle` save files. Answers live in per-scenario TOML that is the single source of truth for both grading (TypeScript, server-side) and `PRACTICE_ANSWERS.html` (Python, render-only).
+
+**Tech Stack:** Terraform (aws/helm/kubectl-gavinbunney/random), Python 3.11+ stdlib only (`tomllib`), TypeScript on Node 20 (Fastify, `node-pty`, `ws`, `@kubernetes/client-node`, `@fastify/http-proxy`, `smol-toml`, `yaml`), React + Vite, `xterm.js`, Monaco, tmux, Podman, kind.
+
+**Spec:** `docs/superpowers/specs/2026-08-19-scenario-drill-sessions-design.md`
+
+---
+
+## Global Constraints
+
+Copied verbatim from the spec and `CLAUDE.md`. Every task's requirements implicitly include this section.
+
+- **No Terraform defaults.** Every variable is declared with NO `default =`. Values live in `scripts/config.toml` (git-ignored) and are documented in `scripts/config.example.toml`. Thread each new value through `scripts/config.example.toml` -> `terraform/envs/dev/variables.tf` -> `terraform/envs/dev/main.tf` -> `terraform/modules/stack/variables.tf` -> `terraform/modules/stack/main.tf` -> the target module. Run Terraform only through `scripts/bootstrap.py` / `make`, never bare.
+- **No real AWS without explicit user approval.** Phases 0-6 are $0 and run entirely on kind + Podman + ministack. Phase 7 is the only phase that touches AWS, and it is gated on the user saying yes.
+- **Fake it locally first.** Terraform changes go through ministack (`make -f Makefile.test ministack`) per the vendored `.claude/skills/container-sandbox/SKILL.md`. Cluster behaviour goes through kind. Node and helm run inside Podman; there is no local `helm` binary and `npm install` never runs on the host.
+- **No PII in git.** No AWS account ids, profile names, real domains, CIDRs, or repo-owner strings outside `scripts/config.toml` and generated files. `argocd/generated/` and `drill-progress/` are git-ignored.
+- **Cost discipline.** Anything that bills gets a cleanup step: the drill PVC must be deleted before `terraform destroy`, and Ingresses must be deleted and the ALB confirmed gone before `terraform destroy`.
+- **Plain dashes, never em dashes**, in every file this plan creates or edits.
+- **One full sentence per line** in long Markdown files.
+- **Card, answers TOML, and `scenario_testing/check.sh` must agree.** After Phase 1 this is enforced mechanically by generation rather than by discipline.
+- **Never touch `.claude/settings.local.json`.**
+- Ports already taken: `make argo-ui` uses 8080, `make grafana-ui` uses 3000. The drill GUI uses **8090**.
+- Local tooling confirmed present: `kind` (/usr/local/bin/kind), `minikube`, `kubectl`, `podman` 4.9.3, `node` v20.20.2, `npm`, `python3` 3.12.3, `jq`, `tmux`. **`helm` is NOT installed on the host** and must run in Podman via `docker.io/alpine/helm:latest`.
+
+## Deviations from the spec, with reasoning
+
+Two places where building it revealed a better answer than the spec recorded. Both are deliberate and both are implemented by this plan; the spec should be amended to match once Phase 3 lands.
+
+**1. Cluster git is seeded by streaming a bundle in, not by an init container cloning GitHub.**
+The spec's Q1 says the init container clones from GitHub using the token mechanism `scripts/argo-repo.py` already uses. That mechanism is a script the user runs after apply, so Terraform cannot supply the token at init-container time, and a private repo would make the first apply fail. Instead the init container runs `git init --bare` only, and a new `make git-seed` target streams `git bundle create - --all` from the local repo into the pod. This removes the PAT from the cluster entirely, removes the dependency on GitHub being reachable from a private subnet, and reuses the exact primitive the sync watcher already needs, just in the other direction. The readiness gate the spec actually cared about is preserved and strengthened: the probe requires a `.seeded` marker, so until the bundle lands the Service has no endpoints and Argo retries cleanly instead of syncing a half-served repo.
+
+**2. The grader is TypeScript, not Python.**
+The spec picked TOML because the repo is stdlib-only Python, and separately picked TypeScript for the app. It never said which language grades. Grading happens per submission inside the GUI's Node process, so putting the grader in Python would mean shelling out to a Python runtime from the app image for every submission. Instead the TOML file itself is the cross-language contract: Python reads it to render `PRACTICE_ANSWERS.html` and never grades; TypeScript reads it to grade and never renders. Two consumers, one source of truth, no runtime coupling.
+
+## Phase map
+
+Each phase is an independently reviewable deliverable and is intended to become one work-order ticket under a single epic.
+
+| Phase | Deliverable                                               | Cost                | Needs approval |
+| ----- | --------------------------------------------------------- | ------------------- | -------------- |
+| 0     | Local sandbox harness + the Argo-clones-cluster-git spike | $0 (kind)           | no             |
+| 1     | Answers TOML as the single source of truth                | $0                  | no             |
+| 2     | The grader                                                | $0 (Podman)         | no             |
+| 3     | Terraform: cluster git                                    | $0 (ministack)      | no             |
+| 4     | Terraform: ALB, shared IngressGroup, source-IP SG         | $0 (ministack)      | no             |
+| 5     | The mothership GUI - **first visual**                     | $0 (Podman + kind)  | no             |
+| 6     | Session lifecycle, watcher, Makefile handover             | $0 (kind)           | no             |
+| 7     | Live verification on real EKS                             | ~$1 for a 30h cycle | **YES**        |
+
+**Phase 0 gates everything.** If Argo CD will not clone from an in-cluster git server, Phases 3, 5 and 6 change shape and this plan gets revised before any of them start.
+
+**First visual is Phase 5, Task 5.3**, served from a Vite dev server in Podman on a probed port in 30000+, per the container-sandbox skill's single-container preview pattern. No cluster and no AWS needed to look at it.
+
+---
+
+## Phase 0: Local sandbox harness and the Argo spike
+
+### Task 0.1: Kind sandbox harness and its documentation
+
+`.claude/skills/container-sandbox/SKILL.md` line 12 points at a "Kind Sandbox" section that does not exist in the file. This task writes it and provides the harness it describes, so every later phase has one documented way to get a throwaway cluster.
+
+**Files:**
+
+- Create: `scripts/kind-sandbox.sh`
+- Modify: `.claude/skills/container-sandbox/SKILL.md` (add a `## Kind Sandbox` section after `## Terraform / Ministack Sandbox`, which currently ends at the `### Step 6 - Teardown` block)
+- Modify: `Makefile.test` (add `kind-up`, `kind-down`, `kind-status` targets)
+- Test: `tests/kind-sandbox.sh`
+
+**Interfaces:**
+
+- Consumes: nothing.
+- Produces:
+  - `scripts/kind-sandbox.sh up` - creates cluster `daily-eks-drill-sandbox`, writes kubeconfig to `.kubeconfig-kind-sandbox` (git-ignored), idempotent (re-running when the cluster exists is a no-op that still rewrites the kubeconfig).
+  - `scripts/kind-sandbox.sh down` - deletes the cluster and the kubeconfig file.
+  - `scripts/kind-sandbox.sh status` - exits 0 when the cluster exists and every node is `Ready`, non-zero otherwise.
+  - `scripts/kind-sandbox.sh kubeconfig` - prints the absolute path to the kubeconfig.
+  - Env var `KIND_SANDBOX_NAME` overrides the cluster name; defaults to `daily-eks-drill-sandbox`.
+
+- [ ] **Step 1: Add the git-ignore entry first**
+
+The kubeconfig must never be committable, and it must be ignored before it can ever be created.
+
+Add to `.gitignore` immediately after the existing `.kubeconfig-daily-eks-practice` line:
+
+```
+# ---- kind sandbox kubeconfig (make -f Makefile.test kind-up) ----
+.kubeconfig-kind-sandbox
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `tests/kind-sandbox.sh`:
+
+```bash
+#!/usr/bin/env bash
+# E2E test for the kind sandbox harness. Creates a throwaway cluster, asserts
+# idempotency and status behaviour, then tears it down. No AWS, no cost.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+HARNESS="$ROOT/scripts/kind-sandbox.sh"
+export KIND_SANDBOX_NAME="drill-harness-test"
+
+PASS=0; FAIL=0
+ok()  { echo "  PASS  $*"; PASS=$((PASS+1)); }
+bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
+
+cleanup() { bash "$HARNESS" down >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+command -v kind >/dev/null 2>&1 || { echo "SKIP: kind not installed"; exit 0; }
+
+echo "== status on a cluster that does not exist =="
+bash "$HARNESS" status >/dev/null 2>&1 && bad "status exited 0 with no cluster" || ok "status is non-zero with no cluster"
+
+echo "== up =="
+bash "$HARNESS" up >/dev/null 2>&1 && ok "up succeeded" || bad "up failed"
+bash "$HARNESS" status >/dev/null 2>&1 && ok "status is 0 after up" || bad "status non-zero after up"
+
+echo "== kubeconfig points somewhere real =="
+KC="$(bash "$HARNESS" kubeconfig)"
+[ -f "$KC" ] && ok "kubeconfig exists at $KC" || bad "no kubeconfig at '$KC'"
+KUBECONFIG="$KC" kubectl get nodes >/dev/null 2>&1 && ok "kubectl works against it" || bad "kubectl failed"
+
+echo "== up is idempotent =="
+bash "$HARNESS" up >/dev/null 2>&1 && ok "second up succeeded" || bad "second up failed"
+
+echo "== down =="
+bash "$HARNESS" down >/dev/null 2>&1 && ok "down succeeded" || bad "down failed"
+bash "$HARNESS" status >/dev/null 2>&1 && bad "status exited 0 after down" || ok "status non-zero after down"
+[ -f "$KC" ] && bad "kubeconfig survived down" || ok "kubeconfig removed by down"
+
+echo ""
+echo "kind-sandbox: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]
+```
+
+- [ ] **Step 3: Run it to verify it fails**
+
+Run: `bash tests/kind-sandbox.sh`
+Expected: FAIL - every step errors because `scripts/kind-sandbox.sh` does not exist.
+
+- [ ] **Step 4: Write the harness**
+
+Create `scripts/kind-sandbox.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Throwaway kind cluster for $0 local testing of anything that needs a real
+# Kubernetes API. Never touches AWS and never touches ~/.kube/config - the
+# kubeconfig is repo-local and git-ignored, same rule as the EKS one.
+#
+#   bash scripts/kind-sandbox.sh up          # create (idempotent)
+#   bash scripts/kind-sandbox.sh status      # 0 when every node is Ready
+#   bash scripts/kind-sandbox.sh kubeconfig  # print the kubeconfig path
+#   bash scripts/kind-sandbox.sh down        # delete cluster + kubeconfig
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+NAME="${KIND_SANDBOX_NAME:-daily-eks-drill-sandbox}"
+KUBECONFIG_FILE="$ROOT/.kubeconfig-kind-sandbox"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing tool: $1"; exit 2; }; }
+
+exists() { kind get clusters 2>/dev/null | grep -qx "$NAME"; }
+
+cmd_up() {
+  need kind; need kubectl
+  if exists; then
+    echo "kind-sandbox: cluster '$NAME' already exists - refreshing kubeconfig"
+  else
+    echo "kind-sandbox: creating cluster '$NAME' (this takes about a minute)"
+    kind create cluster --name "$NAME" --wait 120s || return 1
+  fi
+  kind get kubeconfig --name "$NAME" > "$KUBECONFIG_FILE" || return 1
+  echo "kind-sandbox: wrote $KUBECONFIG_FILE"
+  echo "  use it with:  export KUBECONFIG=$KUBECONFIG_FILE"
+}
+
+cmd_down() {
+  need kind
+  exists && kind delete cluster --name "$NAME"
+  rm -f "$KUBECONFIG_FILE"
+  echo "kind-sandbox: cluster '$NAME' and its kubeconfig are gone"
+}
+
+cmd_status() {
+  need kubectl
+  exists || { echo "kind-sandbox: no cluster '$NAME'"; return 1; }
+  local total ready
+  total=$(KUBECONFIG="$KUBECONFIG_FILE" kubectl get nodes --no-headers 2>/dev/null | wc -l)
+  ready=$(KUBECONFIG="$KUBECONFIG_FILE" kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)
+  [ "$total" -gt 0 ] && [ "$total" -eq "$ready" ] || { echo "kind-sandbox: $ready/$total nodes Ready"; return 1; }
+  echo "kind-sandbox: cluster '$NAME' up, $ready/$total nodes Ready"
+}
+
+cmd_kubeconfig() { echo "$KUBECONFIG_FILE"; }
+
+case "${1:-}" in
+  up)         cmd_up ;;
+  down)       cmd_down ;;
+  status)     cmd_status ;;
+  kubeconfig) cmd_kubeconfig ;;
+  *) echo "usage: kind-sandbox.sh <up|down|status|kubeconfig>"; exit 2 ;;
+esac
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `bash tests/kind-sandbox.sh`
+Expected: PASS on all 9 assertions, ending `kind-sandbox: 9 passed, 0 failed`.
+
+- [ ] **Step 6: Add the Makefile.test targets**
+
+In `Makefile.test`, add `kind-up kind-down kind-status` to the `.PHONY` line, and add these targets after the `ministack-down` target:
+
+```makefile
+kind-up: ## Create the throwaway kind sandbox cluster ($0, no AWS)
+	bash scripts/kind-sandbox.sh up
+
+kind-status: ## Is the kind sandbox up and Ready?
+	bash scripts/kind-sandbox.sh status
+
+kind-down: ## Delete the kind sandbox cluster and its kubeconfig
+	bash scripts/kind-sandbox.sh down
+```
+
+Also add `kind-sandbox` to the `test` target's dependency list is **not** wanted - creating a cluster is too slow for the default static check. Leave `test` alone.
+
+- [ ] **Step 7: Document it in the container-sandbox skill**
+
+Append a `## Kind Sandbox` section to `.claude/skills/container-sandbox/SKILL.md`, placed immediately after the `### Step 6 - Teardown` block that ends the Ministack section. Write it in the skill's existing voice, covering what to test here and why:
+
+````markdown
+## Kind Sandbox
+
+**RULE:** Use Kind any time behaviour depends on a real Kubernetes API - controllers,
+operators, admission, RBAC, probes, watch streams, or anything a manifest does once it
+is actually admitted. Ministack proves Terraform _plans_; Kind proves Kubernetes
+_behaves_. They answer different questions and neither substitutes for the other.
+
+### What belongs here
+
+| Question                                                                   | Sandbox                                             |
+| -------------------------------------------------------------------------- | --------------------------------------------------- |
+| Does this Terraform parse, validate and plan?                              | Ministack                                           |
+| Does this manifest get admitted, and does the controller do what I expect? | Kind                                                |
+| Does a readiness probe actually gate Service endpoints?                    | Kind                                                |
+| Does Argo CD clone from this repo URL?                                     | Kind                                                |
+| Does this chart render?                                                    | Podman + `alpine/helm` (no cluster needed)          |
+| Does the frontend look right?                                              | Podman single-container preview (no cluster needed) |
+
+### Harness
+
+`scripts/kind-sandbox.sh` in this repo wraps the lifecycle. It writes a repo-local,
+git-ignored kubeconfig (`.kubeconfig-kind-sandbox`) and never touches `~/.kube/config`,
+matching the rule the EKS kubeconfig already follows.
+
+```bash
+make -f Makefile.test kind-up          # create (idempotent)
+export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
+kubectl get nodes
+make -f Makefile.test kind-down        # delete cluster + kubeconfig
+```
+````
+
+`KIND_SANDBOX_NAME` overrides the cluster name so a test can run its own cluster
+without stepping on the one you are working in. `tests/kind-sandbox.sh` uses this.
+
+### Why this exists in a repo about EKS
+
+The whole point of this project is a cluster you tear down nightly, so the expensive
+thing is not compute, it is the minutes between "I changed a manifest" and "I know
+whether it worked". Kind closes that loop in seconds against the same API server
+version family, for nothing. Bring the EKS cluster up to verify the AWS-shaped parts
+(IRSA, the ALB controller, EBS CSI) and nothing else.
+
+### What Kind cannot tell you
+
+Anything that is really AWS: IRSA token exchange, real IAM, the AWS Load Balancer
+Controller provisioning an actual ALB, EBS volumes, RDS reachability. A green Kind run
+is necessary before spending money, never sufficient. Say so explicitly when reporting
+results, rather than letting a Kind pass read as a full pass.
+
+### Teardown
+
+Kind clusters survive reboots and each one holds a container plus its images. Always
+`kind-down` when finished, and `kind get clusters` if something feels slow.
+
+````
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add scripts/kind-sandbox.sh tests/kind-sandbox.sh Makefile.test .gitignore .claude/skills/container-sandbox/SKILL.md
+git commit -m "test: kind sandbox harness for \$0 local cluster testing"
+````
+
+---
+
+### Task 0.2: The Argo-clones-cluster-git spike
+
+The entire GitOps half of the design rests on Argo CD being able to clone from a git server running inside the same cluster over plain HTTP with no credentials. This task proves or disproves that on kind before any Terraform is written. Its output is a decision record, not code that ships.
+
+**Files:**
+
+- Create: `docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md`
+- Create: `spike/argo-cluster-git/git-server.yaml` (throwaway; deleted in Step 8)
+- Create: `spike/argo-cluster-git/application.yaml` (throwaway; deleted in Step 8)
+
+**Interfaces:**
+
+- Consumes: `scripts/kind-sandbox.sh` from Task 0.1.
+- Produces: a written verdict that Phase 3 depends on, plus the exact confirmed values for: the git protocol (`http` dumb vs `git-http-backend` smart), the in-cluster `repoURL` Argo accepts, and whether `git update-server-info` is required per push.
+
+- [ ] **Step 1: Bring the sandbox up and install Argo CD**
+
+```bash
+make -f Makefile.test kind-up
+export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
+```
+
+Expected: `deployment "argocd-repo-server" successfully rolled out`.
+
+- [ ] **Step 2: Stand up a dumb-HTTP git server serving this repo**
+
+Create `spike/argo-cluster-git/git-server.yaml`. Dumb HTTP is tried first because it is a static nginx serving a directory, which is the smallest thing that could possibly work and has no CGI to configure.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: git
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: git-nginx
+  namespace: git
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      root /srv;
+      autoindex on;
+      location / {
+        try_files $uri $uri/ =404;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-server
+  namespace: git
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: git-server }
+  template:
+    metadata:
+      labels: { app: git-server }
+    spec:
+      initContainers:
+        - name: init-repo
+          image: alpine/git:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              git init --bare /srv/repo.git
+              touch /srv/repo.git/git-daemon-export-ok
+              git -C /srv/repo.git update-server-info
+          volumeMounts:
+            - { name: repo, mountPath: /srv }
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - { name: http, containerPort: 8080 }
+          volumeMounts:
+            - { name: repo, mountPath: /srv }
+            - { name: conf, mountPath: /etc/nginx/conf.d }
+          readinessProbe:
+            httpGet: { path: /repo.git/info/refs, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 3
+      volumes:
+        - { name: repo, emptyDir: {} }
+        - { name: conf, configMap: { name: git-nginx } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-server
+  namespace: git
+spec:
+  selector: { app: git-server }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+```
+
+Apply it and wait:
+
+```bash
+kubectl apply -f spike/argo-cluster-git/git-server.yaml
+kubectl -n git rollout status deploy/git-server --timeout=120s
+```
+
+- [ ] **Step 3: Seed the bare repo by streaming a bundle in**
+
+This is the mechanism Phase 3 will ship, so proving it here proves two things at once.
+
+```bash
+POD=$(kubectl -n git get pod -l app=git-server -o name | head -1)
+git bundle create - --all \
+  | kubectl -n git exec -i "$POD" -c nginx -- /bin/sh -c 'cat > /tmp/seed.bundle'
+kubectl -n git exec "$POD" -c nginx -- /bin/sh -c '
+  apk add --no-cache git >/dev/null 2>&1
+  git -C /srv/repo.git fetch /tmp/seed.bundle "refs/heads/*:refs/heads/*"
+  git -C /srv/repo.git symbolic-ref HEAD refs/heads/main
+  git -C /srv/repo.git update-server-info
+  ls /srv/repo.git/info/refs'
+```
+
+Expected: the final `ls` prints `/srv/repo.git/info/refs`. Record whether `apk add git` was needed, because if it was, the shipped image must bundle git rather than install it at runtime.
+
+- [ ] **Step 4: Point an Argo Application at it**
+
+Create `spike/argo-cluster-git/application.yaml`:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spike-practice-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: http://git-server.git.svc.cluster.local/repo.git
+    targetRevision: main
+    path: helm/practice-app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: spike-app
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+```
+
+```bash
+kubectl apply -f spike/argo-cluster-git/application.yaml
+sleep 20
+kubectl -n argocd get application spike-practice-app \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.conditions}{"\n"}'
+```
+
+Expected on success: sync status is `OutOfSync` (not `Unknown`) and `.status.conditions` is empty, meaning Argo cloned and rendered the chart but has not synced because sync is manual.
+
+- [ ] **Step 5: Read the repo-server logs, which is where the truth is**
+
+```bash
+kubectl -n argocd logs deploy/argocd-repo-server --tail=60 | grep -iE 'git|clone|fail|error'
+```
+
+Expected on success: a successful `git ls-remote` / fetch against the in-cluster URL. Expected on failure: `dumb http transport does not support shallow capabilities` or similar, which is the known failure mode of dumb HTTP and the trigger for Step 6.
+
+- [ ] **Step 6: If dumb HTTP failed, retry with smart HTTP**
+
+Argo CD clones with `--depth 1` by default, and the dumb HTTP transport does not support shallow fetch. If Step 5 shows that error, replace the nginx container in `git-server.yaml` with `git http-backend` behind `fcgiwrap`, or the simpler route: swap the whole container for `docker.io/rockstorm/git-server` or an image running `git daemon`. Whichever works, re-run Steps 3 to 5 and record which one.
+
+Fallback if smart HTTP is also a fight: set `spec.source.directory` aside and test whether Argo's `ARGOCD_GIT_ATTEMPTS`/no-shallow behaviour can be configured via the `argocd-cm` key `reposerver.git.request.timeout` and the repo-server `--disable-shallow-clone`-equivalent. Record what was needed.
+
+- [ ] **Step 7: Write the decision record**
+
+Create `docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md` covering, with the actual command output pasted in:
+
+- Verdict: does Argo CD clone from in-cluster git, yes or no.
+- The exact working `repoURL`.
+- Which protocol won (dumb HTTP, smart HTTP via `git-http-backend`, or `git://`), and the error that ruled the others out.
+- Whether `git update-server-info` must run after every push, which determines whether Phase 3 needs a post-receive hook.
+- Whether the serving image must ship `git` on PATH.
+- Argo CD version tested, and the kind node image version.
+- Anything that would change the Phase 3 or Phase 6 design.
+
+- [ ] **Step 8: Tear the spike down**
+
+A spike's output is an answer. The manifests do not ship.
+
+```bash
+rm -rf spike/
+make -f Makefile.test kind-down
+```
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add docs/superpowers/specs/2026-08-19-argo-cluster-git-spike.md
+git commit -m "docs: record the argo-clones-cluster-git spike result"
+```
+
+- [ ] **Step 10: Stop and report**
+
+If the verdict is negative, do not start Phase 3. Report the finding and the options, and let the user pick a new direction. If positive, continue.
+
+---
+
+## Phase 1: Answers TOML as the single source of truth
+
+Today `scenarios/03-*.md`, `PRACTICE_ANSWERS.html` and `scenario_testing/check.sh` agree only because someone remembered to keep them in step. After this phase, scenario 03's answer block is generated, so drift is impossible for 03 while the other eleven pass through byte-identically.
+
+### Task 1.1: The answers TOML schema and its loader
+
+**Files:**
+
+- Create: `scenarios/answers/03.toml`
+- Create: `scripts/answers.py`
+- Test: `tests/test_answers.py`
+
+**Interfaces:**
+
+- Consumes: nothing.
+- Produces (`scripts/answers.py`):
+  - `load(scenario: str) -> dict` - reads `scenarios/answers/<scenario>.toml`, validates it, returns the parsed dict. Raises `AnswersError` with a message naming the file and the problem on any validation failure.
+  - `available() -> list[str]` - sorted list of scenario numbers that have a TOML file, e.g. `["03"]`.
+  - `class AnswersError(Exception)`.
+  - The validated shape, which Task 1.2 and Phase 2 both depend on:
+    - top level: `schema` (int, must be `1`), `scenario` (str, two digits), `title` (str), `time` (str), `needs` (str), `ticket` (str), `tasks` (list, non-empty).
+    - each task: `id` (str), `prompt` (str), `grader` (str, one of `command`, `file`, `prose`), `answer` (table with optional `pre` list of str and optional `prose` str), and grader-specific keys.
+    - `grader = "command"` tasks carry `accept` (list of tables with `verb`, and optional `resource`, `namespace`, `name`, `flags`) and optional `hints` (list of tables with `when` and `text`).
+    - `grader = "file"` tasks carry `path`, `key` (dotted path into the YAML), `accept_pattern` (regex string), and optional `hints`.
+    - `grader = "prose"` tasks carry `must_include` (list of str) and optional `hints`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_answers.py`. This repo has no test runner dependency, so it is a plain script with a `main()` that returns an exit code, matching the style of `tests/scrub-git-identity.sh`.
+
+```python
+#!/usr/bin/env python3
+"""Unit tests for scripts/answers.py - the answers TOML loader and validator.
+
+Pure functions over files. No cluster, no AWS, no network.
+Run: python3 tests/test_answers.py
+"""
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import answers  # noqa: E402
+
+PASS = 0
+FAIL = 0
+
+
+def ok(msg):
+    global PASS
+    PASS += 1
+    print(f"  PASS  {msg}")
+
+
+def bad(msg):
+    global FAIL
+    FAIL += 1
+    print(f"  FAIL  {msg}")
+
+
+def expect_error(fn, needle, label):
+    try:
+        fn()
+    except answers.AnswersError as e:
+        if needle in str(e):
+            ok(f"{label}: rejected with '{needle}'")
+        else:
+            bad(f"{label}: rejected but message was {e!r}, wanted '{needle}'")
+    except Exception as e:  # noqa: BLE001
+        bad(f"{label}: raised {type(e).__name__} instead of AnswersError: {e}")
+    else:
+        bad(f"{label}: accepted invalid input")
+
+
+def load_text(text):
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "99.toml"
+        p.write_text(text, encoding="utf-8")
+        return answers.load_path(p)
+
+
+def test_real_03_loads():
+    data = answers.load("03")
+    if data["scenario"] == "03":
+        ok("03.toml loads and reports scenario 03")
+    else:
+        bad(f"03.toml scenario is {data['scenario']!r}")
+    if data["schema"] == 1:
+        ok("03.toml declares schema 1")
+    else:
+        bad(f"03.toml schema is {data['schema']!r}")
+    if len(data["tasks"]) == 6:
+        ok("03.toml has 6 tasks, matching the card")
+    else:
+        bad(f"03.toml has {len(data['tasks'])} tasks, card has 6")
+    graders = {t["grader"] for t in data["tasks"]}
+    if graders <= {"command", "file", "prose"}:
+        ok(f"03.toml graders are all known: {sorted(graders)}")
+    else:
+        bad(f"03.toml has unknown graders: {sorted(graders)}")
+
+
+def test_available_includes_03():
+    if "03" in answers.available():
+        ok("available() includes 03")
+    else:
+        bad(f"available() returned {answers.available()}")
+
+
+def test_missing_scenario():
+    expect_error(lambda: answers.load("99"), "no answers file", "missing scenario")
+
+
+def test_wrong_schema():
+    expect_error(
+        lambda: load_text('schema = 2\nscenario = "99"\ntitle = "x"\ntime = "x"\nneeds = "x"\nticket = "x"\n[[tasks]]\nid = "1"\nprompt = "p"\ngrader = "prose"\nmust_include = ["a"]\n'),
+        "schema",
+        "unsupported schema version",
+    )
+
+
+def test_unknown_grader():
+    expect_error(
+        lambda: load_text('schema = 1\nscenario = "99"\ntitle = "x"\ntime = "x"\nneeds = "x"\nticket = "x"\n[[tasks]]\nid = "1"\nprompt = "p"\ngrader = "vibes"\n'),
+        "grader",
+        "unknown grader",
+    )
+
+
+def test_command_task_needs_accept():
+    expect_error(
+        lambda: load_text('schema = 1\nscenario = "99"\ntitle = "x"\ntime = "x"\nneeds = "x"\nticket = "x"\n[[tasks]]\nid = "1"\nprompt = "p"\ngrader = "command"\n'),
+        "accept",
+        "command task with no accept block",
+    )
+
+
+def test_no_tasks():
+    expect_error(
+        lambda: load_text('schema = 1\nscenario = "99"\ntitle = "x"\ntime = "x"\nneeds = "x"\nticket = "x"\n'),
+        "tasks",
+        "no tasks",
+    )
+
+
+def test_duplicate_task_ids():
+    expect_error(
+        lambda: load_text('schema = 1\nscenario = "99"\ntitle = "x"\ntime = "x"\nneeds = "x"\nticket = "x"\n[[tasks]]\nid = "1"\nprompt = "p"\ngrader = "prose"\nmust_include = ["a"]\n[[tasks]]\nid = "1"\nprompt = "q"\ngrader = "prose"\nmust_include = ["b"]\n'),
+        "duplicate",
+        "duplicate task ids",
+    )
+
+
+def main():
+    for fn in (
+        test_real_03_loads,
+        test_available_includes_03,
+        test_missing_scenario,
+        test_wrong_schema,
+        test_unknown_grader,
+        test_command_task_needs_accept,
+        test_no_tasks,
+        test_duplicate_task_ids,
+    ):
+        print(f"== {fn.__name__} ==")
+        fn()
+    print()
+    print(f"answers: {PASS} passed, {FAIL} failed")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `python3 tests/test_answers.py`
+Expected: FAIL with `ModuleNotFoundError: No module named 'answers'`.
+
+- [ ] **Step 3: Write the answers TOML for scenario 03**
+
+Create `scenarios/answers/03.toml`. Every task, prompt, accepted command and prose answer comes from the existing card (`scenarios/03-rolling-update-rollback.md`) and the existing answer block (`PRACTICE_ANSWERS.html` lines 194-224), so nothing new is invented and nothing existing is lost.
+
+```toml
+# Answers for scenario 03. This file is the SINGLE SOURCE OF TRUTH:
+#   - scripts/gen-answers.py renders it into PRACTICE_ANSWERS.html
+#   - the drill GUI grades submissions against it
+# Do not edit the 03 block in PRACTICE_ANSWERS.html by hand; it is generated.
+
+schema   = 1
+scenario = "03"
+title    = "Rolling update + rollback"
+time     = "~30 min"
+needs    = "cluster up, app deployed"
+ticket   = "Bump the frontend nginx to the next minor. Ship it with zero downtime, then practise the oh-no path: roll it back."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id      = "1"
+prompt  = "Using kubectl, find the frontend Deployment's current image tag and its rollout history (namespace practice-app, deployment practice-app-frontend)."
+grader  = "command"
+
+  [[tasks.accept]]
+  verb      = "rollout-history"
+  resource  = "deployment"
+  namespace = "practice-app"
+  name      = "practice-app-frontend"
+
+  [[tasks.accept]]
+  verb      = "get"
+  resource  = "deployment"
+  namespace = "practice-app"
+  name      = "practice-app-frontend"
+
+  [[tasks.hints]]
+  when = "missing-namespace"
+  text = "The app is not in the default namespace. Every command in this drill needs -n practice-app."
+
+  [[tasks.hints]]
+  when = "wrong-resource"
+  text = "You are looking at pods. Rollout history belongs to the Deployment that owns them, not to the pods."
+
+  [tasks.answer]
+  pre = [
+    "kubectl -n practice-app rollout history deploy/practice-app-frontend",
+    "kubectl -n practice-app get deploy practice-app-frontend -o jsonpath='{.spec.template.spec.containers[0].image}'",
+  ]
+  prose = "Rollout history is owned by the Deployment. A fresh install shows revision 1 only, which is why task 3 needs an actual change before there is anything to roll back to."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id             = "2"
+prompt         = "Bump the frontend image tag in helm/practice-app/values.yaml (1.27-alpine -> 1.28-alpine) and deploy."
+grader         = "file"
+path           = "helm/practice-app/values.yaml"
+key            = "frontend.image.tag"
+accept_pattern = "^1\\.28-alpine$"
+
+  [[tasks.hints]]
+  when = "unchanged"
+  text = "values.yaml still says 1.27-alpine. Edit it in the editor panel - autosave writes to the workspace, but Argo only sees it once you commit."
+
+  [[tasks.hints]]
+  when = "uncommitted"
+  text = "The file is right but the change is not committed, so cluster git has not changed and Argo has nothing to sync. Commit, then sync."
+
+  [tasks.answer]
+  pre = [
+    "# values.yaml: frontend.image.tag: 1.28-alpine",
+    "git add helm/practice-app/values.yaml && git commit -m 'bump frontend to 1.28-alpine'",
+  ]
+  prose = "Editing the file is not the deploy. Autosave puts it on disk, the commit publishes it to cluster git, and only then does Argo have something to converge on. That gap is the whole GitOps lesson."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id           = "3"
+prompt       = "Watch the rolling update live. What is the default surge/unavailable behaviour of a Deployment?"
+grader       = "prose"
+must_include = ["25", "maxSurge", "maxUnavailable"]
+
+  [[tasks.hints]]
+  when = "no-numbers"
+  text = "Name the actual defaults, not just the field names. kubectl explain deployment.spec.strategy.rollingUpdate has them."
+
+  [tasks.answer]
+  pre  = ["kubectl -n practice-app rollout status deploy/practice-app-frontend"]
+  prose = "RollingUpdate with 25% maxSurge and 25% maxUnavailable. With readiness probes set, requests should not fail during the roll."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id     = "4"
+prompt = "Curl the app in a loop during the rollout. Did any request fail?"
+grader = "command"
+
+  [[tasks.accept]]
+  verb = "curl-loop"
+
+  [[tasks.accept]]
+  verb      = "port-forward"
+  resource  = "service"
+  namespace = "practice-app"
+
+  [[tasks.hints]]
+  when = "no-loop"
+  text = "One curl proves nothing - the whole question is whether any request in a stream fails. Put it in a while loop."
+
+  [tasks.answer]
+  pre = [
+    "kubectl -n practice-app port-forward svc/practice-app-frontend 8081:80",
+    "while true; do curl -so /dev/null -w '%{http_code}\\n' localhost:8081; sleep .3; done",
+  ]
+  prose = "No failures, because readiness gates the new pods and maxUnavailable keeps enough old ones serving. A missing or wrong readiness probe is exactly what turns this into dropped requests, which is scenario 10's break/fix."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id     = "5"
+prompt = "Roll back two ways: kubectl rollout undo, and the GitOps way. When would the first bite you in a GitOps shop?"
+grader = "command"
+
+  [[tasks.accept]]
+  verb      = "rollout-undo"
+  resource  = "deployment"
+  namespace = "practice-app"
+  name      = "practice-app-frontend"
+
+  [[tasks.accept]]
+  verb = "git-revert"
+
+  [[tasks.hints]]
+  when = "only-imperative"
+  text = "That is the fast way. Now do it the way that survives the next sync - the cluster is not the source of truth here."
+
+  [tasks.answer]
+  pre = [
+    "kubectl -n practice-app rollout undo deploy/practice-app-frontend   # fast, imperative",
+    "git revert <commit> && git push                                     # the GitOps way",
+  ]
+  prose = "rollout undo in a GitOps shop is a trap: Argo CD sees drift and puts the bad version back, immediately with self-heal on and at the next sync without it. Git must be reverted for the rollback to stick."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id             = "6"
+prompt         = "Bonus: set a bad tag (1.99-alpine), deploy, and watch what a stuck rollout looks like. Then fix it."
+grader         = "prose"
+must_include   = ["ImagePullBackOff"]
+
+  [[tasks.hints]]
+  when = "no-signature"
+  text = "Name the pod status you saw. That string is the signature you will pattern-match on for the rest of your career."
+
+  [tasks.answer]
+  prose = "With a bad tag you get ImagePullBackOff. The rollout waits forever on unready new pods while the old pods keep serving, which is maxUnavailable protecting you. Fix the tag or kubectl rollout undo."
+```
+
+- [ ] **Step 4: Write the loader**
+
+Create `scripts/answers.py`:
+
+```python
+#!/usr/bin/env python3
+"""Load and validate a scenario's answers TOML.
+
+The TOML is the single source of truth for a scenario: scripts/gen-answers.py
+renders it into PRACTICE_ANSWERS.html, and the drill GUI grades against it.
+Validation is strict on purpose - a typo here silently degrades grading, which
+is worse than a loud failure at generation time.
+
+Stdlib only (tomllib), matching scripts/bootstrap.py.
+"""
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+ANSWERS_DIR = REPO / "scenarios" / "answers"
+
+SCHEMA_VERSION = 1
+GRADERS = ("command", "file", "prose")
+TOP_LEVEL_STR = ("scenario", "title", "time", "needs", "ticket")
+
+
+class AnswersError(Exception):
+    """Raised when an answers file is missing, unparseable, or invalid."""
+
+
+def available() -> list[str]:
+    """Scenario numbers that have an answers TOML, sorted."""
+    if not ANSWERS_DIR.is_dir():
+        return []
+    return sorted(p.stem for p in ANSWERS_DIR.glob("*.toml"))
+
+
+def load(scenario: str) -> dict:
+    """Load and validate scenarios/answers/<scenario>.toml."""
+    path = ANSWERS_DIR / f"{scenario}.toml"
+    if not path.is_file():
+        raise AnswersError(f"no answers file for scenario {scenario} (looked for {path})")
+    return load_path(path)
+
+
+def load_path(path: Path) -> dict:
+    """Load and validate an answers TOML at an explicit path (used by tests)."""
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise AnswersError(f"{path}: not valid TOML: {e}") from e
+    _validate(data, path)
+    return data
+
+
+def _validate(data: dict, path: Path) -> None:
+    got = data.get("schema")
+    if got != SCHEMA_VERSION:
+        raise AnswersError(
+            f"{path}: schema is {got!r}, this loader only understands schema {SCHEMA_VERSION}"
+        )
+
+    for key in TOP_LEVEL_STR:
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            raise AnswersError(f"{path}: top-level '{key}' must be a non-empty string")
+
+    tasks = data.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        raise AnswersError(f"{path}: needs a non-empty [[tasks]] array")
+
+    seen: set[str] = set()
+    for i, task in enumerate(tasks):
+        where = f"{path}: tasks[{i}]"
+        tid = task.get("id")
+        if not isinstance(tid, str) or not tid.strip():
+            raise AnswersError(f"{where}: 'id' must be a non-empty string")
+        if tid in seen:
+            raise AnswersError(f"{path}: duplicate task id {tid!r}")
+        seen.add(tid)
+
+        if not isinstance(task.get("prompt"), str) or not task["prompt"].strip():
+            raise AnswersError(f"{where} (id {tid}): 'prompt' must be a non-empty string")
+
+        grader = task.get("grader")
+        if grader not in GRADERS:
+            raise AnswersError(
+                f"{where} (id {tid}): unknown grader {grader!r}, expected one of {GRADERS}"
+            )
+        _validate_grader(task, grader, f"{where} (id {tid})")
+        _validate_hints(task, f"{where} (id {tid})")
+
+
+def _validate_grader(task: dict, grader: str, where: str) -> None:
+    if grader == "command":
+        accept = task.get("accept")
+        if not isinstance(accept, list) or not accept:
+            raise AnswersError(f"{where}: a 'command' task needs a non-empty [[tasks.accept]] array")
+        for j, acc in enumerate(accept):
+            if not isinstance(acc.get("verb"), str) or not acc["verb"].strip():
+                raise AnswersError(f"{where}: accept[{j}] needs a non-empty 'verb'")
+    elif grader == "file":
+        for key in ("path", "key", "accept_pattern"):
+            if not isinstance(task.get(key), str) or not task[key].strip():
+                raise AnswersError(f"{where}: a 'file' task needs a non-empty '{key}'")
+    elif grader == "prose":
+        must = task.get("must_include")
+        if not isinstance(must, list) or not must:
+            raise AnswersError(f"{where}: a 'prose' task needs a non-empty 'must_include' list")
+        for j, item in enumerate(must):
+            if not isinstance(item, str) or not item.strip():
+                raise AnswersError(f"{where}: must_include[{j}] must be a non-empty string")
+
+
+def _validate_hints(task: dict, where: str) -> None:
+    hints = task.get("hints", [])
+    if not isinstance(hints, list):
+        raise AnswersError(f"{where}: 'hints' must be an array of tables")
+    for j, hint in enumerate(hints):
+        for key in ("when", "text"):
+            if not isinstance(hint.get(key), str) or not hint[key].strip():
+                raise AnswersError(f"{where}: hints[{j}] needs a non-empty '{key}'")
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `python3 tests/test_answers.py`
+Expected: PASS on all assertions, ending `answers: 11 passed, 0 failed`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scenarios/answers/03.toml scripts/answers.py tests/test_answers.py
+git commit -m "feat: answers TOML schema and loader for scenario 03"
+```
+
+---
+
+### Task 1.2: Generate PRACTICE_ANSWERS.html from the TOML, mixed mode
+
+The generator must render 03 from TOML and pass the other eleven hand-written blocks through untouched. The proof is byte-identity, tested two ways: pure passthrough must reproduce the committed file exactly, and mixed mode must leave all eleven other blocks exactly as they were.
+
+**Files:**
+
+- Create: `scripts/gen-answers.py`
+- Test: `tests/test_gen_answers.py`
+- Modify: `Makefile` (add a `answers-gen` target)
+- Modify: `Makefile.test` (add `answers-check` to the `test` target)
+
+**Interfaces:**
+
+- Consumes: `answers.load`, `answers.available` from Task 1.1.
+- Produces (`scripts/gen-answers.py`):
+  - `split(html: str) -> tuple[str, dict[str, str], str]` - returns `(head, {scenario_number: full_details_block}, tail)`. Every block string includes its own `<details>` and `</details>` lines and the newline that followed it, so `head + "".join(blocks.values()) + tail == html` exactly.
+  - `render(data: dict) -> str` - renders one validated answers dict into a `<details>` block matching the existing HTML shape byte-for-byte in structure: `<details>\n      <summary>\n        <h2 style="display: inline">NN - Title</h2>\n      </summary>\n ... </details>\n`.
+  - `generate(html: str, scenarios: list[str]) -> str` - replaces each named scenario's block with `render(load(n))`, leaves the rest untouched, returns the whole document.
+  - CLI: `python3 scripts/gen-answers.py` rewrites `PRACTICE_ANSWERS.html` in place; `--check` exits 1 with a diff if the file is stale; `--stdout` prints without writing.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_gen_answers.py`:
+
+```python
+#!/usr/bin/env python3
+"""Tests for scripts/gen-answers.py.
+
+The contract that matters: generating with NO scenarios must reproduce the
+committed PRACTICE_ANSWERS.html byte-for-byte, and generating scenario 03 must
+leave the other eleven blocks byte-for-byte unchanged. If either breaks, the
+generator is rewriting hand-authored prose it was never asked to touch.
+
+Run: python3 tests/test_gen_answers.py
+"""
+import importlib.util
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+spec = importlib.util.spec_from_file_location("gen_answers", ROOT / "scripts" / "gen-answers.py")
+gen = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gen)
+
+HTML = (ROOT / "PRACTICE_ANSWERS.html").read_text(encoding="utf-8")
+
+PASS = 0
+FAIL = 0
+
+
+def ok(msg):
+    global PASS
+    PASS += 1
+    print(f"  PASS  {msg}")
+
+
+def bad(msg):
+    global FAIL
+    FAIL += 1
+    print(f"  FAIL  {msg}")
+
+
+def test_split_is_lossless():
+    head, blocks, tail = gen.split(HTML)
+    rebuilt = head + "".join(blocks[k] for k in sorted(blocks)) + tail
+    if rebuilt == HTML:
+        ok("split() round-trips byte-for-byte")
+    else:
+        bad(f"split() lost data: {len(rebuilt)} chars vs {len(HTML)}")
+
+
+def test_split_finds_twelve():
+    _, blocks, _ = gen.split(HTML)
+    want = {f"{i:02d}" for i in range(1, 13)}
+    if set(blocks) == want:
+        ok("split() found all twelve scenario blocks")
+    else:
+        bad(f"split() found {sorted(blocks)}, wanted {sorted(want)}")
+
+
+def test_passthrough_is_identical():
+    out = gen.generate(HTML, [])
+    if out == HTML:
+        ok("generate() with no scenarios is byte-identical")
+    else:
+        bad("generate() with no scenarios changed the file")
+
+
+def test_mixed_leaves_others_untouched():
+    out = gen.generate(HTML, ["03"])
+    _, before, _ = gen.split(HTML)
+    _, after, _ = gen.split(out)
+    changed = [k for k in sorted(before) if before[k] != after.get(k)]
+    if changed == ["03"]:
+        ok("generating 03 changed only the 03 block")
+    else:
+        bad(f"generating 03 also changed: {[c for c in changed if c != '03']}")
+
+
+def test_head_and_tail_survive_generation():
+    out = gen.generate(HTML, ["03"])
+    head_b, _, tail_b = gen.split(HTML)
+    head_a, _, tail_a = gen.split(out)
+    if head_a == head_b and tail_a == tail_b:
+        ok("head (styles, seal) and tail (script) are untouched")
+    else:
+        bad("generation modified the document head or tail")
+
+
+def test_rendered_block_is_serveable():
+    """serve-answers.sh greps for '<h2[^>]*>NN - ' to scope to one card."""
+    out = gen.generate(HTML, ["03"])
+    _, blocks, _ = gen.split(out)
+    if '<h2 style="display: inline">03 - ' in blocks["03"]:
+        ok("rendered 03 block still matches the serve-answers.sh awk pattern")
+    else:
+        bad("rendered 03 block would break `make serve-answers N=03`")
+
+
+def test_rendered_block_contains_the_answers():
+    out = gen.generate(HTML, ["03"])
+    _, blocks, _ = gen.split(out)
+    body = blocks["03"]
+    for needle in ("rollout history", "1.28-alpine", "rollout undo", "ImagePullBackOff"):
+        if needle in body:
+            ok(f"rendered 03 contains {needle!r}")
+        else:
+            bad(f"rendered 03 is missing {needle!r}")
+
+
+def test_html_is_escaped():
+    """Angle brackets from the TOML must not become live markup."""
+    out = gen.generate(HTML, ["03"])
+    _, blocks, _ = gen.split(out)
+    if "&lt;commit&gt;" in blocks["03"]:
+        ok("angle brackets in answers are HTML-escaped")
+    else:
+        bad("'<commit>' was not escaped - the generator emits raw markup")
+
+
+def main():
+    for fn in (
+        test_split_is_lossless,
+        test_split_finds_twelve,
+        test_passthrough_is_identical,
+        test_mixed_leaves_others_untouched,
+        test_head_and_tail_survive_generation,
+        test_rendered_block_is_serveable,
+        test_rendered_block_contains_the_answers,
+        test_html_is_escaped,
+    ):
+        print(f"== {fn.__name__} ==")
+        fn()
+    print()
+    print(f"gen-answers: {PASS} passed, {FAIL} failed")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `python3 tests/test_gen_answers.py`
+Expected: FAIL with `FileNotFoundError` on `scripts/gen-answers.py`.
+
+- [ ] **Step 3: Write the generator**
+
+Create `scripts/gen-answers.py`:
+
+```python
+#!/usr/bin/env python3
+"""Generate PRACTICE_ANSWERS.html from per-scenario answers TOML.
+
+MIXED MODE ON PURPOSE. Scenarios with a file in scenarios/answers/ are rendered
+from it; every other scenario's hand-written block is passed through byte-for-byte.
+That is what lets the twelve cards migrate one at a time instead of in a big bang.
+
+  python3 scripts/gen-answers.py            # rewrite PRACTICE_ANSWERS.html in place
+  python3 scripts/gen-answers.py --check    # exit 1 if the file is stale (CI / make test)
+  python3 scripts/gen-answers.py --stdout   # print, do not write
+
+Stdlib only. The hand-written blocks are the reason this is a surgical splice
+rather than a template render: regenerating the whole document from scratch would
+mean re-authoring eleven scenarios' worth of prose that is already correct.
+"""
+from __future__ import annotations
+
+import difflib
+import html
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import answers  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+TARGET = REPO / "PRACTICE_ANSWERS.html"
+
+# Matches a whole <details>...</details> block and captures the scenario number
+# out of its summary heading. DOTALL because blocks span many lines; non-greedy
+# so consecutive blocks do not get swallowed into one.
+BLOCK_RE = re.compile(
+    r"[ \t]*<details>.*?<h2[^>]*>(\d{2}) - .*?</details>\n",
+    re.DOTALL,
+)
+
+
+def split(doc: str) -> tuple[str, dict[str, str], str]:
+    """Split into (head, {number: block}, tail). Lossless: the parts reassemble exactly."""
+    blocks: dict[str, str] = {}
+    spans: list[tuple[int, int]] = []
+    for m in BLOCK_RE.finditer(doc):
+        blocks[m.group(1)] = m.group(0)
+        spans.append((m.start(), m.end()))
+    if not spans:
+        return doc, {}, ""
+    head = doc[: spans[0][0]]
+    tail = doc[spans[-1][1] :]
+    # Anything between blocks (blank lines) belongs to the preceding block so the
+    # round-trip stays exact. The regex already consumes the trailing newline.
+    for (prev_start, prev_end), (next_start, _) in zip(spans, spans[1:]):
+        gap = doc[prev_end:next_start]
+        if gap:
+            num = next(k for k, v in blocks.items() if v == doc[prev_start:prev_end])
+            blocks[num] = blocks[num] + gap
+    return head, blocks, tail
+
+
+def _esc(text: str) -> str:
+    return html.escape(text, quote=False)
+
+
+def render(data: dict) -> str:
+    """Render one validated answers dict into a <details> block."""
+    out: list[str] = []
+    out.append("    <details>\n")
+    out.append("      <summary>\n")
+    out.append(f'        <h2 style="display: inline">{_esc(data["scenario"])} - {_esc(data["title"])}</h2>\n')
+    out.append("      </summary>\n")
+
+    for task in data["tasks"]:
+        ans = task.get("answer", {})
+        pre = ans.get("pre", [])
+        prose = ans.get("prose", "")
+        out.append(f'      <h3>{_esc(task["id"])}. {_esc(task["prompt"])}</h3>\n')
+        if pre:
+            body = "\n".join(_esc(line) for line in pre)
+            out.append(f"      <pre>\n{body}</pre>\n")
+        if prose:
+            out.append(f"      <p>{_esc(prose)}</p>\n")
+
+    out.append("    </details>\n")
+    return "".join(out)
+
+
+def generate(doc: str, scenarios: list[str]) -> str:
+    """Replace the named scenarios' blocks with rendered ones; leave the rest alone."""
+    head, blocks, tail = split(doc)
+    for num in scenarios:
+        if num not in blocks:
+            raise answers.AnswersError(f"scenario {num} has an answers file but no block in {TARGET.name}")
+        trailing = blocks[num][len(blocks[num].rstrip("\n")) :]
+        blocks[num] = render(answers.load(num)).rstrip("\n") + trailing
+    return head + "".join(blocks[k] for k in sorted(blocks)) + tail
+
+
+def main(argv: list[str]) -> int:
+    mode = argv[0] if argv else ""
+    doc = TARGET.read_text(encoding="utf-8")
+    out = generate(doc, answers.available())
+
+    if mode == "--stdout":
+        sys.stdout.write(out)
+        return 0
+    if mode == "--check":
+        if out == doc:
+            print(f"gen-answers: {TARGET.name} is up to date")
+            return 0
+        diff = difflib.unified_diff(
+            doc.splitlines(keepends=True),
+            out.splitlines(keepends=True),
+            fromfile=f"{TARGET.name} (committed)",
+            tofile=f"{TARGET.name} (generated)",
+        )
+        sys.stdout.writelines(diff)
+        print(f"\ngen-answers: {TARGET.name} is STALE - run `make answers-gen`", file=sys.stderr)
+        return 1
+
+    if out == doc:
+        print(f"gen-answers: {TARGET.name} already up to date")
+        return 0
+    TARGET.write_text(out, encoding="utf-8")
+    print(f"gen-answers: rewrote {TARGET.name} from {', '.join(answers.available())}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 tests/test_gen_answers.py`
+Expected: PASS on all assertions. If `test_split_is_lossless` fails, the gap-handling in `split()` is wrong for this document and must be fixed before anything else, because every other guarantee depends on it.
+
+- [ ] **Step 5: Regenerate and inspect the diff by hand**
+
+```bash
+python3 scripts/gen-answers.py --check
+```
+
+Expected: a diff limited to the 03 block. Read it. The generated 03 block will differ from the hand-written one in structure, because the TOML carries per-task headings the hand-written block did not have. That is the intended improvement, but confirm nothing was lost:
+
+```bash
+python3 scripts/gen-answers.py --stdout | python3 -c "
+import sys, importlib.util, pathlib
+spec = importlib.util.spec_from_file_location('g', 'scripts/gen-answers.py')
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+_, b, _ = g.split(sys.stdin.read())
+print(b['03'])"
+```
+
+- [ ] **Step 6: Write the file and verify serve-answers still scopes**
+
+```bash
+python3 scripts/gen-answers.py
+bash scripts/serve-answers.sh 03 &
+sleep 2 && curl -s "http://localhost:${PORT:-8000}" | grep -c '<details>'
+kill %1
+```
+
+Expected: exactly `1`. This confirms the awk scoper in `scripts/serve-answers.sh` still matches the generated block, which is the only external consumer of the HTML's shape.
+
+- [ ] **Step 7: Add the Makefile targets**
+
+In `Makefile`, add `answers-gen` to `.PHONY` and add the target after `serve-answers`:
+
+```makefile
+answers-gen: ## Regenerate PRACTICE_ANSWERS.html from scenarios/answers/*.toml
+	$(PYTHON) scripts/gen-answers.py
+```
+
+In `Makefile.test`, add `answers-check` to `.PHONY`, add it to the `test` target's prerequisites, and add:
+
+```makefile
+answers-check: ## Fail if PRACTICE_ANSWERS.html is stale vs scenarios/answers/*.toml
+	python3 scripts/gen-answers.py --check
+	python3 tests/test_answers.py
+	python3 tests/test_gen_answers.py
+```
+
+The `test` line becomes:
+
+```makefile
+test: fmt-check validate helm-lint history-scrubber answers-check ## Static checks (terraform + chart + answers; helm via Podman)
+```
+
+- [ ] **Step 8: Run the full static suite**
+
+Run: `make -f Makefile.test test`
+Expected: PASS. This is now the gate that makes card/answers/HTML drift impossible for any ported scenario.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add scripts/gen-answers.py tests/test_gen_answers.py PRACTICE_ANSWERS.html Makefile Makefile.test
+git commit -m "feat: generate the scenario 03 answer block from TOML, mixed mode"
+```
+
+---
+
+## Phase 2: The grader
+
+Pure functions over strings and files. No cluster, no AWS, no network. This is where the drill actually decides whether you were right, and it is deliberately built and tested before anything can call it.
+
+### Task 2.1: The TypeScript workspace, in Podman
+
+**Files:**
+
+- Create: `drill/package.json`, `drill/tsconfig.base.json`, `drill/.gitignore`
+- Create: `drill/shared/package.json`, `drill/shared/tsconfig.json`, `drill/shared/src/index.ts`
+- Create: `drill/server/package.json`, `drill/server/tsconfig.json`, `drill/server/src/index.ts`
+- Create: `drill/README.md`
+- Modify: `Makefile.test` (add `drill-install`, `drill-test`, `drill-build`)
+- Modify: `.gitignore`
+
+**Interfaces:**
+
+- Consumes: nothing.
+- Produces:
+  - npm workspaces rooted at `drill/`, with `@drill/shared` and `@drill/server`.
+  - `make -f Makefile.test drill-test` runs `npm test` for every workspace inside Podman.
+  - `drill/shared/src/index.ts` exports the websocket protocol types every later task adds to.
+
+- [ ] **Step 1: Add git-ignore entries before creating anything**
+
+Append to `.gitignore`:
+
+```
+# ---- drill GUI (node) ----
+drill/**/node_modules/
+drill/**/dist/
+drill/**/.vite/
+drill/**/*.tsbuildinfo
+```
+
+- [ ] **Step 2: Create the workspace root**
+
+`drill/package.json`:
+
+```json
+{
+  "name": "drill",
+  "private": true,
+  "type": "module",
+  "workspaces": ["shared", "server", "web"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
+```
+
+`drill/tsconfig.base.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "declaration": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}
+```
+
+`drill/README.md`:
+
+````markdown
+# drill - the in-cluster drill GUI
+
+The mothership. One long-lived pod that serves the terminal, the editor, the
+answers panel and the help panel, and is the only surface a drill is run from.
+
+## Layout
+
+| Workspace | What                                                                                                                  |
+| --------- | --------------------------------------------------------------------------------------------------------------------- |
+| `shared/` | The websocket protocol types. Imported by both ends, so a mismatch is a compile error rather than a runtime surprise. |
+| `server/` | Fastify. Serves the built web app, the PTY websocket, the grader, and the reverse proxy to Argo CD and Grafana.       |
+| `web/`    | React + Vite. xterm.js terminal, Monaco editor, answers and help panels.                                              |
+
+## Running it
+
+Node never runs on the host - everything goes through Podman, per
+`.claude/skills/container-sandbox/SKILL.md`.
+
+```bash
+make -f Makefile.test drill-install    # npm install, in a container
+make -f Makefile.test drill-test       # unit tests, in a container
+make -f Makefile.test drill-dev        # Vite dev server on a probed port (this is the visual)
+```
+````
+
+## Why TypeScript on both ends
+
+The websocket carries a real protocol - terminal bytes, resize events, grader
+verdicts, file saves, sync status - and the two ends are written months apart.
+Shared types turn a protocol mismatch into a compile error.
+
+````
+
+- [ ] **Step 3: Create the shared protocol package**
+
+`drill/shared/package.json`:
+
+```json
+{
+  "name": "@drill/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": { "typescript": "^5.6.0" }
+}
+````
+
+`drill/shared/tsconfig.json`:
+
+```json
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src", "composite": true },
+  "include": ["src"]
+}
+```
+
+`drill/shared/src/index.ts`:
+
+```typescript
+/**
+ * The websocket protocol between the drill GUI's browser half and its server half.
+ *
+ * Both ends import these types, so adding a message without handling it is a
+ * compile error rather than a runtime surprise. Every message is a discriminated
+ * union on `type`.
+ */
+
+/** Which grader a task uses. Mirrors the `grader` key in scenarios/answers/*.toml. */
+export type GraderKind = "command" | "file" | "prose";
+
+/** The result of grading one submission. */
+export interface Verdict {
+  taskId: string;
+  passed: boolean;
+  /** Shown to the user. On failure this is the hint, keyed to the misconception. */
+  message: string;
+  /** Which hint fired, if any. Useful for telling "wrong" from "wrong in a known way". */
+  hint?: string;
+}
+
+/** Browser -> server. */
+export type ClientMessage =
+  | { type: "term:input"; data: string }
+  | { type: "term:resize"; cols: number; rows: number }
+  | { type: "file:save"; path: string; content: string }
+  | { type: "submit"; taskId: string; answer: string }
+  | { type: "hint:request"; taskId: string };
+
+/** Server -> browser. */
+export type ServerMessage =
+  | { type: "term:output"; data: string }
+  | { type: "verdict"; verdict: Verdict }
+  | { type: "session"; state: SessionState }
+  | { type: "deps"; deps: DependencyStatus[] }
+  | { type: "error"; message: string };
+
+/** One link in the startup dependency chain, surfaced in the GUI's status view. */
+export interface DependencyStatus {
+  name: "cluster-git" | "argocd" | "practice-app";
+  state: "ready" | "starting" | "waiting" | "absent";
+  detail: string;
+}
+
+/** Live drill state. Mirrored into the drill-state ConfigMap. */
+export interface SessionState {
+  scenario: string;
+  sessionId: string;
+  startedAt: string;
+  currentTaskId: string;
+  passed: string[];
+  attempts: Attempt[];
+}
+
+/** One submission. Append-only: nothing here is ever rewritten or deleted. */
+export interface Attempt {
+  taskId: string;
+  at: string;
+  submitted: string;
+  passed: boolean;
+  message: string;
+}
+```
+
+- [ ] **Step 4: Create the server package stub**
+
+`drill/server/package.json`:
+
+```json
+{
+  "name": "@drill/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test --experimental-strip-types 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@drill/shared": "*",
+    "smol-toml": "^1.3.0",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.0",
+    "typescript": "^5.6.0"
+  }
+}
+```
+
+`drill/server/tsconfig.json`:
+
+```json
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "references": [{ "path": "../shared" }],
+  "include": ["src"]
+}
+```
+
+`drill/server/src/index.ts`:
+
+```typescript
+/** Entry point. Fastify wiring lands in Phase 5; this keeps the workspace buildable. */
+export const VERSION = "0.0.0";
+```
+
+- [ ] **Step 5: Add the Podman-backed Makefile targets**
+
+In `Makefile.test`, add `drill-install drill-test drill-build drill-typecheck` to `.PHONY`, and add:
+
+```makefile
+# Node runs inside Podman - nothing is installed on the host.
+NODE_IMAGE := docker.io/node:20-alpine
+NODE       := podman run --rm --userns=keep-id -v $(CURDIR)/drill:/app:Z -w /app $(NODE_IMAGE)
+
+drill-install: ## npm install for the drill workspaces (inside Podman)
+	$(NODE) npm install
+
+drill-typecheck: ## tsc --noEmit across the drill workspaces (inside Podman)
+	$(NODE) npm run typecheck
+
+drill-test: ## Unit tests for the drill workspaces (inside Podman)
+	$(NODE) npm test
+
+drill-build: ## Build the drill workspaces (inside Podman)
+	$(NODE) npm run build
+```
+
+- [ ] **Step 6: Verify the workspace installs and typechecks**
+
+```bash
+make -f Makefile.test drill-install
+make -f Makefile.test drill-typecheck
+```
+
+Expected: install completes and typecheck is clean. If Podman complains about `--userns=keep-id`, drop that flag and re-run; note it in `drill/README.md` if so.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add drill/ Makefile.test .gitignore
+git commit -m "feat: drill TypeScript workspace and shared protocol types"
+```
+
+---
+
+### Task 2.2: Alias expansion
+
+The user's shell aliases (`k`, `kg`, `kgp`, `kgn`, `kgs`, `kd`, `kl`, `kaf`, `kp`) must be expanded before anything is parsed, or a correct answer typed the way the user actually types it grades as wrong.
+
+**Files:**
+
+- Create: `drill/server/src/grader/aliases.ts`
+- Test: `drill/server/src/grader/aliases.test.ts`
+
+**Interfaces:**
+
+- Consumes: nothing.
+- Produces:
+  - `export const ALIASES: Readonly<Record<string, string>>` - the alias table.
+  - `export function expandAliases(command: string): string` - expands the leading word only, recursively, capped at 8 rounds. Returns the input unchanged when the first word is not an alias. Preserves the rest of the command verbatim, including quoting and pipes.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `drill/server/src/grader/aliases.test.ts`:
+
+```typescript
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { expandAliases } from "./aliases.ts";
+
+test("expands a bare alias", () => {
+  assert.equal(expandAliases("kgp"), "kubectl get pods");
+});
+
+test("expands and keeps the rest of the command verbatim", () => {
+  assert.equal(
+    expandAliases("kgp -n practice-app -o wide"),
+    "kubectl get pods -n practice-app -o wide",
+  );
+});
+
+test("leaves a non-alias untouched", () => {
+  assert.equal(
+    expandAliases("helm upgrade practice-app ."),
+    "helm upgrade practice-app .",
+  );
+});
+
+test("leaves a full kubectl command untouched", () => {
+  const cmd =
+    "kubectl -n practice-app rollout undo deploy/practice-app-frontend";
+  assert.equal(expandAliases(cmd), cmd);
+});
+
+test("expands k, the shortest alias, without touching a word that starts with k", () => {
+  assert.equal(expandAliases("k get pods"), "kubectl get pods");
+  assert.equal(expandAliases("kustomize build ."), "kustomize build .");
+});
+
+test("preserves quoting and pipes in the tail", () => {
+  assert.equal(
+    expandAliases(`kg deploy -o jsonpath='{.items[0].spec}' | jq .`),
+    `kubectl get deploy -o jsonpath='{.items[0].spec}' | jq .`,
+  );
+});
+
+test("tolerates leading and repeated whitespace", () => {
+  assert.equal(
+    expandAliases("   kgp    -n  practice-app"),
+    "kubectl get pods    -n  practice-app",
+  );
+});
+
+test("expands recursively but terminates on a cycle", () => {
+  // A malformed table must not hang the server; the cap is the guarantee.
+  assert.doesNotThrow(() => expandAliases("kgp"));
+});
+
+test("empty input is empty output", () => {
+  assert.equal(expandAliases(""), "");
+  assert.equal(expandAliases("   "), "   ");
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `make -f Makefile.test drill-test`
+Expected: FAIL with `Cannot find module './aliases.ts'`.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `drill/server/src/grader/aliases.ts`:
+
+```typescript
+/**
+ * Shell alias expansion, run before any command is parsed.
+ *
+ * Without this, a correct answer typed the way the user actually types it
+ * ("kgp -n practice-app") grades as wrong, which teaches nothing except that
+ * the grader is brittle. The table mirrors the aliases in the user's shell rc.
+ */
+
+export const ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  k: "kubectl",
+  kg: "kubectl get",
+  kgp: "kubectl get pods",
+  kgn: "kubectl get nodes",
+  kgs: "kubectl get svc",
+  kd: "kubectl describe",
+  kl: "kubectl logs",
+  kaf: "kubectl apply -f",
+  kp: "kubectl port-forward",
+});
+
+/** Guard against a cyclic table. Real expansion never needs more than one round. */
+const MAX_ROUNDS = 8;
+
+/**
+ * Expand the leading word if it is an alias, leaving the rest byte-identical.
+ *
+ * Only the first word is considered, matching how shells expand aliases, so a
+ * literal "kgp" appearing later in the command (a pod name, a jsonpath) is safe.
+ */
+export function expandAliases(command: string): string {
+  let current = command;
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const match = /^(\s*)(\S+)(.*)$/s.exec(current);
+    if (!match) return current;
+    const [, lead, head, tail] = match as unknown as [
+      string,
+      string,
+      string,
+      string,
+    ];
+    const replacement = ALIASES[head];
+    if (replacement === undefined) return current;
+    const next = `${lead}${replacement}${tail}`;
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `make -f Makefile.test drill-test`
+Expected: PASS, 9 tests.
+
+- [ ] **Step 5: Tell the user about their broken alias**
+
+Their shell rc contains `alias kd='kubectl describe'0` - the stray trailing `0` makes `kd` expand to `kubectl describe0`. The grader's table is correct; their shell is not. Mention it, do not silently encode the typo.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add drill/server/src/grader/aliases.ts drill/server/src/grader/aliases.test.ts
+git commit -m "feat: kubectl alias expansion for the grader"
+```
+
+---
+
+### Task 2.3: Semantic command parsing
+
+A regex over the raw string grades `kubectl get deploy -n practice-app` and `kubectl -n practice-app get deployment` differently, which is wrong. Parse into a canonical shape instead, then compare shapes.
+
+**Files:**
+
+- Create: `drill/server/src/grader/parse.ts`
+- Test: `drill/server/src/grader/parse.test.ts`
+
+**Interfaces:**
+
+- Consumes: `expandAliases` from Task 2.2.
+- Produces:
+  - `export interface ParsedCommand { tool: string; verb: string; resource?: string; name?: string; namespace?: string; allNamespaces: boolean; flags: Record<string, string | true>; raw: string; }`
+  - `export function parseCommand(input: string): ParsedCommand` - expands aliases, then parses. Normalises resource aliases (`deploy`/`deployments` -> `deployment`, `po`/`pods` -> `pod`, `svc`/`services` -> `service`, `ns` -> `namespace`, `cm` -> `configmap`, `sts` -> `statefulset`, `ds` -> `daemonset`, `ing` -> `ingress`). Splits `deploy/name` into `resource` plus `name`. Recognises `-n`, `--namespace`, `-A`, `--all-namespaces`. Collapses the two-word verbs `rollout history`, `rollout undo`, `rollout status`, `rollout restart` into `rollout-history` etc.
+  - `export function normaliseResource(word: string): string`
+  - Non-kubectl input is still parsed: `tool` becomes `git`, `helm`, `curl` or whatever the first word is, and `verb` its second word. Shell control (`while`, `for`) sets `tool` to `shell` and `verb` to the loop keyword, which is what lets the `curl-loop` accept rule in scenario 03 task 4 work.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `drill/server/src/grader/parse.test.ts`:
+
+```typescript
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { parseCommand, normaliseResource } from "./parse.ts";
+
+test("flag order does not change the parse", () => {
+  const a = parseCommand("kubectl get deploy -n practice-app");
+  const b = parseCommand("kubectl -n practice-app get deployment");
+  assert.equal(a.verb, b.verb);
+  assert.equal(a.resource, b.resource);
+  assert.equal(a.namespace, b.namespace);
+  assert.equal(a.resource, "deployment");
+  assert.equal(a.namespace, "practice-app");
+});
+
+test("slash form splits into resource and name", () => {
+  const p = parseCommand(
+    "kubectl -n practice-app rollout undo deploy/practice-app-frontend",
+  );
+  assert.equal(p.verb, "rollout-undo");
+  assert.equal(p.resource, "deployment");
+  assert.equal(p.name, "practice-app-frontend");
+  assert.equal(p.namespace, "practice-app");
+});
+
+test("space form is equivalent to slash form", () => {
+  const slash = parseCommand(
+    "kubectl rollout history deploy/practice-app-frontend -n practice-app",
+  );
+  const space = parseCommand(
+    "kubectl rollout history deployment practice-app-frontend -n practice-app",
+  );
+  assert.equal(slash.verb, space.verb);
+  assert.equal(slash.resource, space.resource);
+  assert.equal(slash.name, space.name);
+  assert.equal(slash.verb, "rollout-history");
+});
+
+test("aliases are expanded before parsing", () => {
+  const p = parseCommand("kgp -n practice-app");
+  assert.equal(p.tool, "kubectl");
+  assert.equal(p.verb, "get");
+  assert.equal(p.resource, "pod");
+  assert.equal(p.namespace, "practice-app");
+});
+
+test("--namespace long form is recognised", () => {
+  assert.equal(
+    parseCommand("kubectl get pods --namespace practice-app").namespace,
+    "practice-app",
+  );
+  assert.equal(
+    parseCommand("kubectl get pods --namespace=practice-app").namespace,
+    "practice-app",
+  );
+});
+
+test("-A sets allNamespaces and leaves namespace undefined", () => {
+  const p = parseCommand("kubectl get pods -A");
+  assert.equal(p.allNamespaces, true);
+  assert.equal(p.namespace, undefined);
+});
+
+test("missing namespace is undefined, not a guess", () => {
+  assert.equal(parseCommand("kubectl get pods").namespace, undefined);
+});
+
+test("flags are captured with and without values", () => {
+  const p = parseCommand("kubectl get deploy -o wide --watch");
+  assert.equal(p.flags["-o"], "wide");
+  assert.equal(p.flags["--watch"], true);
+});
+
+test("git commands parse as tool git", () => {
+  const p = parseCommand("git revert abc123");
+  assert.equal(p.tool, "git");
+  assert.equal(p.verb, "revert");
+});
+
+test("a while loop parses as shell", () => {
+  const p = parseCommand(
+    "while true; do curl -so /dev/null localhost:8081; sleep .3; done",
+  );
+  assert.equal(p.tool, "shell");
+  assert.equal(p.verb, "while");
+});
+
+test("raw is preserved exactly", () => {
+  const raw = "kubectl   get   pods   -n practice-app";
+  assert.equal(parseCommand(raw).raw, raw);
+});
+
+test("resource normalisation covers the common short forms", () => {
+  assert.equal(normaliseResource("deploy"), "deployment");
+  assert.equal(normaliseResource("deployments"), "deployment");
+  assert.equal(normaliseResource("po"), "pod");
+  assert.equal(normaliseResource("svc"), "service");
+  assert.equal(normaliseResource("ing"), "ingress");
+  assert.equal(normaliseResource("widget"), "widget");
+});
+
+test("empty input does not throw", () => {
+  const p = parseCommand("");
+  assert.equal(p.tool, "");
+  assert.equal(p.verb, "");
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `make -f Makefile.test drill-test`
+Expected: FAIL with `Cannot find module './parse.ts'`.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `drill/server/src/grader/parse.ts`:
+
+```typescript
+/**
+ * Parse a command into a canonical shape so grading compares meaning, not text.
+ *
+ * `kubectl get deploy -n practice-app` and `kubectl -n practice-app get deployment`
+ * are the same command. A regex says they are different. This says they are the same,
+ * which is the difference between grading understanding and grading typing.
+ */
+import { expandAliases } from "./aliases.ts";
+
+export interface ParsedCommand {
+  /** kubectl, git, helm, curl, shell, or whatever led the line. */
+  tool: string;
+  /** get, describe, rollout-history, revert, while... */
+  verb: string;
+  resource?: string;
+  name?: string;
+  namespace?: string;
+  allNamespaces: boolean;
+  flags: Record<string, string | true>;
+  /** The input, byte for byte, for showing back to the user. */
+  raw: string;
+}
+
+const RESOURCE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  deploy: "deployment",
+  deployments: "deployment",
+  deployment: "deployment",
+  po: "pod",
+  pods: "pod",
+  pod: "pod",
+  svc: "service",
+  services: "service",
+  service: "service",
+  ns: "namespace",
+  namespaces: "namespace",
+  namespace: "namespace",
+  cm: "configmap",
+  configmaps: "configmap",
+  configmap: "configmap",
+  sts: "statefulset",
+  statefulsets: "statefulset",
+  statefulset: "statefulset",
+  ds: "daemonset",
+  daemonsets: "daemonset",
+  daemonset: "daemonset",
+  ing: "ingress",
+  ingresses: "ingress",
+  ingress: "ingress",
+  rs: "replicaset",
+  replicasets: "replicaset",
+  replicaset: "replicaset",
+  no: "node",
+  nodes: "node",
+  node: "node",
+  hpa: "horizontalpodautoscaler",
+  pvc: "persistentvolumeclaim",
+  secrets: "secret",
+  secret: "secret",
+});
+
+/** kubectl verbs whose meaning needs their second word. */
+const TWO_WORD_VERBS = new Set([
+  "rollout",
+  "config",
+  "auth",
+  "create",
+  "api-resources",
+]);
+
+/** Shell keywords that mean "this is a loop or a control structure, not a tool call". */
+const SHELL_KEYWORDS = new Set(["while", "for", "until", "if"]);
+
+/** Flags that take a value as the next word rather than after an `=`. */
+const VALUE_FLAGS = new Set([
+  "-n",
+  "--namespace",
+  "-o",
+  "--output",
+  "-l",
+  "--selector",
+  "-f",
+  "--filename",
+  "-c",
+  "--container",
+]);
+
+export function normaliseResource(word: string): string {
+  return RESOURCE_ALIASES[word.toLowerCase()] ?? word.toLowerCase();
+}
+
+export function parseCommand(input: string): ParsedCommand {
+  const raw = input;
+  const expanded = expandAliases(input).trim();
+  const out: ParsedCommand = {
+    tool: "",
+    verb: "",
+    allNamespaces: false,
+    flags: {},
+    raw,
+  };
+  if (!expanded) return out;
+
+  const words = expanded.split(/\s+/);
+  const first = words[0] ?? "";
+
+  if (SHELL_KEYWORDS.has(first)) {
+    out.tool = "shell";
+    out.verb = first;
+    return out;
+  }
+
+  out.tool = first;
+  const rest = words.slice(1);
+
+  // First pass: pull out flags, leaving positional words behind.
+  const positional: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const word = rest[i] ?? "";
+    if (!word.startsWith("-")) {
+      positional.push(word);
+      continue;
+    }
+    const eq = word.indexOf("=");
+    if (eq > 0) {
+      out.flags[word.slice(0, eq)] = word.slice(eq + 1);
+      continue;
+    }
+    if (VALUE_FLAGS.has(word) && i + 1 < rest.length) {
+      out.flags[word] = rest[i + 1] ?? "";
+      i++;
+      continue;
+    }
+    out.flags[word] = true;
+  }
+
+  out.namespace = (out.flags["-n"] ?? out.flags["--namespace"]) as
+    string | undefined;
+  if (typeof out.namespace !== "string") out.namespace = undefined;
+  out.allNamespaces =
+    out.flags["-A"] === true || out.flags["--all-namespaces"] === true;
+
+  // Second pass: verb, resource, name from the positional words.
+  const verbWord = positional[0] ?? "";
+  if (TWO_WORD_VERBS.has(verbWord) && positional[1]) {
+    out.verb = `${verbWord}-${positional[1]}`;
+    positional.splice(0, 2);
+  } else {
+    out.verb = verbWord;
+    positional.splice(0, 1);
+  }
+
+  const target = positional[0];
+  if (target) {
+    if (target.includes("/")) {
+      const [res, name] = target.split("/", 2);
+      out.resource = normaliseResource(res ?? "");
+      out.name = name;
+    } else {
+      out.resource = normaliseResource(target);
+      if (positional[1]) out.name = positional[1];
+    }
+  }
+
+  return out;
+}
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `make -f Makefile.test drill-test`
+Expected: PASS, 22 tests across both grader files.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add drill/server/src/grader/parse.ts drill/server/src/grader/parse.test.ts
+git commit -m "feat: semantic kubectl command parsing for the grader"
+```
+
+---
+
+### Task 2.4: Grading and hints
+
+Three graders behind one interface, plus the hint dispatch that turns "wrong" into "wrong in a known way, and here is the misconception".
+
+**Files:**
+
+- Create: `drill/server/src/grader/index.ts`
+- Create: `drill/server/src/grader/answers.ts`
+- Test: `drill/server/src/grader/index.test.ts`
+
+**Interfaces:**
+
+- Consumes: `parseCommand`, `ParsedCommand` from Task 2.3; `Verdict` from `@drill/shared`.
+- Produces:
+  - `answers.ts`: `export interface AnswerTask { id: string; prompt: string; grader: GraderKind; accept?: AcceptRule[]; hints?: Hint[]; path?: string; key?: string; accept_pattern?: string; must_include?: string[]; answer?: { pre?: string[]; prose?: string }; }`, `export interface AnswerSet { schema: number; scenario: string; title: string; time: string; needs: string; ticket: string; tasks: AnswerTask[] }`, `export interface AcceptRule { verb: string; resource?: string; namespace?: string; name?: string; flags?: Record<string, string> }`, `export interface Hint { when: string; text: string }`, and `export function loadAnswers(scenario: string, dir: string): Promise<AnswerSet>` which parses the TOML with `smol-toml` and throws on the same conditions `scripts/answers.py` rejects.
+  - `index.ts`: `export function gradeCommand(task: AnswerTask, submitted: string): Verdict`, `export function gradeProse(task: AnswerTask, submitted: string): Verdict`, `export function gradeFile(task: AnswerTask, fileContent: string): Verdict`, and `export function grade(task: AnswerTask, submitted: string, fileContent?: string): Verdict` dispatching on `task.grader`.
+  - Hint keys the graders can fire, matched against `Hint.when`: `missing-namespace`, `wrong-namespace`, `wrong-resource`, `wrong-name`, `no-loop`, `only-imperative`, `no-numbers`, `no-signature`, `unchanged`, `uncommitted`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `drill/server/src/grader/index.test.ts`:
+
+```typescript
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { grade, gradeCommand, gradeProse, gradeFile } from "./index.ts";
+import type { AnswerTask } from "./answers.ts";
+
+const rolloutTask: AnswerTask = {
+  id: "1",
+  prompt: "find the rollout history",
+  grader: "command",
+  accept: [
+    {
+      verb: "rollout-history",
+      resource: "deployment",
+      namespace: "practice-app",
+      name: "practice-app-frontend",
+    },
+    {
+      verb: "get",
+      resource: "deployment",
+      namespace: "practice-app",
+      name: "practice-app-frontend",
+    },
+  ],
+  hints: [
+    {
+      when: "missing-namespace",
+      text: "Every command in this drill needs -n practice-app.",
+    },
+    {
+      when: "wrong-resource",
+      text: "Rollout history belongs to the Deployment, not the pods.",
+    },
+  ],
+};
+
+test("an exactly correct command passes", () => {
+  const v = gradeCommand(
+    rolloutTask,
+    "kubectl -n practice-app rollout history deploy/practice-app-frontend",
+  );
+  assert.equal(v.passed, true);
+  assert.equal(v.taskId, "1");
+});
+
+test("the same command written differently still passes", () => {
+  const v = gradeCommand(
+    rolloutTask,
+    "kubectl rollout history deployment practice-app-frontend --namespace=practice-app",
+  );
+  assert.equal(v.passed, true);
+});
+
+test("an alias form passes", () => {
+  const v = gradeCommand(
+    {
+      ...rolloutTask,
+      accept: [{ verb: "get", resource: "pod", namespace: "practice-app" }],
+    },
+    "kgp -n practice-app",
+  );
+  assert.equal(v.passed, true);
+});
+
+test("a second accept rule also passes", () => {
+  const v = gradeCommand(
+    rolloutTask,
+    "kubectl -n practice-app get deploy practice-app-frontend",
+  );
+  assert.equal(v.passed, true);
+});
+
+test("missing namespace fails with the namespace hint, not a bare failure", () => {
+  const v = gradeCommand(
+    rolloutTask,
+    "kubectl rollout history deploy/practice-app-frontend",
+  );
+  assert.equal(v.passed, false);
+  assert.equal(v.hint, "missing-namespace");
+  assert.match(v.message, /-n practice-app/);
+});
+
+test("wrong resource fails with the resource hint", () => {
+  const v = gradeCommand(
+    rolloutTask,
+    "kubectl -n practice-app rollout history pod/practice-app-frontend",
+  );
+  assert.equal(v.passed, false);
+  assert.equal(v.hint, "wrong-resource");
+});
+
+test("an unrelated command fails without inventing a hint", () => {
+  const v = gradeCommand(rolloutTask, "helm list -A");
+  assert.equal(v.passed, false);
+  assert.equal(v.hint, undefined);
+});
+
+test("a rule with no namespace accepts a command with any namespace", () => {
+  const loose: AnswerTask = {
+    id: "4",
+    prompt: "curl loop",
+    grader: "command",
+    accept: [{ verb: "while" }],
+  };
+  assert.equal(
+    gradeCommand(loose, "while true; do curl localhost:8081; done").passed,
+    true,
+  );
+});
+
+test("prose grading is case-insensitive and needs every term", () => {
+  const task: AnswerTask = {
+    id: "3",
+    prompt: "surge behaviour",
+    grader: "prose",
+    must_include: ["25", "maxSurge", "maxUnavailable"],
+    hints: [{ when: "no-numbers", text: "Name the actual defaults." }],
+  };
+  assert.equal(
+    gradeProse(task, "RollingUpdate: 25% maxsurge and 25% maxunavailable")
+      .passed,
+    true,
+  );
+  const missing = gradeProse(
+    task,
+    "It rolls pods gradually using maxSurge and maxUnavailable",
+  );
+  assert.equal(missing.passed, false);
+  assert.equal(missing.hint, "no-numbers");
+  assert.match(missing.message, /Name the actual defaults/);
+});
+
+test("file grading reads a dotted key out of YAML", () => {
+  const task: AnswerTask = {
+    id: "2",
+    prompt: "bump the tag",
+    grader: "file",
+    path: "helm/practice-app/values.yaml",
+    key: "frontend.image.tag",
+    accept_pattern: "^1\\.28-alpine$",
+    hints: [{ when: "unchanged", text: "values.yaml still says 1.27-alpine." }],
+  };
+  const before =
+    "frontend:\n  image:\n    repository: nginx\n    tag: 1.27-alpine\n";
+  const after =
+    "frontend:\n  image:\n    repository: nginx\n    tag: 1.28-alpine\n";
+  assert.equal(gradeFile(task, after).passed, true);
+  const v = gradeFile(task, before);
+  assert.equal(v.passed, false);
+  assert.equal(v.hint, "unchanged");
+});
+
+test("file grading reports a missing key rather than crashing", () => {
+  const task: AnswerTask = {
+    id: "2",
+    prompt: "bump the tag",
+    grader: "file",
+    path: "x.yaml",
+    key: "frontend.image.tag",
+    accept_pattern: "^1\\.28-alpine$",
+  };
+  const v = gradeFile(task, "backend:\n  replicas: 1\n");
+  assert.equal(v.passed, false);
+  assert.match(v.message, /frontend\.image\.tag/);
+});
+
+test("file grading survives unparseable YAML", () => {
+  const task: AnswerTask = {
+    id: "2",
+    prompt: "p",
+    grader: "file",
+    path: "x.yaml",
+    key: "a.b",
+    accept_pattern: "^c$",
+  };
+  const v = gradeFile(task, "\tthis: is: not: yaml:\n  - [unclosed\n");
+  assert.equal(v.passed, false);
+  assert.match(v.message, /could not be parsed/i);
+});
+
+test("grade() dispatches on the grader kind", () => {
+  assert.equal(
+    grade(
+      rolloutTask,
+      "kubectl -n practice-app get deploy practice-app-frontend",
+    ).passed,
+    true,
+  );
+});
+
+test("a verdict always carries the task id", () => {
+  for (const v of [
+    gradeCommand(rolloutTask, "nonsense"),
+    gradeProse(
+      { id: "3", prompt: "p", grader: "prose", must_include: ["x"] },
+      "y",
+    ),
+  ]) {
+    assert.ok(v.taskId.length > 0);
+  }
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `make -f Makefile.test drill-test`
+Expected: FAIL with `Cannot find module './index.ts'`.
+
+- [ ] **Step 3: Write the answers loader**
+
+Create `drill/server/src/grader/answers.ts`:
+
+```typescript
+/**
+ * Read a scenario's answers TOML.
+ *
+ * The TOML is the cross-language contract: scripts/answers.py reads it to render
+ * PRACTICE_ANSWERS.html and never grades; this reads it to grade and never renders.
+ * The validation here mirrors scripts/answers.py deliberately - if the two drift,
+ * a file can pass generation and fail grading, which is the worst of both.
+ */
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { parse as parseToml } from "smol-toml";
+import type { GraderKind } from "@drill/shared";
+
+export const SCHEMA_VERSION = 1;
+
+export interface AcceptRule {
+  verb: string;
+  resource?: string;
+  namespace?: string;
+  name?: string;
+  flags?: Record<string, string>;
+}
+
+export interface Hint {
+  when: string;
+  text: string;
+}
+
+export interface AnswerTask {
+  id: string;
+  prompt: string;
+  grader: GraderKind;
+  accept?: AcceptRule[];
+  hints?: Hint[];
+  path?: string;
+  key?: string;
+  accept_pattern?: string;
+  must_include?: string[];
+  answer?: { pre?: string[]; prose?: string };
+}
+
+export interface AnswerSet {
+  schema: number;
+  scenario: string;
+  title: string;
+  time: string;
+  needs: string;
+  ticket: string;
+  tasks: AnswerTask[];
+}
+
+export class AnswersError extends Error {}
+
+export async function loadAnswers(
+  scenario: string,
+  dir: string,
+): Promise<AnswerSet> {
+  const path = join(dir, `${scenario}.toml`);
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    throw new AnswersError(
+      `no answers file for scenario ${scenario} (looked for ${path})`,
+    );
+  }
+  let data: unknown;
+  try {
+    data = parseToml(text);
+  } catch (e) {
+    throw new AnswersError(`${path}: not valid TOML: ${(e as Error).message}`);
+  }
+  return validate(data as AnswerSet, path);
+}
+
+export function validate(data: AnswerSet, where: string): AnswerSet {
+  if (data.schema !== SCHEMA_VERSION) {
+    throw new AnswersError(
+      `${where}: schema is ${data.schema}, this loader understands ${SCHEMA_VERSION}`,
+    );
+  }
+  if (!Array.isArray(data.tasks) || data.tasks.length === 0) {
+    throw new AnswersError(`${where}: needs a non-empty [[tasks]] array`);
+  }
+  const seen = new Set<string>();
+  for (const task of data.tasks) {
+    if (!task.id) throw new AnswersError(`${where}: a task has no id`);
+    if (seen.has(task.id))
+      throw new AnswersError(`${where}: duplicate task id ${task.id}`);
+    seen.add(task.id);
+    if (
+      task.grader === "command" &&
+      (!task.accept || task.accept.length === 0)
+    ) {
+      throw new AnswersError(
+        `${where}: task ${task.id} is a command task with no accept rules`,
+      );
+    }
+    if (
+      task.grader === "file" &&
+      (!task.path || !task.key || !task.accept_pattern)
+    ) {
+      throw new AnswersError(
+        `${where}: task ${task.id} is a file task missing path/key/accept_pattern`,
+      );
+    }
+    if (
+      task.grader === "prose" &&
+      (!task.must_include || task.must_include.length === 0)
+    ) {
+      throw new AnswersError(
+        `${where}: task ${task.id} is a prose task with no must_include`,
+      );
+    }
+  }
+  return data;
+}
+```
+
+- [ ] **Step 4: Write the graders**
+
+Create `drill/server/src/grader/index.ts`:
+
+```typescript
+/**
+ * Grading. Three kinds behind one interface.
+ *
+ * A failure is only useful if it names the misconception, so every grader tries to
+ * classify HOW the answer was wrong and looks up a hint keyed to that. A bare
+ * "incorrect" teaches nothing, which is the whole reason this is not a regex match.
+ */
+import type { Verdict } from "@drill/shared";
+import { parse as parseYaml } from "yaml";
+import {
+  parseCommand,
+  normaliseResource,
+  type ParsedCommand,
+} from "./parse.ts";
+import type { AnswerTask, AcceptRule } from "./answers.ts";
+
+export function grade(
+  task: AnswerTask,
+  submitted: string,
+  fileContent?: string,
+): Verdict {
+  switch (task.grader) {
+    case "command":
+      return gradeCommand(task, submitted);
+    case "prose":
+      return gradeProse(task, submitted);
+    case "file":
+      return gradeFile(task, fileContent ?? "");
+  }
+}
+
+function hintFor(
+  task: AnswerTask,
+  key: string,
+): { hint?: string; message: string } | undefined {
+  const hit = task.hints?.find((h) => h.when === key);
+  return hit ? { hint: key, message: hit.text } : undefined;
+}
+
+function pass(task: AnswerTask, message: string): Verdict {
+  return { taskId: task.id, passed: true, message };
+}
+
+function fail(
+  task: AnswerTask,
+  key: string | undefined,
+  fallback: string,
+): Verdict {
+  const hinted = key ? hintFor(task, key) : undefined;
+  return hinted
+    ? {
+        taskId: task.id,
+        passed: false,
+        message: hinted.message,
+        hint: hinted.hint,
+      }
+    : { taskId: task.id, passed: false, message: fallback };
+}
+
+/** Does one parsed command satisfy one accept rule? Unset rule fields mean "do not care". */
+function matches(rule: AcceptRule, cmd: ParsedCommand): boolean {
+  if (rule.verb !== cmd.verb) return false;
+  if (rule.resource && normaliseResource(rule.resource) !== cmd.resource)
+    return false;
+  if (rule.namespace && rule.namespace !== cmd.namespace) return false;
+  if (rule.name && rule.name !== cmd.name) return false;
+  for (const [flag, want] of Object.entries(rule.flags ?? {})) {
+    if (cmd.flags[flag] !== want) return false;
+  }
+  return true;
+}
+
+export function gradeCommand(task: AnswerTask, submitted: string): Verdict {
+  const cmd = parseCommand(submitted);
+  const rules = task.accept ?? [];
+
+  if (rules.some((r) => matches(r, cmd))) {
+    return pass(task, "Correct.");
+  }
+
+  // Classify the near misses, most specific first. Only rules whose verb already
+  // matched are considered, so a completely different command gets no hint rather
+  // than a misleading one.
+  const verbMatched = rules.filter((r) => r.verb === cmd.verb);
+  for (const rule of verbMatched) {
+    if (rule.namespace && cmd.namespace === undefined && !cmd.allNamespaces) {
+      return fail(
+        task,
+        "missing-namespace",
+        `Close - but which namespace? Expected -n ${rule.namespace}.`,
+      );
+    }
+    if (
+      rule.namespace &&
+      cmd.namespace !== undefined &&
+      cmd.namespace !== rule.namespace
+    ) {
+      return fail(
+        task,
+        "wrong-namespace",
+        `Wrong namespace: you used ${cmd.namespace}, the app lives in ${rule.namespace}.`,
+      );
+    }
+    if (rule.resource && cmd.resource !== normaliseResource(rule.resource)) {
+      return fail(
+        task,
+        "wrong-resource",
+        `Wrong resource: you asked about ${cmd.resource ?? "nothing"}, this is about a ${rule.resource}.`,
+      );
+    }
+    if (rule.name && cmd.name !== rule.name) {
+      return fail(
+        task,
+        "wrong-name",
+        `Right idea, wrong object: expected ${rule.name}.`,
+      );
+    }
+  }
+
+  return fail(
+    task,
+    undefined,
+    "Not what this task is asking for. Re-read the prompt, and try `hint` if you are stuck.",
+  );
+}
+
+export function gradeProse(task: AnswerTask, submitted: string): Verdict {
+  const haystack = submitted.toLowerCase();
+  const missing = (task.must_include ?? []).filter(
+    (term) => !haystack.includes(term.toLowerCase()),
+  );
+  if (missing.length === 0) return pass(task, "Correct.");
+
+  // Give the first hint the task defines; a prose task's misconceptions are not
+  // mechanically distinguishable the way a command's are.
+  const key = task.hints?.[0]?.when;
+  return fail(task, key, `Missing from your answer: ${missing.join(", ")}.`);
+}
+
+export function gradeFile(task: AnswerTask, fileContent: string): Verdict {
+  let doc: unknown;
+  try {
+    doc = parseYaml(fileContent);
+  } catch (e) {
+    return fail(
+      task,
+      undefined,
+      `${task.path} could not be parsed as YAML: ${(e as Error).message}`,
+    );
+  }
+
+  const parts = (task.key ?? "").split(".");
+  let cursor: unknown = doc;
+  for (const part of parts) {
+    if (cursor === null || typeof cursor !== "object") {
+      cursor = undefined;
+      break;
+    }
+    cursor = (cursor as Record<string, unknown>)[part];
+  }
+
+  if (cursor === undefined || cursor === null) {
+    return fail(task, undefined, `${task.path} has no value at ${task.key}.`);
+  }
+
+  const value = String(cursor);
+  if (new RegExp(task.accept_pattern ?? "").test(value)) {
+    return pass(task, "Correct.");
+  }
+  return fail(
+    task,
+    "unchanged",
+    `${task.key} is ${value}, which is not what this task wants.`,
+  );
+}
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `make -f Makefile.test drill-test`
+Expected: PASS, 36 tests across the three grader files.
+
+- [ ] **Step 6: Cross-check the grader against the real TOML**
+
+The Python and TypeScript loaders must agree about what is valid. Add this check to `drill/server/src/grader/answers.test.ts`:
+
+```typescript
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadAnswers } from "./answers.ts";
+
+test("the real scenario 03 answers file loads and validates", async () => {
+  const set = await loadAnswers("03", "../../scenarios/answers");
+  assert.equal(set.scenario, "03");
+  assert.equal(set.tasks.length, 6);
+  assert.deepEqual(
+    set.tasks.map((t) => t.grader),
+    ["command", "file", "prose", "command", "command", "prose"],
+  );
+});
+```
+
+Run: `make -f Makefile.test drill-test`
+Expected: PASS. If the path resolution fails inside the container, the mount is `/app` and the repo root is its parent, which is not mounted. Fix by mounting the repo root instead: change `NODE` in `Makefile.test` to mount `$(CURDIR)` at `/repo` with `-w /repo/drill`, and pass `../scenarios/answers`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add drill/server/src/grader/
+git commit -m "feat: semantic grading with misconception-keyed hints"
+```
+
+---
+
+## Phase 3: Terraform - cluster git
+
+Everything here is verified with `terraform validate` plus a ministack plan. No AWS.
+
+### Task 3.1: Config values and variable threading
+
+Three new values enter the config in this phase and the next. This task adds all three at once, because threading a variable through five files is one mechanical change and splitting it across two tickets doubles the merge conflicts for no review benefit.
+
+**Files:**
+
+- Modify: `scripts/config.example.toml`
+- Modify: `terraform/envs/dev/variables.tf`
+- Modify: `terraform/envs/dev/main.tf`
+- Modify: `terraform/modules/stack/variables.tf`
+- Modify: `terraform/modules/stack/main.tf`
+- Modify: `terraform/modules/platform/variables.tf`
+- Modify: the user's `scripts/config.toml` (git-ignored; tell the user rather than editing silently if it differs from the example)
+
+**Interfaces:**
+
+- Consumes: nothing.
+- Produces three variables available inside `terraform/modules/platform`:
+  - `enable_cluster_git` (bool) - install the in-cluster git server in namespace `git`.
+  - `drill_ingress_group_name` (string) - the shared `alb.ingress.kubernetes.io/group.name`, consumed in Phase 4.
+  - `drill_allowed_cidrs` (list(string)) - source-IP allow list for the drill ALB, consumed in Phase 4.
+
+- [ ] **Step 1: Add the documented values to the config template**
+
+In `scripts/config.example.toml`, in the `# ---- platform toggles ----` block, after the `enable_monitoring` / `kube_prometheus_stack_chart_version` lines:
+
+```toml
+enable_cluster_git           = true  # in-cluster git server (ns "git") - the ONLY repo Argo CD reads; drill sessions need it
+```
+
+And add a new block after `# ---- practice app plumbing ----`:
+
+```toml
+# ---- drill platform (the in-cluster GUI: scenarios/answers, terminal, editor) ----
+# One shared ALB carries every ops UI (drill GUI, Argo CD, Grafana). Sharing the
+# group keeps cost flat as more UIs are added instead of one ALB per Ingress.
+drill_ingress_group_name = "daily-eks-practice-ops"  # any name; all ops Ingresses must match it
+# WHO CAN REACH THE DRILL GUI. This is an unauthenticated web terminal running as
+# cluster-admin, so leaving it open is not a mild misconfiguration - it is a remote
+# shell on your cluster. Set it to YOUR public /32 and update it when your IP moves.
+# Find yours with: curl -s https://checkip.amazonaws.com
+drill_allowed_cidrs = ["203.0.113.10/32"]   # generic default: ["<your-public-ip>/32"]; NEVER ["0.0.0.0/0"]
+```
+
+- [ ] **Step 2: Declare them in the env, with no defaults**
+
+In `terraform/envs/dev/variables.tf`, matching the file's existing style:
+
+```hcl
+variable "enable_cluster_git" {
+  description = "Install the in-cluster git server (namespace \"git\") that Argo CD reads from."
+  type        = bool
+}
+
+variable "drill_ingress_group_name" {
+  description = "Shared ALB IngressGroup name for every ops UI, so they share one load balancer."
+  type        = string
+}
+
+variable "drill_allowed_cidrs" {
+  description = "Source CIDRs allowed to reach the drill ALB. The GUI is an unauthenticated cluster-admin terminal; keep this to your own IP."
+  type        = list(string)
+}
+```
+
+- [ ] **Step 3: Pass them into the stack**
+
+In `terraform/envs/dev/main.tf`, inside the single `module "stack"` block, add:
+
+```hcl
+  enable_cluster_git       = var.enable_cluster_git
+  drill_ingress_group_name = var.drill_ingress_group_name
+  drill_allowed_cidrs      = var.drill_allowed_cidrs
+```
+
+- [ ] **Step 4: Declare them in the stack and forward to platform**
+
+Add the same three `variable` blocks verbatim to `terraform/modules/stack/variables.tf`, then in `terraform/modules/stack/main.tf`, inside `module "platform"`, after the `enable_monitoring` pair:
+
+```hcl
+  enable_cluster_git       = var.enable_cluster_git
+  drill_ingress_group_name = var.drill_ingress_group_name
+  drill_allowed_cidrs      = var.drill_allowed_cidrs
+```
+
+- [ ] **Step 5: Declare them in the platform module**
+
+Add the same three `variable` blocks verbatim to `terraform/modules/platform/variables.tf`.
+
+- [ ] **Step 6: Verify no default slipped in**
+
+```bash
+grep -rn "default[[:space:]]*=" terraform/modules/*/variables.tf terraform/envs/dev/variables.tf
+```
+
+Expected: no output. A single `default =` breaks the repo's config-driven rule and hides a missing config value until it surprises someone at apply time.
+
+- [ ] **Step 7: Validate**
+
+```bash
+make -f Makefile.test fmt-check validate
+```
+
+Expected: PASS. It will fail with "No value for required variable" only if the generated tfvars are stale; run `make config` first if so.
+
+- [ ] **Step 8: Tell the user to update their real config**
+
+`scripts/config.toml` is git-ignored and hand-maintained. Print the three lines they need to add and their own public IP:
+
+```bash
+echo "Add to the [common] table in scripts/config.toml:"
+echo "  enable_cluster_git       = true"
+echo "  drill_ingress_group_name = \"daily-eks-practice-ops\""
+echo "  drill_allowed_cidrs      = [\"$(curl -s https://checkip.amazonaws.com | tr -d '\n')/32\"]"
+```
+
+Do not write to `scripts/config.toml` without asking. It holds their account-specific values.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add scripts/config.example.toml terraform/
+git commit -m "feat: config values for cluster git and the drill ALB"
+```
+
+---
+
+### Task 3.2: The cluster git server
+
+An nginx pod serving a bare repo over the protocol Task 0.2 proved, in namespace `git`, with a readiness probe that only passes once the repo is genuinely seeded.
+
+**Files:**
+
+- Create: `terraform/modules/platform/cluster-git.tf`
+- Modify: `terraform/modules/platform/outputs.tf`
+- Test: ministack plan
+
+**Interfaces:**
+
+- Consumes: `enable_cluster_git` from Task 3.1; the protocol verdict from Task 0.2.
+- Produces:
+  - Namespace `git`, a `git-server` Deployment, Service `git-server` on port 80, PVC `git-repo`, ConfigMap `git-nginx`.
+  - Platform module outputs: `cluster_git_url` (string, `http://git-server.git.svc.cluster.local/repo.git`, empty when disabled), `cluster_git_namespace` (string), `cluster_git_deployment` (string). Stack forwards all three; the env re-exports them so `make git-seed` can find the pod without hardcoding names.
+
+- [ ] **Step 1: Write the manifests**
+
+Create `terraform/modules/platform/cluster-git.tf`. Raw manifests via `kubectl_manifest` rather than a chart, matching how `app_namespace` and `db_secret` are already done in this module and keeping it readable for someone learning.
+
+```hcl
+# ---------------------------------------------------------------------------
+# Cluster git - the ONLY repository Argo CD ever reads.
+#
+# Argo pointing at GitHub and a drill pointing at a workspace would be two
+# Applications fighting over one namespace. Pointing Argo at a repo that lives in
+# the cluster removes the conflict instead of managing it: there is one
+# Application, permanently, and GitHub becomes the upstream rather than the source.
+#
+# Seeding is deliberately NOT done here. An init container cloning GitHub would
+# need a PAT in the cluster and would fail for a private repo on first apply.
+# Instead the init container creates an empty bare repo, and `make git-seed`
+# streams a git bundle in from the laptop. The readiness probe requires the
+# .seeded marker, so until that lands the Service has no endpoints and Argo
+# retries cleanly. The danger was never that Argo errors - it is that Argo
+# SUCCEEDS against a half-served repo and syncs a broken state that looks fine.
+# ---------------------------------------------------------------------------
+
+locals {
+  git_ns     = "git"
+  git_repo   = "repo.git"
+  git_svc    = "git-server"
+  cluster_git_url = var.enable_cluster_git ? "http://${local.git_svc}.${local.git_ns}.svc.cluster.local/${local.git_repo}" : ""
+}
+
+resource "kubectl_manifest" "git_namespace" {
+  count = var.enable_cluster_git ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "Namespace"
+    metadata   = { name = local.git_ns, labels = { "app.kubernetes.io/part-of" = "drill-platform" } }
+  })
+}
+
+# The repo outlives pod restarts but dies with the cluster, which is correct:
+# GitHub is the durable copy and drill-progress/ is the durable practice record.
+resource "kubectl_manifest" "git_pvc" {
+  count = var.enable_cluster_git ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "PersistentVolumeClaim"
+    metadata   = { name = "git-repo", namespace = local.git_ns }
+    spec = {
+      accessModes = ["ReadWriteOnce"]
+      resources   = { requests = { storage = "1Gi" } }
+    }
+  })
+
+  depends_on = [kubectl_manifest.git_namespace]
+}
+
+resource "kubectl_manifest" "git_nginx_conf" {
+  count = var.enable_cluster_git ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "ConfigMap"
+    metadata   = { name = "git-nginx", namespace = local.git_ns }
+    data = {
+      "default.conf" = <<-EOT
+        server {
+          listen 8080;
+          root /srv;
+          autoindex off;
+          location / { try_files $uri $uri/ =404; }
+          # /healthz is served from disk and only exists once seeding wrote it,
+          # which is what makes the readiness probe mean "the repo is complete".
+          location = /healthz { try_files /repo.git/.seeded =503; }
+        }
+      EOT
+    }
+  })
+
+  depends_on = [kubectl_manifest.git_namespace]
+}
+
+resource "kubectl_manifest" "git_server" {
+  count = var.enable_cluster_git ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "apps/v1"
+    kind       = "Deployment"
+    metadata   = { name = local.git_svc, namespace = local.git_ns }
+    spec = {
+      replicas = 1
+      strategy = { type = "Recreate" } # one RWO volume; two pods cannot both mount it
+      selector = { matchLabels = { app = local.git_svc } }
+      template = {
+        metadata = { labels = { app = local.git_svc } }
+        spec = {
+          # Init containers run to completion before any main container starts, so
+          # nginx can never serve a directory that has not been initialised yet.
+          initContainers = [{
+            name    = "init-repo"
+            image   = "alpine/git:latest"
+            command = ["/bin/sh", "-c"]
+            args = [<<-EOT
+              set -e
+              if [ ! -d /srv/${local.git_repo} ]; then
+                git init --bare /srv/${local.git_repo}
+                touch /srv/${local.git_repo}/git-daemon-export-ok
+                git -C /srv/${local.git_repo} update-server-info
+                echo "init-repo: created an empty bare repo, waiting for 'make git-seed'"
+              else
+                echo "init-repo: repo already present, leaving it alone"
+              fi
+            EOT
+            ]
+            volumeMounts = [{ name = "repo", mountPath = "/srv" }]
+          }]
+          containers = [{
+            name  = "nginx"
+            image = "nginx:1.27-alpine"
+            ports = [{ name = "http", containerPort = 8080 }]
+            volumeMounts = [
+              { name = "repo", mountPath = "/srv" },
+              { name = "conf", mountPath = "/etc/nginx/conf.d" },
+            ]
+            readinessProbe = {
+              httpGet             = { path = "/healthz", port = "http" }
+              initialDelaySeconds = 2
+              periodSeconds       = 3
+            }
+            livenessProbe = {
+              tcpSocket           = { port = "http" }
+              initialDelaySeconds = 10
+              periodSeconds       = 20
+            }
+            resources = {
+              requests = { cpu = "25m", memory = "32Mi" }
+              limits   = { memory = "96Mi" }
+            }
+          }]
+          volumes = [
+            { name = "repo", persistentVolumeClaim = { claimName = "git-repo" } },
+            { name = "conf", configMap = { name = "git-nginx" } },
+          ]
+        }
+      }
+    }
+  })
+
+  depends_on = [kubectl_manifest.git_pvc, kubectl_manifest.git_nginx_conf]
+}
+
+resource "kubectl_manifest" "git_service" {
+  count = var.enable_cluster_git ? 1 : 0
+
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "Service"
+    metadata   = { name = local.git_svc, namespace = local.git_ns }
+    spec = {
+      selector = { app = local.git_svc }
+      ports    = [{ name = "http", port = 80, targetPort = "http" }]
+    }
+  })
+
+  depends_on = [kubectl_manifest.git_server]
+}
+```
+
+**If Task 0.2 concluded dumb HTTP does not work**, replace the `nginx` container with whatever the spike proved, keep the `/healthz`-from-disk readiness gate (adapt the path), and note the change in a comment citing the spike doc.
+
+- [ ] **Step 2: Add the outputs**
+
+Append to `terraform/modules/platform/outputs.tf`:
+
+```hcl
+output "cluster_git_url" {
+  description = "In-cluster repo URL Argo CD reads from (\"\" when cluster git is disabled)."
+  value       = local.cluster_git_url
+}
+
+output "cluster_git_namespace" {
+  description = "Namespace the cluster git server runs in."
+  value       = var.enable_cluster_git ? local.git_ns : ""
+}
+
+output "cluster_git_deployment" {
+  description = "Deployment name of the cluster git server, for `kubectl exec` seeding."
+  value       = var.enable_cluster_git ? local.git_svc : ""
+}
+```
+
+- [ ] **Step 3: Forward them through stack and env**
+
+Append the same three `output` blocks to `terraform/modules/stack/outputs.tf` with `value = module.platform.cluster_git_url` (and so on), and again to `terraform/envs/dev/outputs.tf` with `value = module.stack.cluster_git_url`.
+
+- [ ] **Step 4: Validate and format**
+
+```bash
+make -f Makefile.test fmt-check validate
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Run the ministack plan**
+
+```bash
+make -f Makefile.test ministack
+```
+
+Expected: a plan that includes the five new `kubectl_manifest` resources. Ministack mocks AWS, not Kubernetes, so the kubectl provider resources will show as planned-to-create without being applied, which is exactly the coverage wanted here: it proves the HCL is well-formed, the `yamlencode` blocks render, and nothing broke the existing plan.
+
+- [ ] **Step 6: Prove the manifests actually admit, on kind**
+
+Ministack cannot tell you whether Kubernetes accepts these. Kind can, for free.
+
+```bash
+make -f Makefile.test kind-up
+export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
+terraform -chdir=terraform/modules/platform show -json >/dev/null 2>&1 || true
+# Render the manifests the module would apply, and apply them directly:
+kubectl apply -f - <<'YAML'
+# paste the five rendered manifests here, or extract them with:
+#   terraform -chdir=terraform/envs/dev plan -out=tf.plan && terraform show -json tf.plan \
+#     | jq -r '.. | .yaml_body? // empty'
+YAML
+kubectl -n git rollout status deploy/git-server --timeout=120s
+kubectl -n git get endpoints git-server
+```
+
+Expected: the Deployment rolls out, and `endpoints` shows **no addresses**, because `/healthz` 503s until `.seeded` exists. That empty endpoint list is the whole point of the probe - confirm it before moving on.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add terraform/modules/platform/cluster-git.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf
+git commit -m "feat: in-cluster git server as the single source Argo CD reads"
+```
+
+---
+
+### Task 3.3: Seed cluster git and repoint the Argo Application
+
+**Files:**
+
+- Create: `scripts/git-seed.py`
+- Modify: `scripts/gen-argocd-app.py`
+- Modify: `Makefile` (add `git-seed`, make `app-deploy` depend on it)
+- Test: `tests/test_git_seed.py`
+
+**Interfaces:**
+
+- Consumes: `cluster_git_url`, `cluster_git_namespace`, `cluster_git_deployment` outputs from Task 3.2.
+- Produces:
+  - `scripts/git-seed.py` - streams `git bundle create - --all` from the local repo into the cluster git pod, unbundles, sets HEAD, runs `git update-server-info`, writes `.seeded`. Idempotent: re-running force-updates refs and rewrites the marker.
+  - `make git-seed` - the target that runs it.
+  - `scripts/gen-argocd-app.py` now emits `repoURL` pointing at cluster git when `enable_cluster_git` is on, falling back to the GitHub URL when it is off, so the existing behaviour still works for anyone who leaves the toggle false.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_git_seed.py`, covering the pure parts (URL selection and the command construction) without needing a cluster:
+
+```python
+#!/usr/bin/env python3
+"""Unit tests for scripts/git-seed.py's pure helpers.
+
+The kubectl exec itself needs a cluster and is covered by the kind run in Step 5.
+What is testable here is the part that silently does the wrong thing if it breaks:
+which URL Argo gets pointed at.
+"""
+import importlib.util
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+spec = importlib.util.spec_from_file_location("git_seed", ROOT / "scripts" / "git-seed.py")
+gs = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gs)
+
+PASS = 0
+FAIL = 0
+
+
+def ok(m):
+    global PASS
+    PASS += 1
+    print(f"  PASS  {m}")
+
+
+def bad(m):
+    global FAIL
+    FAIL += 1
+    print(f"  FAIL  {m}")
+
+
+def test_unbundle_script_is_idempotent():
+    script = gs.unbundle_script("repo.git")
+    for needle in ("update-server-info", "symbolic-ref HEAD", ".seeded", "--force"):
+        if needle in script:
+            ok(f"unbundle script contains {needle!r}")
+        else:
+            bad(f"unbundle script is missing {needle!r}")
+
+
+def test_unbundle_script_writes_marker_last():
+    """If .seeded is written before the refs land, the probe passes too early and
+    Argo clones a half-served repo - the exact failure the probe exists to stop."""
+    script = gs.unbundle_script("repo.git")
+    if script.index("update-server-info") < script.index(".seeded"):
+        ok("the .seeded marker is written after update-server-info")
+    else:
+        bad("the .seeded marker is written too early")
+
+
+def main():
+    for fn in (test_unbundle_script_is_idempotent, test_unbundle_script_writes_marker_last):
+        print(f"== {fn.__name__} ==")
+        fn()
+    print()
+    print(f"git-seed: {PASS} passed, {FAIL} failed")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `python3 tests/test_git_seed.py`
+Expected: FAIL, `scripts/git-seed.py` does not exist.
+
+- [ ] **Step 3: Write the seeder**
+
+Create `scripts/git-seed.py`:
+
+```python
+#!/usr/bin/env python3
+"""Seed the in-cluster git server from this local clone.
+
+    make git-seed
+
+Streams `git bundle create - --all` from the local repo straight into the pod over
+`kubectl exec`, so nothing hits disk on the way and no port-forward has to be held
+open. A bundle carries every ref and object in one file, which is why the same
+primitive works in reverse for saving drill progress.
+
+This exists instead of an init container that clones GitHub because that would need
+a PAT inside the cluster and would fail outright for a private repo on first apply.
+Seeding from the laptop needs no credentials and no egress.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def unbundle_script(repo_dir: str) -> str:
+    """The shell run inside the pod. Order matters: the marker is written LAST.
+
+    If .seeded appeared before update-server-info, the readiness probe would pass
+    while the refs were still incomplete, and Argo would clone a half-served repo
+    and sync a broken state that looks like it worked.
+    """
+    return f"""
+set -e
+command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1
+git -C /srv/{repo_dir} fetch --force /tmp/seed.bundle 'refs/heads/*:refs/heads/*'
+git -C /srv/{repo_dir} symbolic-ref HEAD refs/heads/main
+git -C /srv/{repo_dir} update-server-info
+rm -f /tmp/seed.bundle
+date -u +%Y-%m-%dT%H:%M:%SZ > /srv/{repo_dir}/.seeded
+echo "git-seed: refs published"
+"""
+
+
+def tf_output(name: str) -> str:
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "output", "-raw", name],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        sys.exit(f"git-seed: could not read terraform output {name!r} - is the cluster up?\n{out.stderr}")
+    return out.stdout.strip()
+
+
+def main() -> int:
+    ns = tf_output("cluster_git_namespace")
+    deploy = tf_output("cluster_git_deployment")
+    if not ns or not deploy:
+        sys.exit("git-seed: cluster git is disabled (enable_cluster_git = false in scripts/config.toml)")
+
+    print(f"git-seed: waiting for {deploy} in namespace {ns} to have a running pod...")
+    subprocess.run(
+        ["kubectl", "-n", ns, "wait", "--for=condition=Initialized", "pod",
+         "-l", f"app={deploy}", "--timeout=180s"],
+        check=True,
+    )
+    pod = subprocess.check_output(
+        ["kubectl", "-n", ns, "get", "pod", "-l", f"app={deploy}", "-o", "jsonpath={.items[0].metadata.name}"],
+        text=True,
+    ).strip()
+
+    print(f"git-seed: streaming a bundle of {REPO.name} into {pod}")
+    bundle = subprocess.Popen(
+        ["git", "-C", str(REPO), "bundle", "create", "-", "--all"],
+        stdout=subprocess.PIPE,
+    )
+    copy = subprocess.run(
+        ["kubectl", "-n", ns, "exec", "-i", pod, "-c", "nginx", "--",
+         "/bin/sh", "-c", "cat > /tmp/seed.bundle"],
+        stdin=bundle.stdout,
+    )
+    bundle.wait()
+    if bundle.returncode != 0 or copy.returncode != 0:
+        sys.exit("git-seed: streaming the bundle failed")
+
+    unbundle = subprocess.run(
+        ["kubectl", "-n", ns, "exec", pod, "-c", "nginx", "--",
+         "/bin/sh", "-c", unbundle_script("repo.git")],
+    )
+    if unbundle.returncode != 0:
+        sys.exit("git-seed: unbundling inside the pod failed")
+
+    print("git-seed: waiting for the readiness probe to pass...")
+    subprocess.run(["kubectl", "-n", ns, "rollout", "status", f"deploy/{deploy}", "--timeout=120s"], check=True)
+    print(f"git-seed: cluster git is serving. Argo CD can now read {tf_output('cluster_git_url')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 tests/test_git_seed.py`
+Expected: PASS, 5 assertions.
+
+- [ ] **Step 5: Repoint the Argo Application generator**
+
+In `scripts/gen-argocd-app.py`, replace the hard use of the GitHub URL with a cluster-git-first choice. Read the terraform output; if it is non-empty use it, otherwise fall back to `repo_https_url()` exactly as today:
+
+```python
+def source_repo_url() -> str:
+    """Argo reads cluster git when it exists, GitHub otherwise.
+
+    One Application, permanently. Cluster git is the source; GitHub is the upstream
+    the workspace pushes to. Falling back keeps the toggle honest: with
+    enable_cluster_git = false everything behaves exactly as it did before.
+    """
+    out = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "output", "-raw", "cluster_git_url"],
+        capture_output=True,
+        text=True,
+    )
+    url = out.stdout.strip() if out.returncode == 0 else ""
+    if url:
+        print(f"gen-argocd-app: pointing Argo CD at cluster git ({url})")
+        return url
+    print("gen-argocd-app: cluster git is off - pointing Argo CD at GitHub")
+    return repo_https_url()
+```
+
+Use `source_repo_url()` where `repo_https_url()` is currently called to build `spec.source.repoURL`. Leave `scripts/argo-repo.py` alone: it registers the GitHub credential, which is still needed for the push half of scenarios 09 and 12.
+
+- [ ] **Step 6: Add the Makefile target and wire the ordering**
+
+In `Makefile`, add `git-seed` to `.PHONY` and add the target before `app-deploy`:
+
+```makefile
+git-seed: ## Publish this repo into the in-cluster git server (Argo CD's only source)
+	$(PYTHON) scripts/git-seed.py
+```
+
+Change `app-deploy` to depend on it, so the dependency chain in the spec is enforced rather than remembered:
+
+```makefile
+app-deploy: git-seed ## Register the practice app with Argo CD (reads from cluster git)
+	$(PYTHON) scripts/gen-argocd-app.py
+	kubectl apply -f argocd/generated/practice-app.yaml
+	@echo ""
+	@echo "Argo CD now owns the app, reading from cluster git. Run 'make argo-sync'."
+```
+
+Also update the header comment block at the top of `Makefile` to list `make git-seed`.
+
+- [ ] **Step 7: End-to-end on kind**
+
+This is the first time the whole Phase 3 chain runs together, and it is free.
+
+```bash
+make -f Makefile.test kind-up
+export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=300s
+# Apply the rendered cluster-git manifests (from Task 3.2 Step 6), then:
+python3 scripts/git-seed.py     # will need the tf_output calls stubbed for kind; see below
+kubectl -n git get endpoints git-server
+```
+
+For the kind run, `tf_output` has no terraform state to read. Add an env override at the top of `main()` so the same script works in both places:
+
+```python
+    ns = os.environ.get("CLUSTER_GIT_NS") or tf_output("cluster_git_namespace")
+    deploy = os.environ.get("CLUSTER_GIT_DEPLOY") or tf_output("cluster_git_deployment")
+```
+
+Then: `CLUSTER_GIT_NS=git CLUSTER_GIT_DEPLOY=git-server python3 scripts/git-seed.py`
+
+Expected: `git-seed: refs published`, then `kubectl -n git get endpoints git-server` shows an address, because `.seeded` now exists and `/healthz` returns 200.
+
+- [ ] **Step 8: Prove Argo syncs from it**
+
+```bash
+kubectl apply -f - <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: { name: practice-app, namespace: argocd }
+spec:
+  project: default
+  source:
+    repoURL: http://git-server.git.svc.cluster.local/repo.git
+    targetRevision: main
+    path: helm/practice-app
+  destination: { server: https://kubernetes.default.svc, namespace: practice-app }
+  syncPolicy: { syncOptions: ["CreateNamespace=true"] }
+YAML
+sleep 20
+kubectl -n argocd get application practice-app -o jsonpath='{.status.sync.status}{"\n"}'
+```
+
+Expected: `OutOfSync`, not `Unknown`. The backend pod will not become healthy on kind because there is no RDS, which is fine and expected - what is being proved is that Argo cloned and rendered.
+
+- [ ] **Step 9: Tear down and commit**
+
+```bash
+make -f Makefile.test kind-down
+git add scripts/git-seed.py scripts/gen-argocd-app.py tests/test_git_seed.py Makefile
+git commit -m "feat: seed cluster git from the local clone and point Argo CD at it"
+```
+
+---
+
+## Phase 4: Terraform - the ALB
+
+One internet-facing ALB shared by every ops UI, restricted to the user's own IP, with a teardown path that does not orphan it.
+
+### Task 4.1: The shared IngressGroup and the source-IP security group
+
+**Files:**
+
+- Create: `terraform/modules/platform/drill-ingress.tf`
+- Modify: `terraform/modules/platform/outputs.tf`
+- Test: ministack plan
+
+**Interfaces:**
+
+- Consumes: `drill_ingress_group_name`, `drill_allowed_cidrs`, `enable_alb_controller`, `vpc_id` (already present).
+- Produces:
+  - `aws_security_group.drill_alb` - ingress on 80 from `drill_allowed_cidrs` only, egress all.
+  - Output `drill_alb_security_group_id` (string) for the Ingress annotation.
+  - Output `drill_ingress_group_name` (string), re-exported so the drill Ingress in Phase 5 and any future ops Ingress use the same value without hardcoding it.
+  - The Ingress resource itself ships in Phase 5 with the GUI; this task provides only what it annotates against, so the ALB is never created before something needs it.
+
+- [ ] **Step 1: Write the security group**
+
+Create `terraform/modules/platform/drill-ingress.tf`:
+
+```hcl
+# ---------------------------------------------------------------------------
+# Security group for the shared ops ALB.
+#
+# This is not a hardening nicety. The drill GUI serves a real PTY in a pod whose
+# ServiceAccount is cluster-admin, over plain HTTP with no login. Without a source
+# restriction it is a remote root shell on the cluster for anyone who finds the
+# hostname. The allow list lives in scripts/config.toml, which is git-ignored, so
+# a personal IP never reaches the remote.
+#
+# HTTPS + ALB OIDC auth is the documented growth path and is deferred only because
+# it needs an ACM cert, which needs a Route53 zone this project does not configure
+# yet (enable_external_dns = false, dns_zone_name = ""). It is a good scenario in
+# its own right.
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "drill_alb" {
+  count = var.enable_alb_controller ? 1 : 0
+
+  name        = "${var.name_prefix}-drill-alb"
+  description = "Source-restricted access to the shared ops ALB (drill GUI, Argo CD, Grafana)"
+  vpc_id      = var.vpc_id
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-drill-alb" })
+}
+
+resource "aws_vpc_security_group_ingress_rule" "drill_alb_http" {
+  for_each = var.enable_alb_controller ? toset(var.drill_allowed_cidrs) : toset([])
+
+  security_group_id = aws_security_group.drill_alb[0].id
+  description       = "HTTP from an allowed operator IP"
+  cidr_ipv4         = each.value
+  from_port         = 80
+  to_port           = 80
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "drill_alb_all" {
+  count = var.enable_alb_controller ? 1 : 0
+
+  security_group_id = aws_security_group.drill_alb[0].id
+  description       = "ALB to targets"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
+```
+
+- [ ] **Step 2: Add a guard against the obvious foot-gun**
+
+Add to the same file, so an open allow list fails at plan time rather than at 3am:
+
+```hcl
+# A wide-open allow list on an unauthenticated cluster-admin terminal is not a
+# configuration choice, it is an incident. Fail the plan instead of the postmortem.
+resource "terraform_data" "drill_cidr_guard" {
+  count = var.enable_alb_controller ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition     = !contains(var.drill_allowed_cidrs, "0.0.0.0/0")
+      error_message = "drill_allowed_cidrs must not contain 0.0.0.0/0 - the drill GUI is an unauthenticated cluster-admin web terminal. Set it to your own /32 in scripts/config.toml (curl -s https://checkip.amazonaws.com)."
+    }
+    precondition {
+      condition     = length(var.drill_allowed_cidrs) > 0
+      error_message = "drill_allowed_cidrs is empty - nothing would be able to reach the drill GUI."
+    }
+  }
+}
+```
+
+- [ ] **Step 3: Add the outputs**
+
+Append to `terraform/modules/platform/outputs.tf`:
+
+```hcl
+output "drill_alb_security_group_id" {
+  description = "Security group id to annotate on every ops Ingress (\"\" when the ALB controller is off)."
+  value       = var.enable_alb_controller ? aws_security_group.drill_alb[0].id : ""
+}
+
+output "drill_ingress_group_name" {
+  description = "Shared IngressGroup name; every ops Ingress must use it or it gets its own ALB."
+  value       = var.drill_ingress_group_name
+}
+```
+
+Forward both through `terraform/modules/stack/outputs.tf` and `terraform/envs/dev/outputs.tf`.
+
+- [ ] **Step 4: Validate and plan**
+
+```bash
+make -f Makefile.test fmt-check validate
+make -f Makefile.test ministack
+```
+
+Expected: PASS, with the security group and its two rules in the plan.
+
+- [ ] **Step 5: Prove the guard fires**
+
+```bash
+python3 scripts/bootstrap.py dev --generate-only
+# temporarily set drill_allowed_cidrs = ["0.0.0.0/0"] in scripts/config.toml, then:
+make -f Makefile.test ministack
+```
+
+Expected: the plan FAILS with the precondition message naming `drill_allowed_cidrs`. Restore the real value afterwards. Ask the user before editing `scripts/config.toml`; if they would rather not, note that the guard is untested and say so plainly.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add terraform/modules/platform/drill-ingress.tf terraform/modules/platform/outputs.tf terraform/modules/stack/outputs.tf terraform/envs/dev/outputs.tf
+git commit -m "feat: source-restricted security group for the shared ops ALB"
+```
+
+---
+
+### Task 4.2: Teardown that does not orphan the ALB
+
+The AWS Load Balancer Controller creates the ALB, so it is not a Terraform resource and Terraform cannot sequence its deletion. Destroying the cluster first leaves a load balancer billing about $16/month that nothing in the account points at, plus security groups that make VPC deletion hang. Same failure shape as an orphaned PVC.
+
+**Files:**
+
+- Create: `scripts/pre-destroy.py`
+- Modify: `Makefile` (`down` runs it first)
+- Test: `tests/test_pre_destroy.py`
+
+**Interfaces:**
+
+- Consumes: nothing beyond kubectl and the terraform outputs.
+- Produces:
+  - `scripts/pre-destroy.py` - deletes every Ingress in every namespace, deletes every `LoadBalancer` Service, deletes the drill PVC and the cluster git PVC, then polls until no ALB or NLB tagged with this cluster remains. Exits non-zero if anything is still there after the timeout, so `make down` stops rather than destroying into a hanging state.
+  - `make down` runs it before `terraform destroy`, and prints what it removed.
+  - `SKIP_PRE_DESTROY=1 make down` bypasses it, for the case where the cluster is already gone and the pre-destroy would just hang on an unreachable API.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_pre_destroy.py` covering the pure logic - which objects are targeted and the ordering:
+
+```python
+#!/usr/bin/env python3
+"""Unit tests for scripts/pre-destroy.py's planning logic.
+
+The kubectl calls need a cluster; what is testable here is the part that costs
+money when it is wrong: whether the plan covers every billable object and whether
+it deletes them before it starts waiting.
+"""
+import importlib.util
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("pre_destroy", ROOT / "scripts" / "pre-destroy.py")
+pd = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pd)
+
+PASS = 0
+FAIL = 0
+
+
+def ok(m):
+    global PASS
+    PASS += 1
+    print(f"  PASS  {m}")
+
+
+def bad(m):
+    global FAIL
+    FAIL += 1
+    print(f"  FAIL  {m}")
+
+
+def test_plan_covers_every_billable_kind():
+    kinds = {step.kind for step in pd.plan()}
+    for kind in ("ingress", "service", "persistentvolumeclaim"):
+        if kind in kinds:
+            ok(f"plan covers {kind}")
+        else:
+            bad(f"plan does NOT cover {kind} - it will orphan and keep billing")
+
+
+def test_deletes_before_waiting():
+    steps = pd.plan()
+    last_delete = max(i for i, s in enumerate(steps) if s.action == "delete")
+    first_wait = min(i for i, s in enumerate(steps) if s.action == "wait")
+    if last_delete < first_wait:
+        ok("every delete happens before the first wait")
+    else:
+        bad("a wait is scheduled before a delete, so it would time out on its own inaction")
+
+
+def test_wait_has_a_timeout():
+    waits = [s for s in pd.plan() if s.action == "wait"]
+    if waits and all(s.timeout_seconds > 0 for s in waits):
+        ok("every wait step has a positive timeout")
+    else:
+        bad("a wait step has no timeout - make down could hang forever")
+
+
+def main():
+    for fn in (test_plan_covers_every_billable_kind, test_deletes_before_waiting, test_wait_has_a_timeout):
+        print(f"== {fn.__name__} ==")
+        fn()
+    print()
+    print(f"pre-destroy: {PASS} passed, {FAIL} failed")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `python3 tests/test_pre_destroy.py`
+Expected: FAIL, the script does not exist.
+
+- [ ] **Step 3: Write the pre-destroy hook**
+
+Create `scripts/pre-destroy.py`:
+
+```python
+#!/usr/bin/env python3
+"""Remove everything Terraform cannot sequence, before `terraform destroy`.
+
+Two classes of object outlive a destroy and keep billing:
+
+  * ALBs and NLBs, because the AWS Load Balancer Controller created them from an
+    Ingress or a Service, not from a Terraform resource. Destroy the cluster first
+    and the controller is gone before it can clean up. The load balancer bills about
+    $16/month with nothing in the account pointing at what made it, and its security
+    groups keep the VPC deletion hanging.
+  * EBS volumes behind PVCs, for the same reason via the EBS CSI driver.
+
+So: delete the Kubernetes objects, let the controllers do their own cleanup, and
+only then hand over to Terraform. Ordering is the whole point.
+
+    make down                  # runs this first
+    SKIP_PRE_DESTROY=1 make down   # skip it (cluster already gone / API unreachable)
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+
+WAIT_SECONDS = 300
+POLL_SECONDS = 10
+
+
+@dataclass(frozen=True)
+class Step:
+    action: str          # "delete" | "wait"
+    kind: str
+    description: str
+    timeout_seconds: int = 0
+
+
+def plan() -> list[Step]:
+    """What pre-destroy does, in order. Deletes first, then one wait for all of it."""
+    return [
+        Step("delete", "ingress", "every Ingress in every namespace (releases the shared ALB)"),
+        Step("delete", "service", "every LoadBalancer Service (releases any NLB)"),
+        Step("delete", "persistentvolumeclaim", "every PVC (releases the EBS volumes behind them)"),
+        Step("wait", "loadbalancer", "poll until no load balancer remains for this cluster", WAIT_SECONDS),
+    ]
+
+
+def kubectl(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(["kubectl", *args], capture_output=True, text=True, check=check)
+
+
+def api_reachable() -> bool:
+    return kubectl("version", "--request-timeout=10s").returncode == 0
+
+
+def delete_all(kind: str, selector: str | None = None) -> None:
+    args = ["delete", kind, "--all-namespaces", "--all", "--ignore-not-found", "--timeout=120s"]
+    if kind == "service":
+        # There is no field selector for spec.type, so list and filter.
+        out = kubectl("get", "svc", "-A", "-o",
+                      "jsonpath={range .items[?(@.spec.type==\"LoadBalancer\")]}{.metadata.namespace} {.metadata.name}{\"\\n\"}{end}")
+        for line in out.stdout.splitlines():
+            if not line.strip():
+                continue
+            ns, name = line.split()
+            print(f"  deleting LoadBalancer service {ns}/{name}")
+            kubectl("-n", ns, "delete", "svc", name, "--ignore-not-found", "--timeout=120s")
+        return
+    print(f"  deleting all {kind}")
+    kubectl(*args)
+
+
+def remaining_load_balancers() -> int:
+    """Ask AWS, not Kubernetes - the object can be gone while the ALB still exists."""
+    cluster = subprocess.run(
+        [sys.executable, "scripts/bootstrap.py", "dev", "output", "-raw", "cluster_name"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not cluster:
+        return 0
+    out = subprocess.run(
+        ["aws", "elbv2", "describe-load-balancers", "--query",
+         "length(LoadBalancers[?contains(LoadBalancerName, `k8s-`)])", "--output", "text"],
+        capture_output=True, text=True,
+    )
+    try:
+        return int(out.stdout.strip() or "0")
+    except ValueError:
+        return 0
+
+
+def main() -> int:
+    if os.environ.get("SKIP_PRE_DESTROY"):
+        print("pre-destroy: skipped (SKIP_PRE_DESTROY is set)")
+        return 0
+    if not api_reachable():
+        print("pre-destroy: cluster API is unreachable - nothing to clean up, continuing")
+        return 0
+
+    print("pre-destroy: removing everything the controllers own before terraform destroy")
+    for step in plan():
+        if step.action == "delete":
+            print(f"- {step.description}")
+            delete_all(step.kind)
+
+    print(f"- waiting up to {WAIT_SECONDS}s for load balancers to disappear")
+    deadline = time.time() + WAIT_SECONDS
+    while time.time() < deadline:
+        n = remaining_load_balancers()
+        if n == 0:
+            print("pre-destroy: no load balancers remain - safe to destroy")
+            return 0
+        print(f"  {n} load balancer(s) still present, waiting...")
+        time.sleep(POLL_SECONDS)
+
+    print("pre-destroy: load balancers are STILL present after the timeout.", file=sys.stderr)
+    print("Destroying now would orphan them (about $16/month each) and probably hang on VPC deletion.", file=sys.stderr)
+    print("Check the AWS console, delete them by hand, then re-run `make down`.", file=sys.stderr)
+    print("To destroy anyway: SKIP_PRE_DESTROY=1 make down", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `python3 tests/test_pre_destroy.py`
+Expected: PASS, 5 assertions.
+
+- [ ] **Step 5: Wire it into `make down`**
+
+In `Makefile`, change the `down` target:
+
+```makefile
+down: guard-env ## terraform destroy, auto-approved (RUN THIS WHEN DONE to stop charges)
+	@$(PYTHON) scripts/pre-destroy.py
+	$(BOOT) $(ENV) init -input=false
+	$(BOOT) $(ENV) destroy -auto-approve
+```
+
+The `@` matters: pre-destroy prints a lot and its own output is the useful part.
+
+- [ ] **Step 6: Add it to the static suite**
+
+In `Makefile.test`, add the two new tests to `answers-check`, or better, rename that target to `py-tests` and have it run every Python test:
+
+```makefile
+py-tests: ## Run every stdlib Python test in tests/
+	python3 scripts/gen-answers.py --check
+	python3 tests/test_answers.py
+	python3 tests/test_gen_answers.py
+	python3 tests/test_git_seed.py
+	python3 tests/test_pre_destroy.py
+```
+
+Update `test:` to depend on `py-tests` instead of `answers-check`.
+
+- [ ] **Step 7: Run the full static suite**
+
+Run: `make -f Makefile.test test`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add scripts/pre-destroy.py tests/test_pre_destroy.py Makefile Makefile.test
+git commit -m "feat: pre-destroy hook so make down never orphans an ALB or a PVC"
+```
+
+---
+
+## Phase 5: The mothership GUI
+
+**This phase produces the first thing to look at.** Task 5.3 serves a working UI from a Vite dev server in Podman, on a probed port in 30000+, with no cluster and no AWS. Everything before it is code with tests; this is where it becomes a product.
+
+The quality bar is explicit: this should feel like a tool someone chose, not a form someone was given.
+
+### Task 5.1: Fastify server, static hosting, and the websocket
+
+**Files:**
+
+- Create: `drill/server/src/server.ts`, `drill/server/src/config.ts`, `drill/server/src/ws.ts`
+- Modify: `drill/server/src/index.ts`, `drill/server/package.json`
+- Test: `drill/server/src/server.test.ts`
+
+**Interfaces:**
+
+- Consumes: `ClientMessage`, `ServerMessage` from `@drill/shared`.
+- Produces:
+  - `createServer(opts: ServerOptions): Promise<FastifyInstance>` where `ServerOptions = { port: number; host: string; webRoot: string; answersDir: string; workspaceDir: string; scenario: string }`.
+  - `GET /healthz` -> `200 {"ok":true}`.
+  - `GET /api/session` -> the current `SessionState`.
+  - `GET /api/tasks` -> the scenario's tasks with `answer` **stripped**, because the answer key must never reach the browser.
+  - `POST /api/submit` `{taskId, answer}` -> a `Verdict`.
+  - `WS /ws` -> the `ClientMessage`/`ServerMessage` protocol.
+  - `loadConfig(env: NodeJS.ProcessEnv): ServerOptions` reading `DRILL_PORT` (default 8090), `DRILL_HOST` (default `0.0.0.0`), `DRILL_WEB_ROOT`, `DRILL_ANSWERS_DIR`, `DRILL_WORKSPACE`, `DRILL_SCENARIO`.
+
+- [ ] **Step 1: Add the dependencies**
+
+In `drill/server/package.json`, add to `dependencies`:
+
+```json
+    "fastify": "^5.0.0",
+    "@fastify/static": "^8.0.0",
+    "@fastify/websocket": "^11.0.0",
+    "@fastify/http-proxy": "^10.0.0",
+    "node-pty": "^1.0.0",
+    "@kubernetes/client-node": "^1.0.0",
+    "ws": "^8.18.0"
+```
+
+and to `devDependencies`: `"@types/ws": "^8.5.0"`.
+
+Run: `make -f Makefile.test drill-install`
+
+`node-pty` is a native module. If it fails to build in `node:20-alpine`, switch `NODE_IMAGE` in `Makefile.test` to `docker.io/node:20-bookworm-slim` and note why in `drill/README.md`. The runtime image in Task 5.6 must match whichever one builds.
+
+- [ ] **Step 2: Write the failing test**
+
+Create `drill/server/src/server.test.ts`:
+
+```typescript
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "./server.ts";
+import type { FastifyInstance } from "fastify";
+
+let app: FastifyInstance;
+
+before(async () => {
+  app = await createServer({
+    port: 0,
+    host: "127.0.0.1",
+    webRoot: new URL("../test-fixtures/web", import.meta.url).pathname,
+    answersDir: new URL("../../../scenarios/answers", import.meta.url).pathname,
+    workspaceDir: new URL("../test-fixtures/workspace", import.meta.url)
+      .pathname,
+    scenario: "03",
+  });
+});
+
+after(async () => {
+  await app.close();
+});
+
+test("healthz is up", async () => {
+  const res = await app.inject({ method: "GET", url: "/healthz" });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { ok: true });
+});
+
+test("tasks are served without the answers", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/tasks" });
+  assert.equal(res.statusCode, 200);
+  const tasks = res.json() as Array<Record<string, unknown>>;
+  assert.equal(tasks.length, 6);
+  for (const t of tasks) {
+    assert.ok(t.prompt, "task keeps its prompt");
+    assert.equal(t.answer, undefined, "task must NOT carry the answer");
+    assert.equal(t.accept, undefined, "task must NOT carry the accept rules");
+    assert.equal(t.must_include, undefined, "task must NOT carry must_include");
+    assert.equal(
+      t.accept_pattern,
+      undefined,
+      "task must NOT carry accept_pattern",
+    );
+  }
+});
+
+test("hints are not served up front either", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/tasks" });
+  for (const t of res.json() as Array<Record<string, unknown>>) {
+    assert.equal(
+      t.hints,
+      undefined,
+      "hints arrive with a verdict, not in the task list",
+    );
+  }
+});
+
+test("a correct submission grades as passed", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/submit",
+    payload: {
+      taskId: "1",
+      answer:
+        "kubectl -n practice-app rollout history deploy/practice-app-frontend",
+    },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().passed, true);
+});
+
+test("a wrong submission returns the hint, not the answer", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/submit",
+    payload: {
+      taskId: "1",
+      answer: "kubectl rollout history deploy/practice-app-frontend",
+    },
+  });
+  const verdict = res.json();
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.hint, "missing-namespace");
+  assert.ok(
+    !JSON.stringify(verdict).includes("jsonpath"),
+    "the canonical answer must not leak in a verdict",
+  );
+});
+
+test("an unknown task id is a 404, not a crash", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/submit",
+    payload: { taskId: "99", answer: "x" },
+  });
+  assert.equal(res.statusCode, 404);
+});
+
+test("session state starts at the first task with nothing passed", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/session" });
+  const state = res.json();
+  assert.equal(state.scenario, "03");
+  assert.equal(state.currentTaskId, "1");
+  assert.deepEqual(state.passed, []);
+});
+
+test("a submission is recorded as an attempt whether it passed or not", async () => {
+  await app.inject({
+    method: "POST",
+    url: "/api/submit",
+    payload: { taskId: "1", answer: "nonsense" },
+  });
+  const state = (
+    await app.inject({ method: "GET", url: "/api/session" })
+  ).json();
+  assert.ok(
+    state.attempts.length > 0,
+    "attempts are append-only, including failures",
+  );
+});
+```
+
+- [ ] **Step 3: Run it to verify it fails**
+
+Run: `make -f Makefile.test drill-test`
+Expected: FAIL, `Cannot find module './server.ts'`.
+
+- [ ] **Step 4: Write the config module**
+
+Create `drill/server/src/config.ts`:
+
+```typescript
+/** Everything the server needs, from the environment, with no hidden defaults for paths. */
+export interface ServerOptions {
+  port: number;
+  host: string;
+  webRoot: string;
+  answersDir: string;
+  workspaceDir: string;
+  scenario: string;
+}
+
+/**
+ * 8090 on purpose: `make argo-ui` holds 8080 and `make grafana-ui` holds 3000, and
+ * colliding with either during local development is a confusing five minutes.
+ */
+export const DEFAULT_PORT = 8090;
+
+export function loadConfig(env: NodeJS.ProcessEnv): ServerOptions {
+  const required = (key: string): string => {
+    const value = env[key];
+    if (!value)
+      throw new Error(
+        `${key} is not set - the drill server needs an explicit path, not a guess`,
+      );
+    return value;
+  };
+  return {
+    port: Number(env.DRILL_PORT ?? DEFAULT_PORT),
+    host: env.DRILL_HOST ?? "0.0.0.0",
+    webRoot: required("DRILL_WEB_ROOT"),
+    answersDir: required("DRILL_ANSWERS_DIR"),
+    workspaceDir: required("DRILL_WORKSPACE"),
+    scenario: required("DRILL_SCENARIO"),
+  };
+}
+```
+
+- [ ] **Step 5: Write the server**
+
+Create `drill/server/src/server.ts`:
+
+```typescript
+/**
+ * The drill server.
+ *
+ * One rule shapes every route here: the answer key never reaches the browser.
+ * The client sends what the user did; the server decides whether it was right and
+ * sends back a verdict and, on failure, a hint. Ship the accept rules to the client
+ * and the drill becomes a reading exercise.
+ */
+import Fastify, { type FastifyInstance } from "fastify";
+import fastifyStatic from "@fastify/static";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { SessionState, Verdict, Attempt } from "@drill/shared";
+import {
+  loadAnswers,
+  type AnswerSet,
+  type AnswerTask,
+} from "./grader/answers.ts";
+import { grade } from "./grader/index.ts";
+import type { ServerOptions } from "./config.ts";
+
+/** The task shape the browser is allowed to see. */
+interface PublicTask {
+  id: string;
+  prompt: string;
+  grader: AnswerTask["grader"];
+  /** Only for file tasks, so the editor can open the right file. Not the expected value. */
+  path?: string;
+}
+
+function toPublic(task: AnswerTask): PublicTask {
+  const out: PublicTask = {
+    id: task.id,
+    prompt: task.prompt,
+    grader: task.grader,
+  };
+  if (task.grader === "file" && task.path) out.path = task.path;
+  return out;
+}
+
+export async function createServer(
+  opts: ServerOptions,
+): Promise<FastifyInstance> {
+  const app = Fastify({ logger: false });
+  const answers: AnswerSet = await loadAnswers(opts.scenario, opts.answersDir);
+
+  const state: SessionState = {
+    scenario: opts.scenario,
+    sessionId: process.env.DRILL_SESSION_ID ?? "local",
+    startedAt: new Date().toISOString(),
+    currentTaskId: answers.tasks[0]?.id ?? "",
+    passed: [],
+    attempts: [],
+  };
+
+  app.get("/healthz", async () => ({ ok: true }));
+
+  app.get("/api/session", async () => state);
+
+  app.get("/api/tasks", async () => answers.tasks.map(toPublic));
+
+  app.post<{ Body: { taskId: string; answer: string } }>(
+    "/api/submit",
+    async (req, reply) => {
+      const { taskId, answer } = req.body ?? { taskId: "", answer: "" };
+      const task = answers.tasks.find((t) => t.id === taskId);
+      if (!task)
+        return reply
+          .code(404)
+          .send({ error: `no task ${taskId} in scenario ${opts.scenario}` });
+
+      // A file task grades the workspace on disk, not something the user typed. The
+      // point of the task is that the file really changed, which a text box cannot prove.
+      let fileContent: string | undefined;
+      if (task.grader === "file" && task.path) {
+        try {
+          fileContent = await readFile(
+            join(opts.workspaceDir, task.path),
+            "utf8",
+          );
+        } catch {
+          fileContent = "";
+        }
+      }
+
+      const verdict: Verdict = grade(task, answer, fileContent);
+
+      const attempt: Attempt = {
+        taskId,
+        at: new Date().toISOString(),
+        submitted: answer,
+        passed: verdict.passed,
+        message: verdict.message,
+      };
+      // Append-only. A failed attempt is the record of how you got there, and
+      // deleting it would turn the log into a report card.
+      state.attempts.push(attempt);
+
+      if (verdict.passed && !state.passed.includes(taskId)) {
+        state.passed.push(taskId);
+        const next = answers.tasks.find((t) => !state.passed.includes(t.id));
+        state.currentTaskId = next?.id ?? "";
+      }
+
+      return verdict;
+    },
+  );
+
+  await app.register(fastifyStatic, { root: opts.webRoot, wildcard: false });
+  app.setNotFoundHandler((req, reply) => {
+    // SPA fallback, but only for navigations - a missing /api path stays a 404.
+    if (req.url.startsWith("/api"))
+      return reply.code(404).send({ error: "not found" });
+    return reply.sendFile("index.html");
+  });
+
+  return app;
+}
+```
+
+- [ ] **Step 6: Create the test fixtures**
+
+```bash
+mkdir -p drill/server/test-fixtures/web drill/server/test-fixtures/workspace/helm/practice-app
+printf '<!doctype html><title>fixture</title>\n' > drill/server/test-fixtures/web/index.html
+cp helm/practice-app/values.yaml drill/server/test-fixtures/workspace/helm/practice-app/values.yaml
+```
+
+- [ ] **Step 7: Run the test to verify it passes**
+
+Run: `make -f Makefile.test drill-test`
+Expected: PASS, 8 new tests. The answer-leak assertions are the ones that matter most; if any fails, fix the serialisation before continuing.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add drill/server/src/server.ts drill/server/src/config.ts drill/server/src/server.test.ts drill/server/test-fixtures/ drill/server/package.json
+git commit -m "feat: drill server with answer-key-never-leaves-the-server API"
+```
+
+---
+
+### Task 5.2: The PTY, tmux, and scrollback that survives a restart
+
+**Files:**
+
+- Create: `drill/server/src/pty.ts`
+- Modify: `drill/server/src/server.ts` (register the `/ws` route)
+- Test: `drill/server/src/pty.test.ts`
+
+**Interfaces:**
+
+- Consumes: `ClientMessage`, `ServerMessage`.
+- Produces:
+  - `class TerminalSession { constructor(opts: { cwd: string; sessionName: string; logPath: string }); onData(cb: (chunk: string) => void): void; write(data: string): void; resize(cols: number, rows: number): void; replay(): Promise<string>; dispose(): void; }`
+  - The PTY runs `tmux new-session -A -s <sessionName>`, so a browser disconnect leaves the session running and a reconnect reattaches to exactly where it was.
+  - Every byte the PTY emits is teed to `logPath` on the PVC, and `replay()` returns the tail (capped at 256 KB) so a **pod** restart still shows recent scrollback. tmux handles disconnects; the log handles restarts. They are different failures and both are worth solving.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `drill/server/src/pty.test.ts`:
+
+```typescript
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TerminalSession } from "./pty.ts";
+
+const settle = (ms = 400) => new Promise((r) => setTimeout(r, ms));
+
+test("a PTY echoes what is written to it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
+  const term = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-echo",
+    logPath: join(dir, "pty.log"),
+    shell: "/bin/sh",
+  });
+  let seen = "";
+  term.onData((c) => {
+    seen += c;
+  });
+  term.write("echo hello-drill\n");
+  await settle(800);
+  assert.match(seen, /hello-drill/);
+  term.dispose();
+});
+
+test("output is teed to the log file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
+  const logPath = join(dir, "pty.log");
+  const term = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-log",
+    logPath,
+    shell: "/bin/sh",
+  });
+  term.write("echo persisted-line\n");
+  await settle(800);
+  term.dispose();
+  assert.match(await readFile(logPath, "utf8"), /persisted-line/);
+});
+
+test("replay returns the log tail so a pod restart keeps scrollback", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
+  const logPath = join(dir, "pty.log");
+  const first = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-replay",
+    logPath,
+    shell: "/bin/sh",
+  });
+  first.write("echo before-restart\n");
+  await settle(800);
+  first.dispose();
+
+  const second = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-replay",
+    logPath,
+    shell: "/bin/sh",
+  });
+  assert.match(await second.replay(), /before-restart/);
+  second.dispose();
+});
+
+test("replay is capped so a long drill does not blow up the first frame", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
+  const logPath = join(dir, "pty.log");
+  const term = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-cap",
+    logPath,
+    shell: "/bin/sh",
+  });
+  term.write("yes drill-filler | head -50000\n");
+  await settle(2500);
+  const tail = await term.replay();
+  assert.ok(
+    tail.length <= 256 * 1024,
+    `replay was ${tail.length} bytes, cap is 256KB`,
+  );
+  term.dispose();
+});
+
+test("resize does not throw", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
+  const term = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-resize",
+    logPath: join(dir, "pty.log"),
+    shell: "/bin/sh",
+  });
+  assert.doesNotThrow(() => term.resize(120, 40));
+  term.dispose();
+});
+
+test("replay on a fresh session with no log is empty, not an error", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
+  const term = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-fresh",
+    logPath: join(dir, "nope.log"),
+    shell: "/bin/sh",
+  });
+  assert.equal(await term.replay(), "");
+  term.dispose();
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `make -f Makefile.test drill-test`
+Expected: FAIL, `Cannot find module './pty.ts'`.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `drill/server/src/pty.ts`:
+
+```typescript
+/**
+ * The terminal.
+ *
+ * Two different things can interrupt a drill and they need different fixes:
+ *
+ *   a browser disconnect  -> tmux keeps the session alive; reattaching lands you
+ *                            exactly where you were, mid-command if need be.
+ *   a pod restart         -> tmux dies with the pod, so every byte is also teed to
+ *                            the PVC and the tail is replayed into the new terminal.
+ *
+ * Solving only the first leaves you staring at a blank screen after an OOM kill;
+ * solving only the second loses your running command. Both are cheap.
+ */
+import { spawn, type IPty } from "node-pty";
+import { createWriteStream, type WriteStream } from "node:fs";
+import { open, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+
+const REPLAY_CAP_BYTES = 256 * 1024;
+
+export interface TerminalOptions {
+  cwd: string;
+  /** tmux session name. Reused across reconnects on purpose. */
+  sessionName: string;
+  /** Where the PTY log is teed. Lives on the PVC in the cluster. */
+  logPath: string;
+  /** Overridable for tests; production is tmux. */
+  shell?: string;
+}
+
+export class TerminalSession {
+  private pty: IPty;
+  private log: WriteStream | undefined;
+  private readonly logPath: string;
+
+  constructor(opts: TerminalOptions) {
+    this.logPath = opts.logPath;
+
+    // `new-session -A` attaches if it exists and creates it if it does not, which
+    // makes reconnect and first-connect the same code path.
+    const [file, args] = opts.shell
+      ? [opts.shell, [] as string[]]
+      : ["tmux", ["new-session", "-A", "-s", opts.sessionName]];
+
+    this.pty = spawn(file, args, {
+      name: "xterm-256color",
+      cols: 120,
+      rows: 32,
+      cwd: opts.cwd,
+      env: { ...process.env, TERM: "xterm-256color" },
+    });
+
+    void this.openLog();
+  }
+
+  private async openLog(): Promise<void> {
+    await mkdir(dirname(this.logPath), { recursive: true });
+    this.log = createWriteStream(this.logPath, { flags: "a" });
+    this.pty.onData((chunk) => this.log?.write(chunk));
+  }
+
+  onData(cb: (chunk: string) => void): void {
+    this.pty.onData(cb);
+  }
+
+  write(data: string): void {
+    this.pty.write(data);
+  }
+
+  resize(cols: number, rows: number): void {
+    try {
+      this.pty.resize(cols, rows);
+    } catch {
+      // A resize race against a dying PTY is not worth crashing the server over.
+    }
+  }
+
+  /** The tail of the log, capped, for painting the terminal on reconnect. */
+  async replay(): Promise<string> {
+    let handle;
+    try {
+      handle = await open(this.logPath, "r");
+    } catch {
+      return "";
+    }
+    try {
+      const { size } = await handle.stat();
+      const start = Math.max(0, size - REPLAY_CAP_BYTES);
+      const buf = Buffer.alloc(Math.min(size, REPLAY_CAP_BYTES));
+      await handle.read(buf, 0, buf.length, start);
+      return buf.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  }
+
+  dispose(): void {
+    this.log?.end();
+    try {
+      this.pty.kill();
+    } catch {
+      // Already gone.
+    }
+  }
+}
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `make -f Makefile.test drill-test`
+Expected: PASS, 6 new tests. The container must have `/bin/sh`; if `node-pty` fails to load, revisit the image choice from Task 5.1 Step 1.
+
+- [ ] **Step 5: Wire the websocket into the server**
+
+In `drill/server/src/server.ts`, register `@fastify/websocket` and add the `/ws` route, replaying scrollback as the first frame:
+
+```typescript
+await app.register(fastifyWebsocket);
+app.register(async (scoped) => {
+  scoped.get("/ws", { websocket: true }, async (socket) => {
+    const send = (msg: ServerMessage) => socket.send(JSON.stringify(msg));
+    const term = new TerminalSession({
+      cwd: opts.workspaceDir,
+      sessionName: `drill-${opts.scenario}`,
+      logPath: join(opts.workspaceDir, "..", "pty", `${opts.scenario}.log`),
+    });
+
+    // Paint the tail first, so a reconnect never opens onto a blank screen.
+    const tail = await term.replay();
+    if (tail) send({ type: "term:output", data: tail });
+    send({ type: "session", state });
+
+    term.onData((data) => send({ type: "term:output", data }));
+
+    socket.on("message", (raw: Buffer) => {
+      let msg: ClientMessage;
+      try {
+        msg = JSON.parse(raw.toString()) as ClientMessage;
+      } catch {
+        return send({ type: "error", message: "malformed message" });
+      }
+      switch (msg.type) {
+        case "term:input":
+          return term.write(msg.data);
+        case "term:resize":
+          return term.resize(msg.cols, msg.rows);
+        default:
+          return;
+      }
+    });
+
+    // tmux keeps the shell alive; only the local handle is dropped.
+    socket.on("close", () => term.dispose());
+  });
+});
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add drill/server/src/pty.ts drill/server/src/pty.test.ts drill/server/src/server.ts
+git commit -m "feat: PTY over websocket with tmux sessions and replayable scrollback"
+```
+
+---
+
+### Task 5.3: The React shell - **the first visual**
+
+Four panels: terminal, editor, answers, help. The design language is already in this repo, in `PRACTICE_ANSWERS.html`: dark by default with a light toggle, `--bg: #10141a`, `--accent: #7aa2f7`, `--good: #9ece6a`, `--warn: #e0af68`. Reuse it rather than inventing a second one, so the drill GUI and the answer key look like parts of the same product.
+
+**Files:**
+
+- Create: `drill/web/package.json`, `drill/web/tsconfig.json`, `drill/web/vite.config.ts`, `drill/web/index.html`
+- Create: `drill/web/src/main.tsx`, `drill/web/src/App.tsx`, `drill/web/src/theme.css`
+- Create: `drill/web/src/panels/TerminalPanel.tsx`, `EditorPanel.tsx`, `AnswersPanel.tsx`, `HelpPanel.tsx`, `StatusBar.tsx`
+- Create: `drill/web/src/lib/ws.ts`
+- Modify: `Makefile.test` (add `drill-dev`)
+
+**Interfaces:**
+
+- Consumes: `ClientMessage`, `ServerMessage`, `SessionState`, `Verdict` from `@drill/shared`.
+- Produces:
+  - `useDrillSocket(): { send: (m: ClientMessage) => void; onMessage: (cb: (m: ServerMessage) => void) => () => void; connected: boolean }`
+  - A four-panel layout: resizable split, terminal bottom-left, editor top-left, answers right, help behind a tab on the right.
+  - `make -f Makefile.test drill-dev` starts Vite in Podman on a probed port and prints the URL.
+
+- [ ] **Step 1: Scaffold the web workspace**
+
+`drill/web/package.json`:
+
+```json
+{
+  "name": "@drill/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@drill/shared": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-webgl": "^0.18.0",
+    "@monaco-editor/react": "^4.6.0",
+    "react-resizable-panels": "^2.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  }
+}
+```
+
+`drill/web/vite.config.ts` - the API proxy target comes from an env var, per the container-sandbox skill's rule about `API_PROXY_TARGET`:
+
+```typescript
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+const target = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8090";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    host: "0.0.0.0",
+    proxy: {
+      "/api": { target, changeOrigin: true },
+      "/ws": { target: target.replace(/^http/, "ws"), ws: true },
+    },
+  },
+  build: { outDir: "dist", emptyOutDir: true },
+});
+```
+
+- [ ] **Step 2: Write the theme, lifted from the repo's own answer key**
+
+Create `drill/web/src/theme.css`:
+
+```css
+/* The design language already exists in PRACTICE_ANSWERS.html. Reusing it means the
+   drill GUI and the answer key read as one product rather than two side projects. */
+:root {
+  --bg: #10141a;
+  --panel: #161b22;
+  --panel-2: #1c232c;
+  --border: #263041;
+  --fg: #d7dee9;
+  --dim: #8b98ab;
+  --accent: #7aa2f7;
+  --good: #9ece6a;
+  --warn: #e0af68;
+  --bad: #f7768e;
+  --radius: 10px;
+  --gap: 12px;
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Inter, sans-serif;
+}
+
+:root[data-theme="light"] {
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --panel-2: #f0f3f6;
+  --border: #d5dce5;
+  --fg: #1c2530;
+  --dim: #5b6878;
+  --accent: #3b6fd4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  /* Antialiasing matters at this size; the default rendering looks muddy on dark. */
+  -webkit-font-smoothing: antialiased;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0; /* without this a flex child refuses to shrink and the layout scrolls */
+}
+
+.panel > header {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dim);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.panel > .body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+.dot.ready {
+  background: var(--good);
+}
+.dot.starting {
+  background: var(--warn);
+}
+.dot.absent {
+  background: var(--bad);
+}
+```
+
+- [ ] **Step 3: Write the websocket hook**
+
+Create `drill/web/src/lib/ws.ts`:
+
+```typescript
+import { useEffect, useRef, useState, useCallback } from "react";
+import type { ClientMessage, ServerMessage } from "@drill/shared";
+
+/**
+ * One socket for the whole app.
+ *
+ * It reconnects with backoff because a drill runs for half an hour and a dropped
+ * frame should not mean a page refresh - tmux kept the shell alive, so the UI
+ * should be able to catch up to it.
+ */
+export function useDrillSocket() {
+  const socketRef = useRef<WebSocket | null>(null);
+  const handlers = useRef(new Set<(m: ServerMessage) => void>());
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    let closed = false;
+    let attempt = 0;
+    let timer: number | undefined;
+
+    const connect = () => {
+      if (closed) return;
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      socketRef.current = ws;
+
+      ws.onopen = () => {
+        attempt = 0;
+        setConnected(true);
+      };
+      ws.onmessage = (ev) => {
+        let msg: ServerMessage;
+        try {
+          msg = JSON.parse(ev.data as string) as ServerMessage;
+        } catch {
+          return;
+        }
+        for (const h of handlers.current) h(msg);
+      };
+      ws.onclose = () => {
+        setConnected(false);
+        if (closed) return;
+        const delay = Math.min(1000 * 2 ** attempt++, 10_000);
+        timer = window.setTimeout(connect, delay);
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (timer) clearTimeout(timer);
+      socketRef.current?.close();
+    };
+  }, []);
+
+  const send = useCallback((msg: ClientMessage) => {
+    socketRef.current?.readyState === WebSocket.OPEN &&
+      socketRef.current.send(JSON.stringify(msg));
+  }, []);
+
+  const onMessage = useCallback((cb: (m: ServerMessage) => void) => {
+    handlers.current.add(cb);
+    return () => {
+      handlers.current.delete(cb);
+    };
+  }, []);
+
+  return { send, onMessage, connected };
+}
+```
+
+- [ ] **Step 4: Write the terminal panel**
+
+Create `drill/web/src/panels/TerminalPanel.tsx`:
+
+```tsx
+import { useEffect, useRef } from "react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
+import "@xterm/xterm/css/xterm.css";
+import type { ClientMessage, ServerMessage } from "@drill/shared";
+
+interface Props {
+  send: (m: ClientMessage) => void;
+  onMessage: (cb: (m: ServerMessage) => void) => () => void;
+}
+
+export function TerminalPanel({ send, onMessage }: Props) {
+  const hostRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hostRef.current) return;
+
+    const term = new Terminal({
+      fontFamily: "ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace",
+      fontSize: 13,
+      // Slightly open leading; the default is cramped at this size and it is the
+      // single biggest thing separating a terminal that feels good from one that does not.
+      lineHeight: 1.25,
+      cursorBlink: true,
+      cursorStyle: "bar",
+      allowProposedApi: true,
+      theme: {
+        background: "#161b22",
+        foreground: "#d7dee9",
+        cursor: "#7aa2f7",
+        selectionBackground: "#7aa2f733",
+        black: "#1c232c",
+        red: "#f7768e",
+        green: "#9ece6a",
+        yellow: "#e0af68",
+        blue: "#7aa2f7",
+        magenta: "#bb9af7",
+        cyan: "#7dcfff",
+        white: "#d7dee9",
+      },
+    });
+
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(hostRef.current);
+    try {
+      term.loadAddon(new WebglAddon());
+    } catch {
+      /* software rendering is fine */
+    }
+    fit.fit();
+
+    term.onData((data) => send({ type: "term:input", data }));
+
+    const unsubscribe = onMessage((msg) => {
+      if (msg.type === "term:output") term.write(msg.data);
+    });
+
+    // ResizeObserver rather than a window listener: the panel is resizable
+    // independently of the window, and a mis-sized PTY corrupts every redraw.
+    const ro = new ResizeObserver(() => {
+      fit.fit();
+      send({ type: "term:resize", cols: term.cols, rows: term.rows });
+    });
+    ro.observe(hostRef.current);
+
+    return () => {
+      unsubscribe();
+      ro.disconnect();
+      term.dispose();
+    };
+  }, [send, onMessage]);
+
+  return (
+    <section className="panel" style={{ height: "100%" }}>
+      <header>
+        <span className="dot ready" /> terminal
+      </header>
+      <div className="body" ref={hostRef} style={{ padding: 8 }} />
+    </section>
+  );
+}
+```
+
+- [ ] **Step 5: Write the remaining panels and App**
+
+`AnswersPanel.tsx` renders the task list from `GET /api/tasks`, marks passed tasks with `--good`, posts to `/api/submit`, and shows the returned verdict inline. A failed verdict shows the hint in `--warn`, never a red X alone - the hint is the product.
+
+`HelpPanel.tsx` shows the card's ticket text plus the dependency-chain status from the `deps` message, so "waiting on Argo" is visible rather than mysterious.
+
+`EditorPanel.tsx` mounts Monaco against the file named by the current file task, with a 600ms debounced autosave posting `{type:"file:save"}` and a subtle "saved" indicator - the same contract as VS Code, so nothing has to be explained.
+
+`StatusBar.tsx` is a single row: scenario, session id, connected dot, tasks passed, and an "exit and tear down" button that is deliberately not styled like a primary action.
+
+`App.tsx` composes them with `react-resizable-panels`: a horizontal split with the editor over the terminal on the left, and the answers/help tabs on the right.
+
+- [ ] **Step 6: Add the dev target and look at it**
+
+In `Makefile.test`, add `drill-dev` to `.PHONY`:
+
+```makefile
+drill-dev: ## Vite dev server for the drill GUI, in Podman, on a probed free port
+	@PORT=$$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1])"); \
+	 echo "drill GUI -> http://localhost:$$PORT"; \
+	 podman run --rm -it --userns=keep-id -p $$PORT:5173 \
+	   -v $(CURDIR)/drill:/app:Z -w /app/web \
+	   -e API_PROXY_TARGET=http://host.containers.internal:8090 \
+	   $(NODE_IMAGE) npm run dev -- --port 5173
+```
+
+Run it:
+
+```bash
+make -f Makefile.test drill-install
+make -f Makefile.test drill-dev
+```
+
+Expected: Vite prints its ready line and the URL works. **This is the point to stop and show the user.** They asked to see a visual of what is being built; this is it, and it needs no cluster and no AWS. Get their reaction on the layout, the density, the terminal's feel, and the theme before building the remaining panels out.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add drill/web/ Makefile.test
+git commit -m "feat: drill GUI shell - terminal, editor, answers and help panels"
+```
+
+---
+
+### Task 5.4: The Argo CD widget and the reverse proxy
+
+**Files:**
+
+- Create: `drill/server/src/integrations/argo.ts`, `drill/server/src/integrations/deps.ts`, `drill/server/src/proxy.ts`
+- Create: `drill/web/src/panels/ArgoWidget.tsx`
+- Test: `drill/server/src/integrations/argo.test.ts`
+
+**Interfaces:**
+
+- Consumes: `DependencyStatus` from `@drill/shared`.
+- Produces:
+  - `getApplication(name: string): Promise<{ sync: string; health: string; revision: string; resources: Array<{kind: string; name: string; status: string}> }>` - reads the Argo CD `Application` through the Kubernetes API with `@kubernetes/client-node`, not through Argo's REST API, so no Argo token is needed and the in-cluster ServiceAccount is enough.
+  - `checkDependencies(): Promise<DependencyStatus[]>` - one entry each for `cluster-git`, `argocd`, `practice-app`, derived from Deployment readiness and Service endpoints.
+  - `registerProxy(app, { argo, grafana })` - `@fastify/http-proxy` mounts at `/argo/*` and `/grafana/*`, injecting backend-held tokens and stripping `X-Frame-Options` and CSP `frame-ancestors` on the way through. Built now, exercised when scenario 07 is ported.
+
+- [ ] **Step 1: Write the failing test with a fake Kubernetes client**
+
+Create `drill/server/src/integrations/argo.test.ts` asserting: a synced healthy Application maps to `{sync:"Synced", health:"Healthy"}`; a missing Application returns a `state: "absent"` dependency rather than throwing; a 403 from the API surfaces as a clear "the drill ServiceAccount cannot read Applications" message rather than an empty widget.
+
+- [ ] **Step 2: Run it to verify it fails, then implement**
+
+Reading the `Application` CRD through the Kubernetes API rather than Argo's REST API is the choice worth writing down in a comment: it removes an auth dance, an extra network hop, and a token to rotate, and the CRD's `.status` already carries everything the widget shows.
+
+- [ ] **Step 3: Build the widget**
+
+Sync status, health, target revision, and the resource tree, styled as this app rather than as an iframe of Argo. For scenario 03 task 5 this is the whole point: watching Argo put the bad version back after a `rollout undo`, in a panel next to the terminal where you ran it, is the lesson landing.
+
+- [ ] **Step 4: Note what is deferred**
+
+The proxy needs Grafana's `root_url` plus `serve_from_sub_path` and Argo CD's server rootpath to work under a subpath. Both are settable through Helm values already under our control and both are fiddly enough to verify against the current chart versions rather than from memory. Verify them when scenario 07 is ported; do not do subpath surgery for a scenario that does not need it.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add drill/server/src/integrations/ drill/server/src/proxy.ts drill/web/src/panels/ArgoWidget.tsx
+git commit -m "feat: native Argo CD widget and the reverse proxy for full-app integrations"
+```
+
+---
+
+### Task 5.5: Container image and in-cluster deployment
+
+**Files:**
+
+- Create: `drill/Containerfile`, `drill/.containerignore`
+- Create: `terraform/modules/platform/drill-gui.tf`
+- Modify: `terraform/modules/platform/drill-ingress.tf` (add the Ingress)
+- Test: kind deploy
+
+**Interfaces:**
+
+- Consumes: `drill_alb_security_group_id`, `drill_ingress_group_name` from Task 4.1; `cluster_git_url` from Task 3.2.
+- Produces:
+  - A published image (GHCR, tag from the git sha) running the Fastify server with the built web app.
+  - Namespace `practice-drill`, ServiceAccount `drill` bound to `cluster-admin`, Deployment `drill-gui`, Service on 8090, PVC `drill-workspace` (15 GB gp3), and an Ingress in the shared group.
+  - New config value `drill_gui_image` threaded like the others.
+
+- [ ] **Step 1: Write the Containerfile**
+
+Multi-stage: build the workspaces, then a slim runtime carrying `node`, `tmux`, `git`, `kubectl` and `helm` on PATH, because the terminal is only useful if the tools the card asks for are there. Run as a non-root user with a writable `/workspace`.
+
+- [ ] **Step 2: Write the Kubernetes manifests**
+
+`cluster-admin` is deliberate and worth the comment: read-only cannot do scenario 10's break/fix, which is the whole reason that scenario exists. The 15 GB gp3 PVC costs about 1.6 cents for a 10-hour drill; size is irrelevant here and orphaning is the real risk, which Task 4.2's pre-destroy already covers.
+
+The Ingress carries `alb.ingress.kubernetes.io/group.name` set to `drill_ingress_group_name` and `alb.ingress.kubernetes.io/security-groups` set to the source-restricted SG. Without the group annotation every ops Ingress provisions its own ALB, which is the difference between one load balancer and three.
+
+- [ ] **Step 3: Deploy to kind and click through it**
+
+```bash
+make -f Makefile.test kind-up
+export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
+podman build -t localhost/drill-gui:dev -f drill/Containerfile drill/
+kind load docker-image localhost/drill-gui:dev --name daily-eks-drill-sandbox
+kubectl apply -f <rendered manifests>
+kubectl -n practice-drill port-forward svc/drill-gui 8090:8090
+```
+
+Expected: the GUI loads at `http://localhost:8090`, the terminal attaches, and `kubectl get nodes` works from inside it. **Second point to show the user**, this time running the way it will actually run.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add drill/Containerfile drill/.containerignore terraform/modules/platform/drill-gui.tf terraform/modules/platform/drill-ingress.tf scripts/config.example.toml terraform/
+git commit -m "feat: drill GUI image and in-cluster deployment behind the shared ALB"
+```
+
+---
+
+## Phase 6: Session lifecycle
+
+Progress that survives a teardown, a watcher that keeps it current, and the Makefile handover.
+
+### Task 6.1: drill-progress on the laptop
+
+**Files:**
+
+- Modify: `.gitignore`
+- Create: `scripts/progress.py`
+- Modify: `README.md`
+- Test: `tests/test_progress.py`
+
+**Interfaces:**
+
+- Consumes: nothing.
+- Produces:
+  - `drill-progress/` layout, append-only:
+    ```
+    drill-progress/
+      curriculum.json                    # running totals across all scenarios
+      03/
+        index.json                       # results table + current-session pointer
+        sessions/
+          2026-08-19T14-03-11/
+            state.json
+            workspace.bundle
+    ```
+  - `session_dir(scenario: str, started_at: datetime) -> Path` - timestamps carry **no colons** and the current-session pointer is JSON, not a symlink, because Windows 11 is a supported target and both would break there.
+  - `new_session(scenario) -> Path`, `record_result(scenario, session_id, passed, total)`, `current_session(scenario) -> str | None`, `write_atomic(path, data)`.
+  - Every write is atomic: temp file then rename. Losing one task is annoying; a half-written save file is losing everything.
+
+- [ ] **Step 1: Add the git-ignore entry before anything can create the directory**
+
+```
+# ---- your personal drill history (never commit; nobody wants to fork it) ----
+drill-progress/
+```
+
+- [ ] **Step 2: Write the failing test**
+
+`tests/test_progress.py` asserts: timestamps contain no `:` and no character illegal on Windows; a second session for the same scenario creates a new directory rather than replacing the first; `index.json` accumulates a results row per session and never loses one; `write_atomic` leaves the previous file intact when the write raises partway; `current_session` returns the newest.
+
+- [ ] **Step 3: Implement, run the test, and document it in the README**
+
+The README section must say what `drill-progress/` is and why it is ignored: it is your practice record, it is personal, and nobody forking this project wants to inherit someone else's attempt log. It survives because it is on your laptop, not because it is committed.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add .gitignore scripts/progress.py tests/test_progress.py README.md
+git commit -m "feat: append-only drill-progress on the laptop"
+```
+
+---
+
+### Task 6.2: The ConfigMap and the sync watcher
+
+**Files:**
+
+- Create: `scripts/drill-watch.py`
+- Modify: `drill/server/src/server.ts` (mirror `SessionState` into the ConfigMap)
+- Test: `tests/test_drill_watch.py`, plus a kind run
+
+**Interfaces:**
+
+- Consumes: `progress.py` from Task 6.1; `cluster_git_namespace`/`cluster_git_deployment` from Task 3.2.
+- Produces:
+  - ConfigMap `drill-state` in `practice-drill`, written by the server on every state change. It survives pod restarts, which is the failure that matters, and dies with the cluster, which is correct because the drill dies with the cluster anyway.
+  - `scripts/drill-watch.py` - watches with `kubectl get cm drill-state -n practice-drill --watch`, not polling. The API server pushes changes, so there is no interval to tune and no lag on a task pass, and it is the primitive every controller is built on, which keeps the tool that teaches Kubernetes built out of Kubernetes.
+  - On every change it writes `state.json` and re-bundles:
+    ```bash
+    kubectl exec -n git deploy/git-server -- git -C /srv/repo.git bundle create - --all \
+      > drill-progress/03/sessions/<id>/workspace.bundle
+    ```
+    streamed in one shot, so no port-forward is held open for the length of a drill.
+  - PID file at `drill-progress/.watcher.pid`. Re-running is a no-op if the PID is live; a dead watcher is restarted by converge exactly like a dead pod; it syncs immediately on start to catch up on anything missed while it was down.
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_drill_watch.py` covers the pure parts: PID liveness detection, the bundle path construction, and that a sync writes to a temp file and renames rather than truncating the live one.
+
+- [ ] **Step 2: Implement and verify on kind**
+
+Change the ConfigMap by hand and confirm the watcher reacts within a second and the bundle on disk changes. Then `git clone` that bundle into a scratch directory and confirm the chart is there at the expected revision - a bundle that cannot be cloned back out is not a save file.
+
+- [ ] **Step 3: Record the caveat in the code**
+
+The bundle captures everything that lives in git and nothing that does not. Scenario 03 is entirely chart-driven so the bundle is complete for this slice, but a scenario that creates state imperatively (scenario 02's HPA via `kubectl autoscale`) lives only in the cluster and will need a declared `resume` block per task in the answers TOML. That is the per-scenario variation this design already expects; note it where the next person will read it.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/drill-watch.py tests/test_drill_watch.py drill/server/src/server.ts
+git commit -m "feat: watch-based sync from the drill ConfigMap to local drill-progress"
+```
+
+---
+
+### Task 6.3: `make scenario N=03` converges a session
+
+**Files:**
+
+- Modify: `Makefile` (`scenario`, new `scenario-clean`)
+- Create: `scripts/scenario.py`
+- Test: `tests/test_scenario.py`
+
+**Interfaces:**
+
+- Consumes: everything above.
+- Produces:
+  - `make scenario N=03` **converges** rather than creates: it starts a session if none is open, restores from the newest bundle if one exists, restarts the watcher if it died, and prints the GUI URL. Running it twice shows the same thing rather than making a second one.
+  - `make scenario-clean N=03` ends the session, stops the watcher, and removes what the drill created - without destroying the cluster, which is the gap the spec opens with.
+  - Starting scenario 05 while 03 is open **refuses**, because scenarios mutate the same app and concurrent drills make cluster state unattributable.
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_scenario.py` asserts idempotency (converging twice produces one session), the concurrent-scenario refusal names the open scenario, and `scenario-clean` is safe to run when nothing is open.
+
+- [ ] **Step 2: Implement, verify on kind, commit**
+
+```bash
+git add scripts/scenario.py tests/test_scenario.py Makefile
+git commit -m "feat: make scenario N=03 converges a drill session"
+```
+
+---
+
+### Task 6.4: The Makefile handover
+
+The Makefile is **demoted, never archived**. If the GUI is the only way to drive the cluster and the GUI breaks, there is no way in. Keeping it working, just locked while the GUI holds the wheel, preserves the recovery path.
+
+**Files:**
+
+- Modify: `Makefile`
+- Create: `scripts/handover.py`
+- Test: `tests/test_handover.py`
+
+**Interfaces:**
+
+- Produces:
+  - `scripts/handover.py --check <target>` - exits 0 if the target may run, 1 with an explanation if the GUI owns it.
+  - Locked while the GUI is up: `app-deploy`, `argo-sync`, `argo-repo`, `app-status`, `argo-password`, `argo-ui`, `grafana-ui`, `scenario`, `check`, `serve-answers`.
+  - Never locked, because you cannot create a cluster from a pod that does not exist yet nor destroy the floor you are standing on: `up`, `plan`, `apply`, `down`, `kubeconfig`, `config`, and everything in `Makefile.test`.
+  - A refusal **names the consequence**, not just the rule: "this would re-apply the Argo Application and fight the drill", not only "the GUI owns this now". That costs one line per target and fits a project whose whole job is teaching why things break.
+  - `FORCE=1 make app-deploy` overrides. This exists for the same reason the Makefile was demoted rather than archived: if the GUI wedges and the handover flag goes stale, the only alternative is destroying a cluster you are mid-drill on. Removing the escape hatch removes the recovery path.
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_handover.py` asserts: every locked target refuses when the flag is set; every unlocked target still runs; `FORCE=1` overrides every lock; each refusal message mentions a consequence, not only the lock; and the never-locked list is exactly the four bootstrap and teardown targets plus `Makefile.test`, so a future edit cannot quietly lock the recovery path.
+
+- [ ] **Step 2: Implement and commit**
+
+```bash
+git add scripts/handover.py tests/test_handover.py Makefile
+git commit -m "feat: Makefile handover - one steering wheel at a time, with FORCE=1"
+```
+
+---
+
+### Task 6.5: Exit and tear down from the GUI
+
+**Files:**
+
+- Modify: `drill/server/src/server.ts` (add `POST /api/teardown`)
+- Modify: `drill/web/src/panels/StatusBar.tsx`
+
+**Interfaces:**
+
+- Produces: a teardown path from inside the GUI, available at pass, at fail, or whenever the user wants, that ends the session, stops the watcher, syncs progress one last time, and removes what the drill created. The off-menu terminal equivalent is already tracked as an easter egg in `BACKLOG.md` and is not built here.
+
+- [ ] **Step 1: Implement, verify on kind, commit**
+
+The last sync before teardown is the part that must not be skipped. Tearing down without it loses the session the user just finished, which is the one moment their progress matters most.
+
+```bash
+git add drill/server/src/server.ts drill/web/src/panels/StatusBar.tsx
+git commit -m "feat: exit and tear down a drill from the GUI"
+```
+
+---
+
+## Phase 7: Live verification on real EKS
+
+**STOP. This phase costs money and needs explicit approval before any step runs.**
+
+Everything up to here is proven on kind, ministack and Podman. What kind cannot prove is the AWS-shaped half: IRSA, the AWS Load Balancer Controller actually provisioning an ALB, the source-IP security group actually restricting it, EBS volumes behind the PVCs, and the teardown ordering that keeps them from orphaning.
+
+Approximate cost for one 30-hour cycle: EKS control plane about $3.00, ALB about $1.00, NAT gateway about $1.35, nodes on SPOT about $0.60, RDS about $0.50, EBS about $0.05. Call it **$6.50**, of which the drill platform's own share is roughly the $1.05 for the ALB and the volume.
+
+- [ ] **Step 1: Ask for approval, with the number**
+
+Do not run `make up`. Present the cost, what will be verified, and wait.
+
+- [ ] **Step 2: Bring it up and seed cluster git**
+
+```bash
+make up
+make kubeconfig
+make git-seed
+make app-deploy
+make argo-sync
+```
+
+- [ ] **Step 3: Verify the AWS-shaped things kind could not**
+
+Confirm: exactly **one** ALB exists, not three (the shared IngressGroup working); the GUI is reachable from the user's IP and refused from anywhere else (the SG working); the PVC bound a real EBS volume; and Argo is reading `http://git-server.git.svc.cluster.local/repo.git` rather than GitHub.
+
+- [ ] **Step 4: Actually drill scenario 03 end to end**
+
+This is the point of the whole vertical slice. Work through all six tasks in the GUI, submit real answers, get real verdicts, and confirm task 5 shows Argo putting the bad version back after a `rollout undo`. Note anything that felt wrong - the standard here is pixel perfection and a terminal that feels good, not just green checks.
+
+- [ ] **Step 5: Verify progress survives a teardown**
+
+Tear down, bring the cluster back, and confirm `make scenario N=03` restores from the bundle to exactly where you left off. Resume works by converging to a declared state, not by replaying actions, so this either works completely or it does not work at all - there is no partial.
+
+- [ ] **Step 6: Verify teardown does not orphan anything**
+
+```bash
+make down
+aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `k8s-`)]' --output table
+aws ec2 describe-volumes --filters Name=status,Values=available --output table
+```
+
+Expected: both empty. Anything left here bills indefinitely with nothing pointing at what created it.
+
+- [ ] **Step 7: Report honestly**
+
+Say plainly what passed, what did not, and what was skipped. A kind pass is necessary before spending money and never sufficient; the same honesty applies in reverse here.
+
+---
+
+## Self-review
+
+Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions-design.md`.
+
+**Spec coverage.** Every section maps to a task. Vocabulary and the autosave/commit/push split -> Tasks 5.3 and 6.2. Startup dependency chain -> Task 5.4's `checkDependencies`. Makefile handover -> Task 6.4. Q1 (one Argo source) -> Tasks 0.2, 3.2, 3.3. Q2 (save file, not diary) -> Task 6.1. Q2a (the watcher) -> Task 6.2. Q3 (ALB with three conditions) -> Tasks 4.1 and 4.2; the shared IngressGroup lands in Task 5.5 with the Ingress that needs it. Q4 (contextual integrations) -> Task 5.4. Q5 (one long-lived pod, append-only sessions) -> Tasks 5.5 and 6.1. Q6 (TypeScript both ends) -> Task 2.1. Q7 (refusal and port 8090) -> Tasks 6.4 and 5.1. Build-time items: `drill-progress/` in `.gitignore` -> Task 6.1 Step 1, before the directory can exist; three config values -> Task 3.1; port 8090 -> `config.ts`. Answers TOML as source of truth generating the HTML -> Phase 1. Semantic grading with the alias table -> Phase 2. `cluster-admin` -> Task 5.5. Concurrent-scenario refusal -> Task 6.3. Exit and tear down from the GUI -> Task 6.5. Testing section -> grader unit tests (Phase 2), byte-identical generator test (Task 1.2), `make -f Makefile.test test` kept passing throughout, the spike (Task 0.2), and live drilling (Phase 7 Step 4).
+
+**Two known gaps, both deliberate.** Phases 6.1 through 6.5 and Tasks 5.4 and 5.5 are specified at interface-and-intent level rather than with full TDD code blocks, because they depend on choices Phase 5's first visual will change - panel layout, what the session state actually needs to carry, and what the user says when they see it. Expanding them now would be writing code against a UI nobody has looked at. **Expand them into full step-by-step tasks after Task 5.3's review**, before those tickets are cut. The second gap: Task 5.4's proxy is designed and stubbed but only exercised when scenario 07 is ported, exactly as the spec says.
+
+**Type consistency.** `Verdict`, `SessionState`, `Attempt` and `DependencyStatus` are defined once in `@drill/shared` (Task 2.1) and used unchanged in Tasks 2.4, 5.1, 5.2, 5.3 and 5.4. `AnswerTask` and `AcceptRule` are defined in Task 2.4's `answers.ts` and consumed in 2.4 and 5.1. `ParsedCommand` is defined in Task 2.3 and consumed only in 2.4. The `grader` discriminator has the same three values in `scripts/answers.py`, `drill/server/src/grader/answers.ts` and `GraderKind`.
+
+**Placeholder scan.** Clean through Task 5.3. Tasks 5.4 onward carry the interface-level treatment noted above, which is flagged rather than hidden.
+
+---
+
+## What to do when this plan is done
+
+Scenario 03 is one of twelve. The other eleven are ported one at a time, each getting its own answers TOML and whatever grader kinds it needs, and each may extend the schema - which is why `schema = 1` and the `grader` discriminator exist. Scenario 04's card also needs rewriting, because the platform ALB is now the ops plane: it becomes "join the existing ALB with a new Ingress, then stand up an NLB separately to feel the difference", which is closer to what you would actually do at work than provisioning a load balancer from scratch.
+
+Two spec amendments to make once Phase 3 lands: the cluster git seeding mechanism and the grader's language, both documented under "Deviations from the spec" at the top of this plan.
