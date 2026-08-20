@@ -12,8 +12,8 @@
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-0-kind-sandbox-harness-and-its-documentati",
   "pr": 11,
-  "merge_sha": null,
-  "closed": null,
+  "merge_sha": "93f522694ba60c2a4c8ac1115b27c3620cf2bf1d",
+  "closed": "2026-08-19",
   "approval": {
     "via": "lavish",
     "at": "2026-08-19"
