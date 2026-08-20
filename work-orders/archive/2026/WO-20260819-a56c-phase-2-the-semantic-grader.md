@@ -12,8 +12,8 @@
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-2-the-semantic-grader",
   "pr": 16,
-  "merge_sha": null,
-  "closed": null,
+  "merge_sha": "c84a156e7c78afa41c695bfb670fe4e8ee47afc2",
+  "closed": "2026-08-20",
   "approval": {
     "via": "lavish",
     "at": "2026-08-19"
