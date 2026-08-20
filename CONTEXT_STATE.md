@@ -7,7 +7,7 @@
 
 | Field        | Value                                                                              |
 | ------------ | ---------------------------------------------------------------------------------- |
-| last_updated | 2026-08-19 23:53 UTC                                                               |
+| last_updated | 2026-08-20 01:40 UTC                                                               |
 | updated_by   | context-compaction skill                                                           |
 | project      | daily-eks-practice                                                                 |
 | repo         | see `git remote -v` - the owner string is PII per `CLAUDE.md` and is not committed |
@@ -45,13 +45,17 @@
 
 ## Active Tasks
 
-| Priority | Task                                                | Status  | Next Action                                                                                                                                                                                                 |
-| -------- | --------------------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1        | Cut the work-order epic for scenario drill sessions | pending | Invoke the `work-order` skill. One epic, eight children (one per plan phase), plus the dependency graph. **Read `docs/superpowers/specs/HYDRATE-scenario-drill-sessions.md` first - it is the full brief.** |
-| 2        | Execute the first ticket                            | pending | Phase 0 (kind sandbox harness) or Phase 1 (answers TOML). They are the only two children with no dependency                                                                                                 |
-| 3        | Port scenarios 01-02 and 04-12 to the drill format  | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                                                                                                    |
+| Priority | Task                                                                             | Status  | Next Action                                                                                                              |
+| -------- | -------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 1        | Execute `WO-20260819-844f - Phase 0: kind sandbox harness and its documentation` | ready   | `work-order.sh start --id WO-20260819-844f`, which creates and stamps the branch. Then follow plan Task 0.1 step by step |
+| 2        | Execute `WO-20260819-11df - Phase 1: answers TOML as the single source of truth` | ready   | The other startable ticket. Independent of Phase 0, so it can go first or in parallel                                    |
+| 3        | Port scenarios 01-02 and 04-12 to the drill format                               | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                 |
 
-Nothing is in progress. No implementation code exists yet - everything on `main` is planning artifacts.
+**The epic is cut.** `WO-20260819-f5c9 - Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill` and its eight children are all `ready`, one child per plan phase, in `work-orders/`.
+Run `bash .claude/skills/work-order/scripts/work-order.sh next` for what is startable and `... tree` for the shape; `work-orders/INDEX.md` is the generated router.
+The epic depends on all eight children so it never appears as startable work itself.
+
+Nothing is in progress. No implementation code exists yet - everything on `main` is planning artifacts and tickets.
 
 ## Decisions Made
 
@@ -67,6 +71,7 @@ Nothing is in progress. No implementation code exists yet - everything on `main`
 | 2026-08-19 | GUI image is a **public** GHCR package under the user's own account                                      | The repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image holds nothing new. Public removes an `imagePullSecret` and one more credential in the cluster                                                                                                 |
 | 2026-08-19 | **Never create a personal access token.** Extend the grant `gh` already holds                            | A PAT is a second credential with its own expiry that must be stored, and every candidate here is bad: `config.toml` is serialised into Terraform state, a shell export lands in history, a dotfile is one `git add -A` from being committed                                          |
 | 2026-08-19 | Grader is TypeScript in the cluster; Python stays laptop-side CLI glue                                   | Grading runs per submission inside the Node process. Python would mean shipping a runtime in the image. `bootstrap.py` stays Python so `make up` needs only `python3`                                                                                                                 |
+| 2026-08-20 | The epic depends on all eight of its children                                                            | Without those edges the epic itself appears in `work-order.sh next` once approved, reading as startable work. Its only real job is to close after its children do                                                                                                                     |
 
 ## Lessons Learned
 
@@ -100,11 +105,14 @@ Copy-paste this at the start of a new session:
 Read CONTEXT_STATE.md in this project root before doing anything else.
 Use the Infrastructure and Toolchain tables as ground truth.
 
-Current focus: cut the work-order epic for scenario drill sessions.
-Read docs/superpowers/specs/HYDRATE-scenario-drill-sessions.md - it is the
-full brief for that task, including the eight children and the dependency
-graph. Then invoke the work-order skill. The script writes the ticket,
-never the model. Do not start implementing.
+Current focus: execute the first ticket of the scenario drill sessions epic,
+WO-20260819-844f - Phase 0: kind sandbox harness and its documentation.
+Read that ticket, then plan Task 0.1 in
+docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md, which is the
+authority for every step. Start with
+`bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-844f`
+so the branch is created and stamped on the ticket. TDD: test first, watch it
+fail, then implement. Never hand-edit a ticket file - the script owns that format.
 
 Do not suggest IP addresses, tool versions, or architecture patterns
 that contradict CONTEXT_STATE.md without flagging the conflict first.
