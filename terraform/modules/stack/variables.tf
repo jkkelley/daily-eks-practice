@@ -235,6 +235,11 @@ variable "kube_prometheus_stack_chart_version" {
   type = string
 }
 
+variable "enable_cluster_git" {
+  description = "Install the in-cluster git server (namespace \"git\") that Argo CD reads from."
+  type        = bool
+}
+
 # ---- practice app plumbing ----
 variable "app_namespace" {
   type = string
@@ -242,6 +247,17 @@ variable "app_namespace" {
 
 variable "s3_service_account" {
   type = string
+}
+
+# ---- drill platform ----
+variable "drill_ingress_group_name" {
+  description = "Shared ALB IngressGroup name for every ops UI, so they share one load balancer."
+  type        = string
+}
+
+variable "drill_allowed_cidrs" {
+  description = "Source CIDRs allowed to reach the drill ALB. The GUI is an unauthenticated cluster-admin terminal; keep this to your own IP."
+  type        = list(string)
 }
 
 # ---- tags ----

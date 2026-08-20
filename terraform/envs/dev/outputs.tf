@@ -48,3 +48,28 @@ output "update_kubeconfig_command" {
   description = "Run this (or `make kubeconfig`) to point kubectl at the cluster."
   value       = "aws eks update-kubeconfig --name ${module.stack.cluster_name} --region ${var.aws_region} --profile ${var.aws_profile}"
 }
+
+output "cluster_git_url" {
+  description = "In-cluster repo URL Argo CD reads from (\"\" when cluster git is disabled)."
+  value       = module.stack.cluster_git_url
+}
+
+output "cluster_git_namespace" {
+  description = "Namespace the cluster git server runs in."
+  value       = module.stack.cluster_git_namespace
+}
+
+output "cluster_git_deployment" {
+  description = "Deployment name of the cluster git server, for `kubectl exec` seeding."
+  value       = module.stack.cluster_git_deployment
+}
+
+output "cluster_git_container" {
+  description = "Container in the git-server pod that has the git binary, for `kubectl exec` seeding."
+  value       = module.stack.cluster_git_container
+}
+
+output "cluster_git_repo_path" {
+  description = "Absolute path of the bare repo inside that container."
+  value       = module.stack.cluster_git_repo_path
+}

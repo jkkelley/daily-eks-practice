@@ -5,7 +5,8 @@
 #   make up                    # generate tfvars from config, then init + apply
 #   make plan
 #   make kubeconfig            # point kubectl at the cluster
-#   make app-deploy            # hand the practice app to Argo CD (GitOps)
+#   make git-seed              # publish this repo into the in-cluster git server
+#   make app-deploy            # hand the practice app to Argo CD (GitOps; runs git-seed first)
 #   make argo-ui               # port-forward the Argo CD UI (+ prints the password)
 #   make scenario N=01         # print a scenario card
 #   make check N=01            # verify you actually completed a scenario
@@ -41,7 +42,7 @@ KUBECONFIG_FILE := $(CURDIR)/.kubeconfig-daily-eks-practice
 export KUBECONFIG := $(KUBECONFIG_FILE)
 
 .DEFAULT_GOAL := help
-.PHONY: help config init plan apply up down output kubeconfig kubeconfig-env app-deploy \
+.PHONY: help config init plan apply up down output kubeconfig kubeconfig-env git-seed app-deploy \
         app-status argo-repo argo-sync argo-ui argo-password grafana-ui scenario check serve-answers \
         answers-gen fmt clean guard-env
 
@@ -94,11 +95,14 @@ kubeconfig-env: ## Print the export line for your shell (eval "$$(make kubeconfi
 argo-repo: ## Give Argo CD read access to this private repo (token from your gh CLI login)
 	$(PYTHON) scripts/argo-repo.py
 
-app-deploy: ## Register the practice app with Argo CD (generates the Application from your git remote)
+git-seed: ## Publish this repo into the in-cluster git server (Argo CD's only source)
+	$(PYTHON) scripts/git-seed.py
+
+app-deploy: git-seed ## Register the practice app with Argo CD (reads from cluster git)
 	$(PYTHON) scripts/gen-argocd-app.py
 	kubectl apply -f argocd/generated/practice-app.yaml
 	@echo ""
-	@echo "Argo CD now owns the app. Run 'make argo-sync' (or Sync in the UI) to create the pods."
+	@echo "Argo CD now owns the app, reading from cluster git. Run 'make argo-sync'."
 
 argo-sync: ## Manually Sync the practice app in Argo CD, then wait until it is Healthy
 	@kubectl -n argocd patch application practice-app --type merge \
