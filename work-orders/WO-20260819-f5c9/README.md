@@ -8,7 +8,7 @@ One level down only. A child of a child is listed in its own directory, not here
 
 | ID | status | pri | waiting on | title |
 |---|---|---|---|---|
-| `WO-20260819-844f` | ready | p1 | - | [Phase 0: kind sandbox harness and its documentation](WO-20260819-844f-phase-0-kind-sandbox-harness-and-its-documentati.md) |
+| `WO-20260819-844f` | in-progress | p1 | - | [Phase 0: kind sandbox harness and its documentation](WO-20260819-844f-phase-0-kind-sandbox-harness-and-its-documentati.md) |
 | `WO-20260819-11df` | ready | p1 | - | [Phase 1: answers TOML as the single source of truth](WO-20260819-11df-phase-1-answers-toml-as-the-single-source-of-tru.md) |
 | `WO-20260819-a56c` | ready | p1 | WO-20260819-11df | [Phase 2: the semantic grader](WO-20260819-a56c-phase-2-the-semantic-grader.md) |
 | `WO-20260819-98da` | ready | p1 | WO-20260819-844f | [Phase 3: Terraform - the in-cluster git server Argo CD reads](WO-20260819-98da-phase-3-terraform-the-in-cluster-git-server-argo.md) |
