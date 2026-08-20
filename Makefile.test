@@ -14,7 +14,21 @@ HELM_IMAGE := docker.io/alpine/helm:latest
 HELM       := podman run --rm -v $(CURDIR)/helm:/apps:Z -w /apps $(HELM_IMAGE)
 
 .DEFAULT_GOAL := test
-.PHONY: test fmt-check validate helm-lint helm-template history-scrubber answers-check tflint scan ministack ministack-down kind-up kind-down kind-status
+
+# Node runs inside Podman - nothing is installed on the host.
+# The repo ROOT is mounted, not drill/, because the grader's conformance tests read
+# scenarios/answers/ and tests/fixtures/ which live above drill/.
+# node_modules is a NAMED PODMAN VOLUME rather than a directory in the mounted repo,
+# so the dependency tree never lands on the host filesystem at all. Only an empty
+# mountpoint does. Drop it with `make -f Makefile.test drill-clean`.
+NODE_IMAGE  := docker.io/node:22-alpine
+NODE_MODULES := daily-eks-practice-drill-node-modules
+NODE        := podman run --rm --userns=keep-id \
+                 -v $(CURDIR):/repo:Z \
+                 -v $(NODE_MODULES):/repo/drill/node_modules:Z \
+                 -w /repo/drill $(NODE_IMAGE)
+
+.PHONY: test fmt-check validate helm-lint helm-template history-scrubber answers-check tflint scan ministack ministack-down kind-up kind-down kind-status drill-install drill-test drill-build drill-typecheck drill-clean
 
 test: fmt-check validate helm-lint history-scrubber answers-check ## Static checks (terraform + chart + answers; helm via Podman)
 
@@ -67,3 +81,19 @@ kind-status: ## Is the kind sandbox up and Ready?
 
 kind-down: ## Delete the kind sandbox cluster and its kubeconfig
 	bash scripts/kind-sandbox.sh down
+
+drill-install: ## npm install for the drill workspaces (inside Podman)
+	$(NODE) npm install
+
+drill-typecheck: ## tsc --noEmit across the drill workspaces (inside Podman)
+	$(NODE) npm run typecheck
+
+drill-test: ## Unit tests for the drill workspaces (inside Podman)
+	$(NODE) npm test
+
+drill-build: ## Build the drill workspaces (inside Podman)
+	$(NODE) npm run build
+
+drill-clean: ## Drop the node_modules volume and the empty host mountpoint
+	-podman volume rm $(NODE_MODULES)
+	-rmdir drill/node_modules

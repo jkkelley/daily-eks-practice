@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    // Node 22 runs the TypeScript directly (type stripping), so a relative import
+    // must carry its .ts extension. rewriteRelativeImportExtensions is what lets the
+    // same source also compile to dist/ for the Phase 5 image: tsc rewrites .ts to .js
+    // on emit. Without it, allowImportingTsExtensions is a noEmit-only option (TS5096).
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "declaration": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}
