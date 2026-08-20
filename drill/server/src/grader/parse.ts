@@ -84,6 +84,42 @@ const VALUE_FLAGS = new Set([
   "--container",
 ]);
 
+/**
+ * The canonical verb labels a command answers to, most general first.
+ *
+ * An accept rule in scenarios/answers/*.toml carries a `verb` and nothing that says
+ * which tool it belongs to, so a rule for a non-kubectl command has to qualify the
+ * verb itself: scenario 03 writes `verb = "git-revert"` for the GitOps rollback and
+ * `verb = "curl-loop"` for the request stream. kubectl is the unqualified default,
+ * because that is what a drill task is about unless it says otherwise.
+ *
+ * This is the join between how a human writes an answer file and how a parser sees a
+ * command line. Without it a rule can name a verb the parser will never produce, and
+ * the task is simply ungradeable - which is exactly what scenario 03 tasks 4 and 5 were.
+ */
+export function commandVerbs(cmd: ParsedCommand): string[] {
+  if (!cmd.verb) return [];
+  const verbs = [cmd.verb];
+  if (cmd.tool === "shell") {
+    const body = loopBodyTool(cmd);
+    if (body) verbs.push(`${body}-loop`);
+  } else if (cmd.tool && cmd.tool !== "kubectl") {
+    verbs.push(`${cmd.tool}-${cmd.verb}`);
+  }
+  return verbs;
+}
+
+/** The command a loop actually runs: the first word after `do`. */
+function loopBodyTool(cmd: ParsedCommand): string | undefined {
+  const words = expandAliases(cmd.raw).trim().split(/\s+/);
+  const doAt = words.indexOf("do");
+  if (doAt < 0) return undefined;
+  const body = words[doAt + 1];
+  return body && !body.startsWith("-")
+    ? body.replace(/[;&|]+$/, "")
+    : undefined;
+}
+
 export function normaliseResource(word: string): string {
   return RESOURCE_ALIASES[word.toLowerCase()] ?? word.toLowerCase();
 }

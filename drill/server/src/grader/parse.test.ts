@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseCommand, normaliseResource } from "./parse.ts";
+import { parseCommand, normaliseResource, commandVerbs } from "./parse.ts";
 
 test("flag order does not change the parse", () => {
   const a = parseCommand("kubectl get deploy -n practice-app");
@@ -102,4 +102,42 @@ test("empty input does not throw", () => {
   const p = parseCommand("");
   assert.equal(p.tool, "");
   assert.equal(p.verb, "");
+});
+
+test("a kubectl command's only verb label is its verb", () => {
+  assert.deepEqual(commandVerbs(parseCommand("kubectl get pods")), ["get"]);
+});
+
+test("a non-kubectl command also answers to a tool-qualified label", () => {
+  // scenarios/answers/03.toml task 5 writes its accept rule as verb = "git-revert",
+  // because an accept rule has no `tool` key to qualify a bare "revert" with.
+  assert.deepEqual(commandVerbs(parseCommand("git revert abc123")), [
+    "revert",
+    "git-revert",
+  ]);
+});
+
+test("a loop answers to <body>-loop, which is how 03 task 4 is written", () => {
+  const verbs = commandVerbs(
+    parseCommand(
+      "while true; do curl -so /dev/null localhost:8081; sleep .3; done",
+    ),
+  );
+  assert.deepEqual(verbs, ["while", "curl-loop"]);
+});
+
+test("a for loop over curl is the same label as a while loop over curl", () => {
+  assert.ok(
+    commandVerbs(
+      parseCommand("for i in $(seq 1 100); do curl localhost:8081; done"),
+    ).includes("curl-loop"),
+  );
+});
+
+test("a loop with no recognisable body gets no loop label", () => {
+  assert.deepEqual(commandVerbs(parseCommand("while true; done")), ["while"]);
+});
+
+test("empty input has no verb labels", () => {
+  assert.deepEqual(commandVerbs(parseCommand("")), []);
 });
