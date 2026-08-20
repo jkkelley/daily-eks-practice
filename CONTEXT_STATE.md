@@ -7,8 +7,8 @@
 
 | Field        | Value                                                                              |
 | ------------ | ---------------------------------------------------------------------------------- |
-| last_updated | 2026-08-20 18:40 UTC                                                               |
-| updated_by   | Phase 3 close-out (WO-20260819-98da)                                               |
+| last_updated | 2026-08-21 00:20 UTC                                                               |
+| updated_by   | Phase 3 close-out + the drill-loop alignment                                               |
 | project      | daily-eks-practice                                                                 |
 | repo         | see `git remote -v` - the owner string is PII per `CLAUDE.md` and is not committed |
 
@@ -53,6 +53,7 @@
 | 1        | Execute `WO-20260819-1fea - Phase 4: Terraform - the ALB, the shared IngressGroup, the source-IP SG` | ready   | The natural next. Two of its three config values (`drill_ingress_group_name`, `drill_allowed_cidrs`) are already threaded to `modules/platform` by Phase 3 - Task 4.1 only consumes them |
 | 2        | Execute `WO-20260819-ca7c - Phase 5: the mothership GUI, its container image, and the first visual`  | ready   | Also startable, and it is the **first visual**. Under-linked though - see the graph mismatch below, it cannot finish without Phase 4                                                     |
 | 3        | Port scenarios 01-02 and 04-12 to the drill format                                                   | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                                                                                 |
+| 4        | Apply the 2026-08-21 drill-loop decisions to shipped code                                            | ready   | Four small changes, none of them a redesign - see "What the drill-loop alignment changes" below. No ticket needs shelving                                                              |
 
 **The epic is cut.** `WO-20260819-f5c9 - Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill` and its eight children, one child per plan phase, in `work-orders/`.
 Phase 0 (`WO-20260819-844f`) is **done and archived**, shipped in PR #11.
@@ -92,6 +93,53 @@ Nothing is in progress. Phases 0, 1, 2 and 3 are the only implementation code on
 - `tests/cluster-git-argo.sh` + `make -f Makefile.test cluster-git-test` - 13 assertions on kind, $0. It extracts the manifests from the ministack plan rather than restating them, so it cannot drift from the Terraform. **Run `ministack` first.**
 - `make -f Makefile.test script-tests` is new and is now part of `test`. Before it, nothing ran `tests/test_*.py` outside `answers-check`.
 
+**What the drill-loop alignment changes.** Nothing was invalidated and no ticket is shelved. Four additive changes:
+
+1. **Phase 3's own files** need `timeout.reconciliation: 10s` in the Argo Helm values in `terraform/modules/platform/main.tf`, and `syncPolicy.automated` in `scripts/gen-argocd-app.py`, which currently emits manual sync. Small, and it is Phase 3's own surface.
+2. **The answers schema gains an `[argo]` block** (`automated`, `self_heal`). That touches shipped Phase 1 and Phase 2 code: `scripts/answers.py`, `drill/server/src/grader/answers.ts`, and the `tests/fixtures/answers-invalid/` contract that pins the two validators together. Phase 1 built exactly this machinery, so it is a use of it rather than new work.
+3. **Phase 5 gains an acceptance criterion**: the workspace PVC is populated by `git clone` from cluster git, never by copying files. This is the one place the "cannot reach the user's GitHub" guarantee can leak.
+4. **Phase 5 or 6 applies the per-scenario `self_heal`** by patching the Application when a scenario starts. Invisible to the learner.
+
+The plan document contradicts several of these and needs amending: its architecture paragraph, Task 3.3's manual-sync comment, and wherever the workspace PVC gets populated.
+
+## The drill loop
+
+Settled with the user 2026-08-21. Everything downstream depends on this, so it is stated once, here.
+
+**The browser is the only interface.** The user reaches one frontend pod through the ALB and never leaves it. Their own terminal is not part of the drill.
+
+```
+  USER'S BROWSER
+        |  one ALB, source-IP restricted
+        v
+  drill-gui pod            ns: practice-drill
+    terminal (real PTY, tmux) | IDE (Monaco) | answers + hints | Argo + Grafana proxied
+        |                          |
+        |  git commit && git push  |  edits values.yaml
+        |                          v
+        |                    workspace PVC  - a CLONE of cluster git,
+        |                                     so origin IS cluster git
+        v
+  git-server               ns: git        <- the "real" git the user sees
+    git daemon :9418, PVC /repos/repo.git
+        |
+        |  Argo polls every 10s
+        v
+  Argo CD                  ns: argocd
+    Application: automated sync; selfHeal per-scenario
+        |
+        |  syncs
+        v
+  practice-app             ns: practice-app
+    new image tag rolls out - the user watches it in the same browser
+```
+
+**What is real and what is simulated.** Real git, real push, real Argo clone and sync. The only simulated thing is *whose* repo the remote is. A drill push must never land on the user's actual GitHub account, and it cannot, because the workspace was cloned from cluster git.
+
+**The laptop's role is bring-up only**: `terraform apply` and one `make git-seed` to put the code in the cluster. After that the loop above is closed inside the cluster.
+
+**The learner never meets the plumbing.** git identity, `safe.directory`, `origin`, the absence of any GitHub credential in the pod - all pre-set. They see the scenario and the env, nothing else.
+
 ## Decisions Made
 
 | Date       | Decision                                                                                                 | Reason                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -120,6 +168,14 @@ Nothing is in progress. Phases 0, 1, 2 and 3 are the only implementation code on
 | 2026-08-20 | The git server image is `docker.io/buildpack-deps:bookworm-scm`, not `alpine/git` or `bitnami/git`       | `git-daemon` is a separate binary from `git` and `alpine/git` does not ship it. `bitnami/git` has it but publishes **only** a `latest` tag, so nothing is pinnable. `buildpack-deps:*-scm` is Debian's full git in an official image with real tags. It costs 337 MB, pulled once, which is the right trade for the core of the drill                                                                                     |
 | 2026-08-20 | Anonymous push is enabled on cluster git (`--enable=receive-pack`)                                       | Scenario 03's own model answer is `git revert <commit> && git push`, so a read-only server would make the curriculum unpassable. The exposure is bounded: the Service is ClusterIP with no Ingress in front of it, and it holds a copy of a repo that is already public                                                                                                                                                   |
 | 2026-08-20 | Every container in the git pod runs as uid 1001, including the init container                            | git refuses to serve a repo whose owner uid differs from the running uid - `fatal: detected dubious ownership`. A root-created repo served by a non-root daemon fails both read and write. Matching uid + fsGroup means the question never arises, which is better than papering over it with `safe.directory`                                                                                                            |
+| 2026-08-21 | **The drill loop is closed inside the cluster. The browser is the only interface.** | The user reaches one frontend pod over the ALB and does everything there: terminal, IDE, answers panel, Argo and Grafana proxied through it. They edit an image tag in that UI, commit and push there, Argo sees it and rolls the change. Their laptop terminal is not in the loop at all |
+| 2026-08-21 | `make git-seed` is **bootstrap, not part of the drill loop**                        | It runs once at env bring-up to put the local repo into the cluster. After that the laptop is out of the picture. Seeding from the laptop is wanted and stays; the confusion was treating it as a drill-time step |
+| 2026-08-21 | **"Simulate git" means the remote is a sandbox, the mechanics are real**            | Real `git commit`, real `git push`, real Argo clone and sync. The only unreal thing is *whose* repo it is. A drill push must never land on the user's actual GitHub account. This is the whole point of cluster git and supersedes any reading of "simulated" as "faked" |
+| 2026-08-21 | The workspace PVC is populated by **`git clone` from cluster git**, never by copying files | A copied working tree carries `.git/config` with `origin = github.com/<user>/...`, and scenario 03's own model answer is `git revert && git push`. Cloning makes "cannot reach the user's GitHub" structural rather than a rule somebody has to remember. This is the single place the guarantee can leak |
+| 2026-08-21 | `timeout.reconciliation: 10s` in the Argo Helm values                               | Default is 180s, and a drill where you push and wait three minutes is a bad drill. Cost is nil: one app, an in-cluster git server two hops away, and manifests cached by commit SHA. The usual warnings about low intervals are about hundreds of apps hitting github.com rate limits |
+| 2026-08-21 | Argo `automated` sync is **global**; `selfHeal` is **per-scenario, default off**    | Polling controls detection, `syncPolicy` controls action - separate switches. `selfHeal` reverts drift on anything the Application manages, so it would stomp any scenario where an imperative `kubectl` change is the exercise. Off by default so a new scenario cannot be silently sabotaged by a setting it never asked about |
+| 2026-08-21 | Scenario 03 sets `self_heal = true` deliberately                                    | Its task 3 asks for a rollback two ways and asks when the imperative one bites. With selfHeal on, `rollout undo` gets yanked back within ~10s and the trap springs in front of the learner. 03 has no task needing an imperative change to survive - the `rollout undo` is meant to be defeated. `03.toml` already documents both modes, so this is a teaching choice, not a correctness fix |
+| 2026-08-21 | **The learner sees the scenario and the env, nothing else**                          | Plumbing gotchas are solved invisibly: git identity, `safe.directory`, `origin`, and the absence of any GitHub credential in the pod are all pre-set. This is a design permission, not a shortcut - it is what lets the env behave like a real one without the learner meeting our scaffolding |
 
 ## Lessons Learned
 
