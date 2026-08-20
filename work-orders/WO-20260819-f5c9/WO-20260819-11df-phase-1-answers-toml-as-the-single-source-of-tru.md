@@ -4,7 +4,7 @@
   "slug": "phase-1-answers-toml-as-the-single-source-of-tru",
   "title": "Phase 1: answers TOML as the single source of truth",
   "type": "feature",
-  "status": "in-review",
+  "status": "done",
   "priority": "p1",
   "created": "2026-08-19",
   "updated": "2026-08-20",
