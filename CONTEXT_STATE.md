@@ -7,8 +7,8 @@
 
 | Field        | Value                                                                              |
 | ------------ | ---------------------------------------------------------------------------------- |
-| last_updated | 2026-08-20 02:05 UTC                                                               |
-| updated_by   | WO-20260819-844f close-out                                                         |
+| last_updated | 2026-08-20 02:35 UTC                                                               |
+| updated_by   | Phase 1 hydration prompt refresh                                                   |
 | project      | daily-eks-practice                                                                 |
 | repo         | see `git remote -v` - the owner string is PII per `CLAUDE.md` and is not committed |
 
@@ -45,10 +45,11 @@
 
 ## Active Tasks
 
-| Priority | Task                                                                             | Status  | Next Action                                                                                                    |
-| -------- | -------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------- |
-| 1        | Execute `WO-20260819-11df - Phase 1: answers TOML as the single source of truth` | ready   | The only startable ticket. `work-order.sh start --id WO-20260819-11df`, then follow plan Task 1.1 step by step |
-| 2        | Port scenarios 01-02 and 04-12 to the drill format                               | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                       |
+| Priority | Task                                                                             | Status  | Next Action                                                                                                        |
+| -------- | -------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------ |
+| 1        | Execute `WO-20260819-11df - Phase 1: answers TOML as the single source of truth` | ready   | **The chosen route.** `work-order.sh start --id WO-20260819-11df`, then follow plan Tasks 1.1 and 1.2 step by step |
+| 2        | Execute `WO-20260819-98da - Phase 3: the in-cluster git server Argo CD reads`    | ready   | Also startable, unblocked when Phase 0 closed. Independent chain, so it can run in parallel or after Phase 1       |
+| 3        | Port scenarios 01-02 and 04-12 to the drill format                               | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                           |
 
 **The epic is cut.** `WO-20260819-f5c9 - Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill` and its eight children, one child per plan phase, in `work-orders/`.
 Phase 0 (`WO-20260819-844f`) is **done and archived**, shipped in PR #11.
@@ -103,6 +104,16 @@ Not blockers, but scheduled friction to expect:
 | Argo may refuse to clone dumb-HTTP in-cluster git               | Phase 3, Task 3.2 Step 7 | Ranked five-rung fallback ladder is written into Task 3.2. Report to the user before Task 3.3 if the ladder is entered below rung 2 |
 | Tasks 5.4-5.5 and 6.1-6.5 are specified at interface level only | Phase 5 and 6            | Deliberate. Expand them after the user reviews the UI at Task 5.3, before those tickets are worked                                  |
 | Phase 7 costs money                                             | Phase 7                  | ~$6.50 per 30-hour cycle. **Requires explicit user approval before any step runs.** Phases 0-6 are $0                               |
+| The ticket graph and the plan's interfaces disagree, twice      | Phase 4 and Phase 5      | Found 2026-08-20 by reading both. Neither is fixed; decide when the ticket is picked up, do not discover it mid-work                |
+
+The two graph mismatches, stated plainly so nobody rediscovers them the hard way:
+
+- **Phase 5 is under-linked.** `WO-20260819-ca7c` declares `depends_on: [844f, a56c]`, but plan Task 5.5 consumes `drill_alb_security_group_id` and `drill_ingress_group_name` from Task 4.1 and `cluster_git_url` from Task 3.2.
+  This is probably deliberate, because Tasks 5.1-5.3 need nothing from Phase 4 and the ticket stops at 5.3 for the user's review anyway.
+  The consequence is that Phase 5 can **start** without Phase 4 and cannot **finish** without it, and `work-order.sh next` will not warn about that.
+- **Phase 4's declared dependency is not justified by the interfaces.** `WO-20260819-1fea` declares `depends_on: [98da]`, yet Tasks 4.1 and 4.2 consume nothing from Phase 3 - only `vpc_id`, `enable_alb_controller`, and their own two new config values.
+  The edge is most likely about sequencing the Terraform threading through `modules/stack` rather than a real data handoff.
+  If that is all it is, Phase 4 could run in parallel with Phase 3 rather than behind it.
 
 ## Hydration Prompt
 
@@ -112,22 +123,86 @@ Copy-paste this at the start of a new session:
 Read CONTEXT_STATE.md in this project root before doing anything else.
 Use the Infrastructure and Toolchain tables as ground truth.
 
-Phase 0 is done and archived. Current focus: the next ticket of the scenario
-drill sessions epic, WO-20260819-11df - Phase 1: answers TOML as the single
-source of truth. Read that ticket, then plan Task 1.1 in
-docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md, which is the
-authority for every step, along with its ## Global Constraints section, which
-binds every ticket in full. Start with
-`bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-11df`
-so the branch is created and stamped on the ticket. TDD: test first, watch it
-fail, say what it failed with, then implement. Never hand-edit a ticket file -
-the script owns that format and a markdown formatter hook will corrupt the JSON
-frontmatter if you do. Progress goes in with `work-order.sh note`.
+Work WO-20260819-11df - Phase 1: answers TOML as the single source of truth.
+It is `ready` and it is the route we picked. Read the ticket first:
+  work-orders/WO-20260819-f5c9/WO-20260819-11df-phase-1-answers-toml-as-the-single-source-of-tru.md
 
-The plan is the authority but it is not pre-verified. Phase 0 shipped two fixes
-to defects in its own plan text that were only visible on execution. If a step
-does not survive being run, fix it, flag the deviation, and record it as a note.
+Then read Task 1.1 (plan lines 369-906) and Task 1.2 (plan lines 907-1283) of
+docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md. The plan is the
+authority for every step; the ticket is the contract. Read the plan's
+## Global Constraints section too - it binds this ticket in full and is
+deliberately not restated in it.
 
-Do not suggest IP addresses, tool versions, or architecture patterns
-that contradict CONTEXT_STATE.md without flagging the conflict first.
+Start with:
+  bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-11df
+That creates the branch and stamps it onto the ticket. Do not create the branch
+by hand. The work-order skill is vendored into this repo as of Phase 0, so that
+path resolves - do not go looking in ~/dotfiles for it.
+
+This ticket is two tasks, seventeen steps, strict TDD throughout.
+
+Task 1.1 - the schema and the loader, 8 steps:
+  1  write tests/test_answers.py, failing
+  2  run it, watch it fail, and say what it failed with
+  3  write scenarios/answers/03.toml
+  4  write scripts/answers.py - load(), available(), AnswersError, the validator
+  5  run the test, watch it pass
+  6  create the shared invalid-TOML fixture set
+  7  run it
+  8  commit
+
+Task 1.2 - the generator, 9 steps:
+  1  write tests/test_gen_answers.py, failing
+  2  run it, watch it fail, and say what it failed with
+  3  write scripts/gen-answers.py
+  4  run the test, watch it pass
+  5  regenerate and inspect the diff BY HAND
+  6  write the file and verify serve-answers still scopes
+  7  Makefile answers-gen target, Makefile.test answers-check in `test`
+  8  run the full static suite
+  9  commit
+
+Do not skip either step 2. A test that was never seen failing proves nothing.
+
+Ground rules that bite on this ticket specifically:
+- Byte-identity IS the proof. Passthrough mode must reproduce the committed
+  PRACTICE_ANSWERS.html byte for byte, and mixed mode must leave all eleven
+  non-03 blocks byte-identical. If a diff appears in a block you did not mean
+  to touch, that is the bug, not the baseline. Do not edit a hand-written
+  answer block to make a test pass.
+- Python is stdlib only. tomllib, python3 3.12.3, no pip, no test runner. The
+  tests are plain scripts with a main() returning an exit code, matching
+  tests/scrub-git-identity.sh. This repo does not gain a test dependency here.
+- The invalid-TOML fixtures are a CONTRACT with Phase 2 (WO-20260819-a56c), not
+  local scaffolding. AC-H4 requires the validated shape to be documented where
+  Phase 2 can implement against it: the three grader kinds - command, file,
+  prose - and the keys each one carries. A TypeScript validator will later be
+  held to these same files.
+- Grading is NOT in scope. It is Phase 2 and it lives in TypeScript.
+- Do not change the rendered look of PRACTICE_ANSWERS.html.
+- Do not port scenarios other than 03.
+- Do not pre-solve scenarios in committed defaults.
+- Zero AWS calls. $0. Nothing here needs a cluster at all.
+- Plain dashes, never em dashes. One full sentence per line in long Markdown.
+- Never hand-edit a ticket file. work-order.sh owns that format, and a markdown
+  formatter hook will corrupt the JSON frontmatter if you do. Progress goes in
+  with `work-order.sh note --id ... --text "..."`.
+
+The plan is authoritative but it is NOT pre-verified. Phase 0 shipped two fixes
+to defects in its own plan text, and both were invisible on reading - they only
+appeared on execution. If a step does not survive being run, fix it, tell the
+user plainly that you deviated and why, and record it with `work-order.sh note`.
+
+When the work is done: evidence each acceptance criterion with
+`work-order.sh evidence --id WO-20260819-11df --index N --observed "..."`.
+`done` refuses while any of the four is unobserved, and that refusal is the gate
+working - observe the thing, never tick it. There are four criteria here, not
+five.
+
+Definition of done, from CLAUDE.md: `make -f Makefile.test test` passes, and if a
+scenario changed then the card, scenario_testing/check.sh and
+PRACTICE_ANSWERS.html all agree.
+
+Do not suggest IP addresses, tool versions, or architecture patterns that
+contradict CONTEXT_STATE.md without flagging the conflict first.
 ```
