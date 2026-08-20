@@ -14,7 +14,7 @@ HELM_IMAGE := docker.io/alpine/helm:latest
 HELM       := podman run --rm -v $(CURDIR)/helm:/apps:Z -w /apps $(HELM_IMAGE)
 
 .DEFAULT_GOAL := test
-.PHONY: test fmt-check validate helm-lint helm-template history-scrubber tflint scan ministack ministack-down
+.PHONY: test fmt-check validate helm-lint helm-template history-scrubber tflint scan ministack ministack-down kind-up kind-down kind-status
 
 test: fmt-check validate helm-lint history-scrubber ## Static checks (terraform + chart; helm via Podman)
 
@@ -53,3 +53,12 @@ ministack: ## Full terraform plan against a local ministack (Podman) mock AWS
 
 ministack-down: ## Force-stop any leftover ministack containers
 	-podman ps -a --filter name=ministack_ -q | xargs -r podman rm -f
+
+kind-up: ## Create the throwaway kind sandbox cluster ($0, no AWS)
+	bash scripts/kind-sandbox.sh up
+
+kind-status: ## Is the kind sandbox up and Ready?
+	bash scripts/kind-sandbox.sh status
+
+kind-down: ## Delete the kind sandbox cluster and its kubeconfig
+	bash scripts/kind-sandbox.sh down

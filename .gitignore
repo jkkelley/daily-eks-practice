@@ -49,3 +49,6 @@ argocd/generated/
 
 # ---- repo-local kubeconfig (make kubeconfig) ----
 .kubeconfig-daily-eks-practice
+
+# ---- kind sandbox kubeconfig (make -f Makefile.test kind-up) ----
+.kubeconfig-kind-sandbox
