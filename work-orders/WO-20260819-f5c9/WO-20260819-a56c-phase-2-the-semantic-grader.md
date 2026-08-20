@@ -4,14 +4,14 @@
   "slug": "phase-2-the-semantic-grader",
   "title": "Phase 2: the semantic grader",
   "type": "feature",
-  "status": "in-progress",
+  "status": "done",
   "priority": "p1",
   "created": "2026-08-19",
   "updated": "2026-08-20",
   "created_at": "2026-08-19T19:31:40-05:00",
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-2-the-semantic-grader",
-  "pr": null,
+  "pr": 16,
   "merge_sha": null,
   "closed": null,
   "approval": {
@@ -87,6 +87,7 @@ _none_
 
 _Newest first. Appended only by `work-order note` - never by hand._
 
+- `2026-08-20` Reversed the earlier decision to defer 'uncommitted' and 'only-imperative' to Phase 5, on the user's call: work that is needed later gets committed now with the reason in the history, not left for the next agent. Both now fire. Added GradeContext, an optional third argument to gradeCommand and gradeFile carrying what the caller can look up and the grader cannot - 'committed' is the file as cluster git has it, 'accepted' is this session's earlier passes for the task. Every field optional, absent means 'not known' rather than 'false', so no existing call site changes behaviour. The graders are still pure functions of their arguments: the caller looks up, the grader decides. 'only-imperative' is the first hint to ride on a PASSING verdict, since kubectl rollout undo is genuinely the right rollback and the nudge is that Argo is about to undo it; Verdict.hint in @drill/shared now documents that a hint on a pass is a nudge and must render as a pass, because Phase 5 consumes that type unchanged. Also pinned the general rule: scenario-03.test.ts asserts every hint key authored in 03.toml has a trigger that fires it, so a hint added to the curriculum and left unwired is a red test rather than a discovery two phases later. 58 tests, 58 pass; typecheck, build and the static suite all clean.
 - `2026-08-20` Definition of done, both suites run to completion on this branch. 'make -f Makefile.test test' exits 0 - terraform fmt and validate, helm lint in Podman, the history scrubber, and answers-check including gen-answers --check, tests/test_answers.py 21 passed and tests/test_gen_answers.py 12 passed. 'make -f Makefile.test drill-install drill-test' exits 0 with 49 tests, 49 pass, 0 fail. drill-typecheck and drill-build are clean too, from a tree with no dist and no node_modules. No scenario card, no check.sh outcome check and no PRACTICE_ANSWERS.html was touched, so the card/check/answers agreement is unchanged and answers-check proves it. helm/practice-app/values.yaml is still 1.27-alpine, and there is now a test that fails if anybody pre-solves it: 'ok 48 - 03..s file task is not pre-solved in the committed defaults'. Zero AWS calls, no cluster, nothing billed.
 - `2026-08-20` One more Task 2.1 defect, found while wiring Task 2.4's imports. With the plan's tsconfigs, 'make -f Makefile.test drill-typecheck' fails on a fresh clone: server's 'tsc --noEmit' resolves @drill/shared through the package's types field to shared/dist/index.d.ts, which does not exist until something builds it, and dist/ is git-ignored. Observed TS2307 'Cannot find module @drill/shared or its corresponding type declarations' on the first run after deleting dist. Pointing types at src instead just moves the error to TS6305, because the project reference redirects source back to the unbuilt output. Fixed in drill/package.json: the root typecheck script builds @drill/shared first, then typechecks every workspace. Verified by deleting both dist directories and both tsbuildinfo files and running drill-typecheck clean. Worth knowing for Phase 5, which adds a third workspace against the same reference.
 - `2026-08-20` Recorded so Phase 5 does not treat it as a bug: two of the ten hint keys plan Task 2.4 lists cannot fire from this grader, by construction rather than by omission. 'uncommitted' (03 task 2) means the file is correct but was never committed, which needs the workspace's git state. 'only-imperative' (03 task 5) means the submission PASSED and was the imperative half of a two-part answer, which needs the session's earlier attempts. A grader that is a pure function of one submission has neither. Both hints stay authored in the TOML and are documented at hintFor() in drill/server/src/grader/index.ts, waiting for a caller that can supply the context - Phase 5's server or Phase 6's watcher. The other eight all fire and are tested.
