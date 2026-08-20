@@ -187,6 +187,63 @@ test("grade() dispatches on the grader kind", () => {
   );
 });
 
+/**
+ * AC-H1 and AC-H2 on WO-20260819-a56c, pinned as tests rather than as a one-off
+ * observation. The whole argument for a semantic grader is that these hold: a drill
+ * that marks one of an equivalent pair wrong is teaching typing, not Kubernetes.
+ */
+test("AC-H1: the alias form and the spelled-out form get the same verdict", () => {
+  const task: AnswerTask = {
+    id: "h1",
+    prompt: "list the pods",
+    grader: "command",
+    accept: [{ verb: "get", resource: "pod", namespace: "x" }],
+  };
+  const short = gradeCommand(task, "k get po -n x");
+  const long = gradeCommand(task, "kubectl get pods --namespace x");
+  assert.deepEqual(short, long);
+  assert.equal(short.passed, true);
+});
+
+test("AC-H2: flag order and short-or-long form do not change the verdict", () => {
+  const task: AnswerTask = {
+    id: "h2",
+    prompt: "rollout history",
+    grader: "command",
+    accept: [
+      {
+        verb: "rollout-history",
+        resource: "deployment",
+        namespace: "practice-app",
+        name: "practice-app-frontend",
+      },
+    ],
+  };
+  const forms = [
+    "kubectl rollout history deploy/practice-app-frontend -n practice-app",
+    "kubectl -n practice-app rollout history deploy/practice-app-frontend",
+    "kubectl rollout history -n practice-app deploy/practice-app-frontend",
+    "kubectl rollout history deployment/practice-app-frontend --namespace practice-app",
+    "kubectl rollout history deployment practice-app-frontend --namespace=practice-app",
+  ];
+  const verdicts = forms.map((f) => gradeCommand(task, f));
+  for (const [i, v] of verdicts.entries()) {
+    assert.equal(v.passed, true, `${forms[i]} -> ${v.message}`);
+  }
+
+  // The same equivalence has to hold when the answer is wrong, or a near miss could
+  // still be graded by spelling: every one of these is the same wrong answer.
+  const wrong = [
+    "kubectl rollout history deploy/practice-app-frontend",
+    "kubectl rollout history -o wide deploy/practice-app-frontend",
+    "kubectl rollout history deployment practice-app-frontend",
+  ].map((f) => gradeCommand(task, f));
+  for (const v of wrong) {
+    assert.deepEqual(v, wrong[0]);
+    assert.equal(v.passed, false);
+  }
+});
+
 test("a verdict always carries the task id", () => {
   for (const v of [
     gradeCommand(rolloutTask, "nonsense"),
