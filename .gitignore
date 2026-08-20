@@ -52,3 +52,9 @@ argocd/generated/
 
 # ---- kind sandbox kubeconfig (make -f Makefile.test kind-up) ----
 .kubeconfig-kind-sandbox
+
+# ---- drill GUI (node) ----
+drill/**/node_modules/
+drill/**/dist/
+drill/**/.vite/
+drill/**/*.tsbuildinfo
