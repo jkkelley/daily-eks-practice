@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { loadAnswers, type AnswerTask } from "./answers.ts";
 import { gradeCommand, gradeProse, gradeFile } from "./index.ts";
+import type { Verdict } from "@drill/shared";
 
 const ANSWERS_DIR = "../../scenarios/answers";
 const REPO_ROOT = "../..";
@@ -77,6 +78,62 @@ test("03's file task is not pre-solved in the committed defaults", async () => {
     committed.replace("1.27-alpine", "1.28-alpine"),
   );
   assert.equal(after.passed, true, after.message);
+});
+
+test("every hint 03 authors can actually be fired", async () => {
+  const set = await loadAnswers("03", ANSWERS_DIR);
+  const byId = new Map(set.tasks.map((t) => [t.id, t]));
+  const task = (id: string): AnswerTask => {
+    const t = byId.get(id);
+    assert.ok(t, `03 has a task ${id}`);
+    return t;
+  };
+
+  const values = await readFile(
+    `${REPO_ROOT}/helm/practice-app/values.yaml`,
+    "utf8",
+  );
+  const bumped = values.replace("1.27-alpine", "1.28-alpine");
+
+  // One trigger per authored hint key: the mistake a drilling human actually makes.
+  const triggers: Record<string, () => Verdict> = {
+    "missing-namespace": () =>
+      gradeCommand(
+        task("1"),
+        "kubectl rollout history deploy/practice-app-frontend",
+      ),
+    "wrong-resource": () =>
+      gradeCommand(
+        task("1"),
+        "kubectl -n practice-app rollout history pod/practice-app-frontend",
+      ),
+    unchanged: () => gradeFile(task("2"), values),
+    uncommitted: () => gradeFile(task("2"), bumped, { committed: values }),
+    "no-numbers": () =>
+      gradeProse(task("3"), "maxSurge and maxUnavailable control it"),
+    "no-loop": () => gradeCommand(task("4"), "curl localhost:8081"),
+    "only-imperative": () =>
+      gradeCommand(
+        task("5"),
+        "kubectl -n practice-app rollout undo deploy/practice-app-frontend",
+      ),
+    "no-signature": () => gradeProse(task("6"), "the pods never came up"),
+  };
+
+  const authored = new Set(
+    set.tasks.flatMap((t) => (t.hints ?? []).map((h) => h.when)),
+  );
+  assert.deepEqual(
+    [...authored].sort(),
+    Object.keys(triggers).sort(),
+    "a hint in 03.toml with no trigger here is either dead text or an ungraded misconception - neither is allowed to ship",
+  );
+
+  for (const [key, trigger] of Object.entries(triggers)) {
+    const v = trigger();
+    assert.equal(v.hint, key, `${key} did not fire: ${v.message}`);
+    assert.ok(v.message.length > 0);
+  }
 });
 
 test("03's authored hints fire on the mistakes they were written for", async () => {

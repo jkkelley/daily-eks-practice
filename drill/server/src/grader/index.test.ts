@@ -244,6 +244,113 @@ test("AC-H2: flag order and short-or-long form do not change the verdict", () =>
   }
 });
 
+/**
+ * The two hints that need more than the submission string.
+ *
+ * `uncommitted` needs the file as cluster git has it; `only-imperative` needs what
+ * this session has already got right. Both arrive as an explicit GradeContext, so
+ * the graders stay pure functions - the caller does the looking-up, the grader does
+ * the deciding.
+ */
+const bumpTask: AnswerTask = {
+  id: "2",
+  prompt: "bump the tag and deploy",
+  grader: "file",
+  path: "helm/practice-app/values.yaml",
+  key: "frontend.image.tag",
+  accept_pattern: "^1\\.28-alpine$",
+  hints: [
+    { when: "unchanged", text: "values.yaml still says 1.27-alpine." },
+    {
+      when: "uncommitted",
+      text: "The file is right but the change is not committed, so cluster git has not changed.",
+    },
+  ],
+};
+const OLD_TAG = "frontend:\n  image:\n    tag: 1.27-alpine\n";
+const NEW_TAG = "frontend:\n  image:\n    tag: 1.28-alpine\n";
+
+const rollbackTask: AnswerTask = {
+  id: "5",
+  prompt: "roll back two ways",
+  grader: "command",
+  accept: [
+    {
+      verb: "rollout-undo",
+      resource: "deployment",
+      namespace: "practice-app",
+      name: "practice-app-frontend",
+    },
+    { verb: "git-revert" },
+  ],
+  hints: [
+    {
+      when: "only-imperative",
+      text: "That is the fast way. Now do it the way that survives the next sync.",
+    },
+  ],
+};
+const UNDO =
+  "kubectl -n practice-app rollout undo deploy/practice-app-frontend";
+
+test("uncommitted fires when the file is right but cluster git has not moved", () => {
+  const v = gradeFile(bumpTask, NEW_TAG, { committed: OLD_TAG });
+  assert.equal(v.passed, false);
+  assert.equal(v.hint, "uncommitted");
+  assert.match(v.message, /not committed/);
+});
+
+test("the same edit passes once it is committed", () => {
+  const v = gradeFile(bumpTask, NEW_TAG, { committed: NEW_TAG });
+  assert.equal(v.passed, true);
+  assert.equal(v.hint, undefined);
+});
+
+test("an uncommitted WRONG file still gets unchanged, not uncommitted", () => {
+  // The commit state only matters once the edit itself is right, or the drill would
+  // tell you to commit a value it is about to reject.
+  const v = gradeFile(bumpTask, OLD_TAG, { committed: OLD_TAG });
+  assert.equal(v.hint, "unchanged");
+});
+
+test("with no git context the file grader keeps its old verdict", () => {
+  assert.equal(gradeFile(bumpTask, NEW_TAG).passed, true);
+});
+
+test("only-imperative nudges a pass that is only half the answer", () => {
+  const v = gradeCommand(rollbackTask, UNDO);
+  assert.equal(v.passed, true, "the imperative rollback IS correct");
+  assert.equal(v.hint, "only-imperative");
+  assert.match(v.message, /^Correct\./);
+  assert.match(v.message, /survives the next sync/);
+});
+
+test("the nudge stops once the other half is done", () => {
+  const v = gradeCommand(rollbackTask, UNDO, {
+    accepted: ["git revert abc123 && git push"],
+  });
+  assert.equal(v.passed, true);
+  assert.equal(v.hint, undefined);
+  assert.equal(v.message, "Correct.");
+});
+
+test("the git half on its own is never nudged", () => {
+  const v = gradeCommand(rollbackTask, "git revert abc123");
+  assert.equal(v.passed, true);
+  assert.equal(v.hint, undefined);
+});
+
+test("a task whose accept rules are mere spellings of each other never nudges", () => {
+  // rolloutTask accepts `rollout history` or `get`, which are two ways to see one
+  // thing, not two halves of one answer. Nudging there would be noise.
+  const v = gradeCommand(
+    rolloutTask,
+    "kubectl -n practice-app rollout history deploy/practice-app-frontend",
+  );
+  assert.equal(v.passed, true);
+  assert.equal(v.hint, undefined);
+});
+
 test("a verdict always carries the task id", () => {
   for (const v of [
     gradeCommand(rolloutTask, "nonsense"),

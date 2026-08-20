@@ -15,7 +15,14 @@ export interface Verdict {
   passed: boolean;
   /** Shown to the user. On failure this is the hint, keyed to the misconception. */
   message: string;
-  /** Which hint fired, if any. Useful for telling "wrong" from "wrong in a known way". */
+  /**
+   * Which hint fired, if any. Useful for telling "wrong" from "wrong in a known way".
+   *
+   * A hint on a `passed: true` verdict is a nudge, not a correction - the answer was
+   * right and was only part of what the task asked for, so the UI must still render
+   * it as a pass. Scenario 03 task 5's `only-imperative` is the case that exists
+   * today: rolling back with kubectl is correct, and Argo CD is about to undo it.
+   */
   hint?: string;
 }
 

@@ -64,6 +64,25 @@ An `[[tasks.accept]]` rule carries a `verb` and no `tool`, so a command answers 
 Write the qualified form in the answers file.
 `verb = "git-revert"` and `verb = "curl-loop"` are what scenario 03 uses, and a rule naming a verb no command can produce makes the task silently ungradeable.
 
+### Hints, and the two that need context
+
+A failure names the misconception: the grader classifies _how_ the answer was wrong and looks up the `[[tasks.hints]]` entry whose `when` matches.
+Eight keys need nothing but the submission - `missing-namespace`, `wrong-namespace`, `wrong-resource`, `wrong-name`, `no-loop`, `unchanged`, and whichever hint a prose task lists first.
+
+Two need a fact the submission cannot carry, and take it from the optional `GradeContext` third argument:
+
+| Key               | Needs                          | Supply                                                                      |
+| ----------------- | ------------------------------ | --------------------------------------------------------------------------- |
+| `uncommitted`     | the file as cluster git has it | `gradeFile(task, workspaceContent, { committed })`                          |
+| `only-imperative` | this session's earlier passes  | `gradeCommand(task, submitted, { accepted })`, from `SessionState.attempts` |
+
+Every field of `GradeContext` is optional and a missing one means "not known", never "false" - a grader must never punish a caller for context it could not get.
+Omit `committed` and commit state is simply not graded.
+
+`only-imperative` is the one hint that fires on a **correct** answer: `passed` stays `true` and the nudge rides along in `hint`, because `kubectl rollout undo` really is the right rollback and Argo CD really is about to put the bad version back.
+
+`scenario-03.test.ts` asserts that every hint key authored in `03.toml` has a trigger that fires it, so a hint cannot be added to the curriculum and left dead.
+
 ### The validator is one of two
 
 `scripts/answers.py::_validate()` and `server/src/grader/answers.ts::validate()` enforce the same rules on the same files, because Python renders the answers and TypeScript grades them.
