@@ -62,9 +62,13 @@ module "stack" {
   argocd_chart_version                = var.argocd_chart_version
   enable_monitoring                   = var.enable_monitoring
   kube_prometheus_stack_chart_version = var.kube_prometheus_stack_chart_version
+  enable_cluster_git                  = var.enable_cluster_git
 
   app_namespace      = var.app_namespace
   s3_service_account = var.s3_service_account
+
+  drill_ingress_group_name = var.drill_ingress_group_name
+  drill_allowed_cidrs      = var.drill_allowed_cidrs
 
   extra_tags = var.extra_tags
 }

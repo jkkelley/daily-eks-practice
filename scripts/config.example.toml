@@ -93,10 +93,28 @@ enable_argocd                = true  # Argo CD in-cluster, its own namespace (Gi
 argocd_chart_version         = ""    # "" = latest chart; generic default: "" (or pin)
 enable_monitoring            = true  # kube-prometheus-stack (Prometheus + Grafana)
 kube_prometheus_stack_chart_version = "" # "" = latest chart; generic default: "" (or pin)
+enable_cluster_git           = true  # in-cluster git server (ns "git") - the ONLY repo Argo CD reads; drill sessions need it
 
 # ---- practice app plumbing ----
 app_namespace      = "practice-app" # namespace terraform pre-creates (DB secret lands here)
 s3_service_account = "s3-explorer"  # IRSA-annotated service account for the S3 scenario
+
+# ---- drill platform (the in-cluster GUI: scenarios/answers, terminal, editor) ----
+# One shared ALB carries every ops UI (drill GUI, Argo CD, Grafana). Sharing the
+# group keeps cost flat as more UIs are added instead of one ALB per Ingress.
+drill_ingress_group_name = "daily-eks-practice-ops"  # any name; all ops Ingresses must match it
+# WHO CAN REACH THE DRILL GUI. This is an unauthenticated web terminal running as
+# cluster-admin, so leaving it open is not a mild misconfiguration - it is a remote
+# shell on your cluster.
+#
+# The single entry "auto" resolves to your current public /32 every time bootstrap.py
+# runs, so a DHCP lease change can never silently lock you out. Prefer it.
+# A literal CIDR still works and is what you want for a static IP or for CI, where
+# "your IP" is not a meaningful idea.
+#   drill_allowed_cidrs = ["auto"]              <- resolved at plan time
+#   drill_allowed_cidrs = ["203.0.113.10/32"]   <- pinned
+# Find yours with: curl -s https://checkip.amazonaws.com
+drill_allowed_cidrs = ["auto"]   # generic default: ["auto"]; NEVER ["0.0.0.0/0"]
 
 # ---- tags merged onto every resource (base tags are always applied) ----
 extra_tags = {}   # e.g. { owner = "you", cost-center = "123" }; generic default: {}

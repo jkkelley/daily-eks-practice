@@ -138,6 +138,10 @@ module "platform" {
   enable_monitoring                   = var.enable_monitoring
   kube_prometheus_stack_chart_version = var.kube_prometheus_stack_chart_version
 
+  enable_cluster_git       = var.enable_cluster_git
+  drill_ingress_group_name = var.drill_ingress_group_name
+  drill_allowed_cidrs      = var.drill_allowed_cidrs
+
   app_namespace = var.app_namespace
 
   enable_db_secret = var.enable_rds

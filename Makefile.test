@@ -28,9 +28,9 @@ NODE        := podman run --rm --userns=keep-id \
                  -v $(NODE_MODULES):/repo/drill/node_modules:Z \
                  -w /repo/drill $(NODE_IMAGE)
 
-.PHONY: test fmt-check validate helm-lint helm-template history-scrubber answers-check tflint scan ministack ministack-down kind-up kind-down kind-status drill-install drill-test drill-build drill-typecheck drill-clean
+.PHONY: test fmt-check validate helm-lint helm-template history-scrubber answers-check script-tests tflint scan ministack ministack-down kind-up kind-down kind-status drill-install drill-test drill-build drill-typecheck drill-clean
 
-test: fmt-check validate helm-lint history-scrubber answers-check ## Static checks (terraform + chart + answers; helm via Podman)
+test: fmt-check validate helm-lint history-scrubber answers-check script-tests ## Static checks (terraform + chart + answers + scripts; helm via Podman)
 
 fmt-check: ## terraform fmt -check
 	terraform -chdir=terraform fmt -recursive -check
@@ -58,6 +58,9 @@ answers-check: ## Fail if PRACTICE_ANSWERS.html is stale vs scenarios/answers/*.
 	python3 scripts/gen-answers.py --check
 	python3 tests/test_answers.py
 	python3 tests/test_gen_answers.py
+
+script-tests: ## Unit tests for the laptop-side scripts in scripts/ (offline, stdlib only)
+	python3 -m unittest tests.test_resolve_auto_cidrs
 
 tflint: ## Lint if tflint is installed
 	@command -v tflint >/dev/null 2>&1 && tflint --chdir=$(TFDIR) --recursive || echo "tflint not installed - skipping"
