@@ -1,0 +1,148 @@
+# Answers for scenario 03. This file is the SINGLE SOURCE OF TRUTH:
+#   - scripts/gen-answers.py renders it into PRACTICE_ANSWERS.html
+#   - the drill GUI grades submissions against it
+# Do not edit the 03 block in PRACTICE_ANSWERS.html by hand; it is generated.
+
+schema   = 1
+scenario = "03"
+title    = "Rolling update + rollback"
+time     = "~30 min"
+needs    = "cluster up, app deployed"
+ticket   = "Bump the frontend nginx to the next minor. Ship it with zero downtime, then practise the oh-no path: roll it back."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id      = "1"
+prompt  = "Using kubectl, find the frontend Deployment's current image tag and its rollout history (namespace practice-app, deployment practice-app-frontend)."
+grader  = "command"
+
+  [[tasks.accept]]
+  verb      = "rollout-history"
+  resource  = "deployment"
+  namespace = "practice-app"
+  name      = "practice-app-frontend"
+
+  [[tasks.accept]]
+  verb      = "get"
+  resource  = "deployment"
+  namespace = "practice-app"
+  name      = "practice-app-frontend"
+
+  [[tasks.hints]]
+  when = "missing-namespace"
+  text = "The app is not in the default namespace. Every command in this drill needs -n practice-app."
+
+  [[tasks.hints]]
+  when = "wrong-resource"
+  text = "You are looking at pods. Rollout history belongs to the Deployment that owns them, not to the pods."
+
+  [tasks.answer]
+  pre = [
+    "kubectl -n practice-app rollout history deploy/practice-app-frontend",
+    "kubectl -n practice-app get deploy practice-app-frontend -o jsonpath='{.spec.template.spec.containers[0].image}'",
+  ]
+  prose = "Rollout history is owned by the Deployment. A fresh install shows revision 1 only, which is why task 3 needs an actual change before there is anything to roll back to."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id             = "2"
+prompt         = "Bump the frontend image tag in helm/practice-app/values.yaml (1.27-alpine -> 1.28-alpine) and deploy."
+grader         = "file"
+path           = "helm/practice-app/values.yaml"
+key            = "frontend.image.tag"
+accept_pattern = "^1\\.28-alpine$"
+
+  [[tasks.hints]]
+  when = "unchanged"
+  text = "values.yaml still says 1.27-alpine. Edit it in the editor panel - autosave writes to the workspace, but Argo only sees it once you commit."
+
+  [[tasks.hints]]
+  when = "uncommitted"
+  text = "The file is right but the change is not committed, so cluster git has not changed and Argo has nothing to sync. Commit, then sync."
+
+  [tasks.answer]
+  pre = [
+    "# values.yaml: frontend.image.tag: 1.28-alpine",
+    "git add helm/practice-app/values.yaml && git commit -m 'bump frontend to 1.28-alpine'",
+  ]
+  prose = "Editing the file is not the deploy. Autosave puts it on disk, the commit publishes it to cluster git, and only then does Argo have something to converge on. That gap is the whole GitOps lesson."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id           = "3"
+prompt       = "Watch the rolling update live. What is the default surge/unavailable behaviour of a Deployment?"
+grader       = "prose"
+must_include = ["25", "maxSurge", "maxUnavailable"]
+
+  [[tasks.hints]]
+  when = "no-numbers"
+  text = "Name the actual defaults, not just the field names. kubectl explain deployment.spec.strategy.rollingUpdate has them."
+
+  [tasks.answer]
+  pre  = ["kubectl -n practice-app rollout status deploy/practice-app-frontend"]
+  prose = "RollingUpdate with 25% maxSurge and 25% maxUnavailable. With readiness probes set, requests should not fail during the roll."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id     = "4"
+prompt = "Curl the app in a loop during the rollout. Did any request fail?"
+grader = "command"
+
+  [[tasks.accept]]
+  verb = "curl-loop"
+
+  [[tasks.accept]]
+  verb      = "port-forward"
+  resource  = "service"
+  namespace = "practice-app"
+
+  [[tasks.hints]]
+  when = "no-loop"
+  text = "One curl proves nothing - the whole question is whether any request in a stream fails. Put it in a while loop."
+
+  [tasks.answer]
+  pre = [
+    "kubectl -n practice-app port-forward svc/practice-app-frontend 8081:80",
+    "while true; do curl -so /dev/null -w '%{http_code}\\n' localhost:8081; sleep .3; done",
+  ]
+  prose = "No failures, because readiness gates the new pods and maxUnavailable keeps enough old ones serving. A missing or wrong readiness probe is exactly what turns this into dropped requests, which is scenario 10's break/fix."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id     = "5"
+prompt = "Roll back two ways: kubectl rollout undo, and the GitOps way. When would the first bite you in a GitOps shop?"
+grader = "command"
+
+  [[tasks.accept]]
+  verb      = "rollout-undo"
+  resource  = "deployment"
+  namespace = "practice-app"
+  name      = "practice-app-frontend"
+
+  [[tasks.accept]]
+  verb = "git-revert"
+
+  [[tasks.hints]]
+  when = "only-imperative"
+  text = "That is the fast way. Now do it the way that survives the next sync - the cluster is not the source of truth here."
+
+  [tasks.answer]
+  pre = [
+    "kubectl -n practice-app rollout undo deploy/practice-app-frontend   # fast, imperative",
+    "git revert <commit> && git push                                     # the GitOps way",
+  ]
+  prose = "rollout undo in a GitOps shop is a trap: Argo CD sees drift and puts the bad version back, immediately with self-heal on and at the next sync without it. Git must be reverted for the rollback to stick."
+
+# ---------------------------------------------------------------------------
+[[tasks]]
+id             = "6"
+prompt         = "Bonus: set a bad tag (1.99-alpine), deploy, and watch what a stuck rollout looks like. Then fix it."
+grader         = "prose"
+must_include   = ["ImagePullBackOff"]
+
+  [[tasks.hints]]
+  when = "no-signature"
+  text = "Name the pod status you saw. That string is the signature you will pattern-match on for the rest of your career."
+
+  [tasks.answer]
+  prose = "With a bad tag you get ImagePullBackOff. The rollout waits forever on unready new pods while the old pods keep serving, which is maxUnavailable protecting you. Fix the tag or kubectl rollout undo."

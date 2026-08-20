@@ -1,0 +1,17 @@
+# BREAKS: every hint needs both 'when' and 'text'. This one has only 'when',
+# so the GUI would have a trigger with nothing to show.
+schema   = 1
+scenario = "99"
+title    = "fixture"
+time     = "x"
+needs    = "x"
+ticket   = "x"
+
+[[tasks]]
+id           = "1"
+prompt       = "p"
+grader       = "prose"
+must_include = ["a"]
+
+  [[tasks.hints]]
+  when = "no-numbers"
