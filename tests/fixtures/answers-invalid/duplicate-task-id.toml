@@ -1,0 +1,19 @@
+# BREAKS: two tasks share id = "1". Task ids must be unique within a file.
+schema   = 1
+scenario = "99"
+title    = "fixture"
+time     = "x"
+needs    = "x"
+ticket   = "x"
+
+[[tasks]]
+id           = "1"
+prompt       = "p"
+grader       = "prose"
+must_include = ["a"]
+
+[[tasks]]
+id           = "1"
+prompt       = "q"
+grader       = "prose"
+must_include = ["b"]

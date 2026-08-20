@@ -1,0 +1,7 @@
+# PRACTICE_ANSWERS.html is partly generated: the scenario blocks that have a file
+# in scenarios/answers/ are rendered by scripts/gen-answers.py, and the rest are
+# hand-written and passed through byte-for-byte. Prettier re-wraps the generated
+# block, which makes `python3 scripts/gen-answers.py --check` - and therefore
+# `make -f Makefile.test test` - fail until somebody runs `make answers-gen`.
+# The generator owns this file's formatting. Regenerate it, do not format it.
+PRACTICE_ANSWERS.html

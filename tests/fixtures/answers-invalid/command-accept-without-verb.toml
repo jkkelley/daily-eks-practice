@@ -1,0 +1,17 @@
+# BREAKS: the accept entry exists but carries no 'verb'. The verb is the only
+# required key in an accept table; resource/namespace/name/flags are optional.
+schema   = 1
+scenario = "99"
+title    = "fixture"
+time     = "x"
+needs    = "x"
+ticket   = "x"
+
+[[tasks]]
+id     = "1"
+prompt = "p"
+grader = "command"
+
+  [[tasks.accept]]
+  resource  = "deployment"
+  namespace = "practice-app"

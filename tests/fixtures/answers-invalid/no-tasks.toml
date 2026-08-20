@@ -1,0 +1,7 @@
+# BREAKS: a valid header with no [[tasks]] array at all.
+schema   = 1
+scenario = "99"
+title    = "fixture"
+time     = "x"
+needs    = "x"
+ticket   = "x"

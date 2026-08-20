@@ -1,0 +1,13 @@
+# BREAKS: schema must be 1. Everything else here is valid.
+schema   = 2
+scenario = "99"
+title    = "fixture"
+time     = "x"
+needs    = "x"
+ticket   = "x"
+
+[[tasks]]
+id           = "1"
+prompt       = "p"
+grader       = "prose"
+must_include = ["a"]

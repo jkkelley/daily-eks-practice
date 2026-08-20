@@ -1,0 +1,12 @@
+# BREAKS: a 'command' task needs a non-empty [[tasks.accept]] array.
+schema   = 1
+scenario = "99"
+title    = "fixture"
+time     = "x"
+needs    = "x"
+ticket   = "x"
+
+[[tasks]]
+id     = "1"
+prompt = "p"
+grader = "command"

@@ -195,32 +195,32 @@ kubectl run load --rm -it --restart=Never --image=busybox:1.36 -- \
       <summary>
         <h2 style="display: inline">03 - Rolling update + rollback</h2>
       </summary>
+      <h3>1. Using kubectl, find the frontend Deployment's current image tag and its rollout history (namespace practice-app, deployment practice-app-frontend).</h3>
       <pre>
 kubectl -n practice-app rollout history deploy/practice-app-frontend
-# bump values.yaml frontend.image.tag -> deploy, then:
-kubectl -n practice-app rollout status deploy/practice-app-frontend
+kubectl -n practice-app get deploy practice-app-frontend -o jsonpath='{.spec.template.spec.containers[0].image}'</pre>
+      <p>Rollout history is owned by the Deployment. A fresh install shows revision 1 only, which is why task 3 needs an actual change before there is anything to roll back to.</p>
+      <h3>2. Bump the frontend image tag in helm/practice-app/values.yaml (1.27-alpine -&gt; 1.28-alpine) and deploy.</h3>
+      <pre>
+# values.yaml: frontend.image.tag: 1.28-alpine
+git add helm/practice-app/values.yaml &amp;&amp; git commit -m 'bump frontend to 1.28-alpine'</pre>
+      <p>Editing the file is not the deploy. Autosave puts it on disk, the commit publishes it to cluster git, and only then does Argo have something to converge on. That gap is the whole GitOps lesson.</p>
+      <h3>3. Watch the rolling update live. What is the default surge/unavailable behaviour of a Deployment?</h3>
+      <pre>
+kubectl -n practice-app rollout status deploy/practice-app-frontend</pre>
+      <p>RollingUpdate with 25% maxSurge and 25% maxUnavailable. With readiness probes set, requests should not fail during the roll.</p>
+      <h3>4. Curl the app in a loop during the rollout. Did any request fail?</h3>
+      <pre>
+kubectl -n practice-app port-forward svc/practice-app-frontend 8081:80
 while true; do curl -so /dev/null -w '%{http_code}\n' localhost:8081; sleep .3; done</pre>
-      <p>
-        Default Deployment strategy: RollingUpdate with 25% maxSurge / 25%
-        maxUnavailable. With readiness probes set, requests should not fail
-        during the roll.
-      </p>
-      <h3>Rollback, both ways</h3>
+      <p>No failures, because readiness gates the new pods and maxUnavailable keeps enough old ones serving. A missing or wrong readiness probe is exactly what turns this into dropped requests, which is scenario 10's break/fix.</p>
+      <h3>5. Roll back two ways: kubectl rollout undo, and the GitOps way. When would the first bite you in a GitOps shop?</h3>
       <pre>
 kubectl -n practice-app rollout undo deploy/practice-app-frontend   # fast, imperative
-git revert &lt;commit&gt; && git push                                     # the GitOps way</pre>
-      <p>
-        <code>rollout undo</code> in a GitOps shop is a trap: Argo CD will see
-        drift and put the bad version back (especially with self-heal on). Git
-        must be reverted for the rollback to stick.
-      </p>
-      <h3>Stuck rollout</h3>
-      <p>
-        With a bad tag you get <code>ImagePullBackOff</code>; the rollout waits
-        forever on unready new pods while old pods keep serving (that is
-        maxUnavailable protecting you). <code>kubectl rollout undo</code> or fix
-        the tag.
-      </p>
+git revert &lt;commit&gt; &amp;&amp; git push                                     # the GitOps way</pre>
+      <p>rollout undo in a GitOps shop is a trap: Argo CD sees drift and puts the bad version back, immediately with self-heal on and at the next sync without it. Git must be reverted for the rollback to stick.</p>
+      <h3>6. Bonus: set a bad tag (1.99-alpine), deploy, and watch what a stuck rollout looks like. Then fix it.</h3>
+      <p>With a bad tag you get ImagePullBackOff. The rollout waits forever on unready new pods while the old pods keep serving, which is maxUnavailable protecting you. Fix the tag or kubectl rollout undo.</p>
     </details>
 
     <details>
