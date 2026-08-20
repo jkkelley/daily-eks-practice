@@ -22,7 +22,7 @@ Archived tickets drop out of it and into the table below.
 
 ```text
 WO-20260819-f5c9  ready       p1 Scenario drill sessions: make scenario N=03 converges an in...
-|-- WO-20260819-11df  in-progress p1 Phase 1: answers TOML as the single source of truth
+|-- WO-20260819-11df  in-review   p1 Phase 1: answers TOML as the single source of truth
 |-- WO-20260819-a56c  ready       p1 Phase 2: the semantic grader
 |-- WO-20260819-98da  ready       p1 Phase 3: Terraform - the in-cluster git server Argo CD reads
 |-- WO-20260819-1fea  ready       p1 Phase 4: Terraform - the shared ALB, the source-IP security...
@@ -36,7 +36,7 @@ WO-20260819-f5c9  ready       p1 Scenario drill sessions: make scenario N=03 con
 | ID | status | pri | type | parent | waiting on | title |
 |---|---|---|---|---|---|---|
 | `WO-20260819-0562` | ready | p2 | chore | WO-20260819-f5c9 | WO-20260819-1fea WO-20260819-7840 | [Phase 7: live verification on real EKS - APPROVAL GATED, about $6.50 per 30-hour cycle](WO-20260819-f5c9/WO-20260819-0562-phase-7-live-verification-on-real-eks-approval-g.md) |
-| `WO-20260819-11df` | in-progress | p1 | feature | WO-20260819-f5c9 | - | [Phase 1: answers TOML as the single source of truth](WO-20260819-f5c9/WO-20260819-11df-phase-1-answers-toml-as-the-single-source-of-tru.md) |
+| `WO-20260819-11df` | in-review | p1 | feature | WO-20260819-f5c9 | - | [Phase 1: answers TOML as the single source of truth](WO-20260819-f5c9/WO-20260819-11df-phase-1-answers-toml-as-the-single-source-of-tru.md) |
 | `WO-20260819-1fea` | ready | p1 | feature | WO-20260819-f5c9 | WO-20260819-98da | [Phase 4: Terraform - the shared ALB, the source-IP security group, and non-orphaning teardown](WO-20260819-f5c9/WO-20260819-1fea-phase-4-terraform-the-shared-alb-the-source-ip-s.md) |
 | `WO-20260819-7840` | ready | p1 | feature | WO-20260819-f5c9 | WO-20260819-98da WO-20260819-ca7c | [Phase 6: session lifecycle, the sync watcher, and the Makefile handover](WO-20260819-f5c9/WO-20260819-7840-phase-6-session-lifecycle-the-sync-watcher-and-t.md) |
 | `WO-20260819-98da` | ready | p1 | feature | WO-20260819-f5c9 | - | [Phase 3: Terraform - the in-cluster git server Argo CD reads](WO-20260819-f5c9/WO-20260819-98da-phase-3-terraform-the-in-cluster-git-server-argo.md) |
