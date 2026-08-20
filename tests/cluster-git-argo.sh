@@ -124,34 +124,32 @@ ADDRS="$(kubectl -n git get endpoints git-server -o jsonpath='{.subsets[*].addre
   bad "endpoints already populated before seeding: $ADDRS"
 
 echo ""
-echo "== 3. seed the bare repo by streaming a git bundle in =="
+echo "== 3. seed with the shipped seeder, scripts/git-seed.py =="
 POD="$(kubectl -n git get pod -l app=git-server -o jsonpath='{.items[0].metadata.name}')"
 [ -n "$POD" ] || {
   echo "ERROR: no git-server pod"
   exit 1
 }
-# `tee`, exec'd directly. Wrapping the receiver in `/bin/sh -c 'cat > file'` - which
-# is the obvious way to write it - silently truncates the stream: measured 443833
-# bytes in and 98662 out, with kubectl still exiting 0. The corruption only surfaces
-# later as "fatal: early EOF" from git. Do not reintroduce the shell wrapper.
-BUNDLE_BYTES="$(git -C "$ROOT" bundle create - --all 2>/dev/null | wc -c)"
-git -C "$ROOT" bundle create - --all 2>/dev/null |
-  kubectl -n git exec -i "$POD" -c "$SEED_CONTAINER" -- tee /tmp/seed.bundle >/dev/null &&
-  ok "bundle streamed into the pod" || bad "streaming the bundle failed"
-LANDED="$(kubectl -n git exec "$POD" -c "$SEED_CONTAINER" -- stat -c%s /tmp/seed.bundle 2>/dev/null)"
-[ "$LANDED" = "$BUNDLE_BYTES" ] && ok "all $BUNDLE_BYTES bytes arrived intact" ||
-  bad "bundle truncated in transit: sent $BUNDLE_BYTES, landed ${LANDED:-0}"
-
-kubectl -n git exec "$POD" -c "$SEED_CONTAINER" -- /bin/sh -c "
-  set -e
-  git -C $REPO_PATH fetch --force /tmp/seed.bundle 'refs/heads/*:refs/heads/*'
-  git -C $REPO_PATH symbolic-ref HEAD refs/heads/main
-  rm -f /tmp/seed.bundle
-  date -u +%Y-%m-%dT%H:%M:%SZ > $REPO_PATH/.seeded
-  echo 'seed: refs published'"
+# The CLUSTER_GIT_* overrides exist for exactly this: there is no terraform state in
+# the kind sandbox, so the seeder cannot read its usual outputs. Running the real
+# script rather than a copy of its steps is the point - the seeding path Argo depends
+# on gets exercised here, not just described.
+SEED_OUT="$(
+  CLUSTER_GIT_NS=git \
+    CLUSTER_GIT_DEPLOY=git-server \
+    CLUSTER_GIT_CONTAINER="$SEED_CONTAINER" \
+    CLUSTER_GIT_REPO_PATH="$REPO_PATH" \
+    python3 "$ROOT/scripts/git-seed.py" 2>&1
+)"
 SEED_RC=$?
-[ "$SEED_RC" -eq 0 ] && ok "the repo unbundled and .seeded was written" ||
-  bad "unbundling inside the pod failed (rc=$SEED_RC)"
+echo "$SEED_OUT" | sed 's/^/    /'
+[ "$SEED_RC" -eq 0 ] && ok "scripts/git-seed.py succeeded" ||
+  bad "scripts/git-seed.py failed (rc=$SEED_RC)"
+echo "$SEED_OUT" | grep -q "bytes arrived intact" &&
+  ok "the seeder verified the transfer byte-for-byte" ||
+  bad "the seeder did not verify the byte count"
+echo "$SEED_OUT" | grep -q "refs published" &&
+  ok "refs were published inside the pod" || bad "refs were not published"
 
 for _ in $(seq 1 20); do
   ADDRS="$(kubectl -n git get endpoints git-server -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)"
