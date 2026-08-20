@@ -162,8 +162,9 @@ path resolves - do not go looking in ~/dotfiles for it.
 
 This ticket is four tasks and it is strict TDD throughout, same as Phase 1: for
 every task, write the failing test, RUN it, say out loud what it failed with,
-then implement. A test that was never seen failing proves nothing. Phase 1 found
-two plan defects that way and both were invisible on reading.
+then implement. A test that was never seen failing proves nothing. Phase 1's
+worst plan defect was caught exactly that way, and only because the test was
+actually run - it was invisible on reading.
 
 What Phase 1 already built, which this ticket consumes rather than rebuilds:
 - scenarios/answers/03.toml is the single source of truth for scenario 03. Only
