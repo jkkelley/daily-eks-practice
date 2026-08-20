@@ -7,8 +7,8 @@
 
 | Field        | Value                                                                              |
 | ------------ | ---------------------------------------------------------------------------------- |
-| last_updated | 2026-08-20 01:40 UTC                                                               |
-| updated_by   | context-compaction skill                                                           |
+| last_updated | 2026-08-20 02:05 UTC                                                               |
+| updated_by   | WO-20260819-844f close-out                                                         |
 | project      | daily-eks-practice                                                                 |
 | repo         | see `git remote -v` - the owner string is PII per `CLAUDE.md` and is not committed |
 
@@ -35,7 +35,7 @@
 | Terraform          | IaC                | AWS `>= 6.0, < 7.0`, helm `>= 2.12, < 3.0`, kubectl (gavinbunney), random. **Every variable has NO `default =`**                           |
 | Argo CD            | GitOps             | Post-feature it reads **only** in-cluster git at `http://git-server.git.svc.cluster.local/repo.git`                                        |
 | Helm               | packaging          | `helm/practice-app` (nginx + PostgREST + postgres seed). **Not installed on the host** - runs in Podman via `docker.io/alpine/helm:latest` |
-| kind               | $0 cluster sandbox | `/usr/local/bin/kind`. Harness `scripts/kind-sandbox.sh` is Phase 0, not yet written                                                       |
+| kind               | $0 cluster sandbox | `/usr/local/bin/kind`, podman provider. Harness `scripts/kind-sandbox.sh` ships: `make -f Makefile.test kind-up/kind-status/kind-down`     |
 | Podman             | container sandbox  | 4.9.3. Runs node, helm, and the Vite preview. `npm install` never runs on the host                                                         |
 | ministack          | $0 Terraform proof | `make -f Makefile.test ministack`. Mocks AWS, **does not run pods** - cannot validate cluster behaviour                                    |
 | Prometheus/Grafana | observability      | kube-prometheus-stack, scenario 07                                                                                                         |
@@ -45,17 +45,20 @@
 
 ## Active Tasks
 
-| Priority | Task                                                                             | Status  | Next Action                                                                                                              |
-| -------- | -------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------ |
-| 1        | Execute `WO-20260819-844f - Phase 0: kind sandbox harness and its documentation` | ready   | `work-order.sh start --id WO-20260819-844f`, which creates and stamps the branch. Then follow plan Task 0.1 step by step |
-| 2        | Execute `WO-20260819-11df - Phase 1: answers TOML as the single source of truth` | ready   | The other startable ticket. Independent of Phase 0, so it can go first or in parallel                                    |
-| 3        | Port scenarios 01-02 and 04-12 to the drill format                               | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                 |
+| Priority | Task                                                                             | Status  | Next Action                                                                                                    |
+| -------- | -------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------- |
+| 1        | Execute `WO-20260819-11df - Phase 1: answers TOML as the single source of truth` | ready   | The only startable ticket. `work-order.sh start --id WO-20260819-11df`, then follow plan Task 1.1 step by step |
+| 2        | Port scenarios 01-02 and 04-12 to the drill format                               | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                       |
 
-**The epic is cut.** `WO-20260819-f5c9 - Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill` and its eight children are all `ready`, one child per plan phase, in `work-orders/`.
+**The epic is cut.** `WO-20260819-f5c9 - Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill` and its eight children, one child per plan phase, in `work-orders/`.
+Phase 0 (`WO-20260819-844f`) is **done and archived**, shipped in PR #11.
 Run `bash .claude/skills/work-order/scripts/work-order.sh next` for what is startable and `... tree` for the shape; `work-orders/INDEX.md` is the generated router.
 The epic depends on all eight children so it never appears as startable work itself.
 
-Nothing is in progress. No implementation code exists yet - everything on `main` is planning artifacts and tickets.
+The `work-order` skill is now **vendored into this repo** at `.claude/skills/work-order/`, a copy rather than a symlink, same as `container-sandbox`.
+Its source of truth is `~/dotfiles/claude/skills/work-order` at dotfiles commit `4c6b696`, and the copy will drift from it - there is no version field to detect that automatically.
+
+Nothing is in progress. Phase 0 is the only implementation code on `main`; everything else is planning artifacts and tickets.
 
 ## Decisions Made
 
@@ -72,6 +75,8 @@ Nothing is in progress. No implementation code exists yet - everything on `main`
 | 2026-08-19 | **Never create a personal access token.** Extend the grant `gh` already holds                            | A PAT is a second credential with its own expiry that must be stored, and every candidate here is bad: `config.toml` is serialised into Terraform state, a shell export lands in history, a dotfile is one `git add -A` from being committed                                          |
 | 2026-08-19 | Grader is TypeScript in the cluster; Python stays laptop-side CLI glue                                   | Grading runs per submission inside the Node process. Python would mean shipping a runtime in the image. `bootstrap.py` stays Python so `make up` needs only `python3`                                                                                                                 |
 | 2026-08-20 | The epic depends on all eight of its children                                                            | Without those edges the epic itself appears in `work-order.sh next` once approved, reading as startable work. Its only real job is to close after its children do                                                                                                                     |
+| 2026-08-20 | `kind create/delete cluster` is always called with `--kubeconfig`                                        | Without it kind merges the new context into the user's `~/.kube/config`, which this repo must never write. Verified as a live regression guard in `tests/kind-sandbox.sh`, which samples that file's mtime and fails if it moves                                                      |
+| 2026-08-20 | The `work-order` skill is vendored into the repo, copied not symlinked                                   | Both the epic and this file's hydration prompt reference `.claude/skills/work-order/scripts/work-order.sh`, and that path resolved to nothing for any clone. A symlink would point outside the repo and break the same way                                                            |
 
 ## Lessons Learned
 
@@ -81,6 +86,8 @@ Nothing is in progress. No implementation code exists yet - everything on `main`
 - 2026-08-19: Widening a container build context without a deny-by-default `.containerignore` would have baked `scripts/config.toml` into a **public** image. Use `*` plus explicit `!` allows, never an exclude list - an exclude list leaks the next secret file somebody adds.
 - 2026-08-19: `gh pr merge` returned repeated HTTP 502s and then `GraphQL: Merge already in progress` - a stale server-side merge lock from the failed request. It clears on its own; retry rather than forcing, and never assume a merge landed without checking `gh pr view --json state`.
 - 2026-08-19: `gh auth refresh` is interactive and blocks on a browser one-time code. An agent cannot run it. Print the command for the user.
+- 2026-08-20: An empty `KUBECONFIG` is not "no kubeconfig" - `kubectl` falls back to `~/.kube/config`. A test that does `KUBECONFIG="$KC" kubectl ...` where `$KC` came from a command that failed will silently read the user's real config and hang on whatever dead endpoint it holds. Guard on a non-empty value and pass `--request-timeout`.
+- 2026-08-20: A plan written by an earlier session is not pre-verified. Both defects in plan Task 0.1 were invisible on reading and only appeared on execution: the 120s hang, and `~/.kube/config`'s mtime moving. Run the mandatory failing test rather than reasoning about what it would print.
 
 ## Blockers
 
@@ -105,14 +112,21 @@ Copy-paste this at the start of a new session:
 Read CONTEXT_STATE.md in this project root before doing anything else.
 Use the Infrastructure and Toolchain tables as ground truth.
 
-Current focus: execute the first ticket of the scenario drill sessions epic,
-WO-20260819-844f - Phase 0: kind sandbox harness and its documentation.
-Read that ticket, then plan Task 0.1 in
+Phase 0 is done and archived. Current focus: the next ticket of the scenario
+drill sessions epic, WO-20260819-11df - Phase 1: answers TOML as the single
+source of truth. Read that ticket, then plan Task 1.1 in
 docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md, which is the
-authority for every step. Start with
-`bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-844f`
+authority for every step, along with its ## Global Constraints section, which
+binds every ticket in full. Start with
+`bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-11df`
 so the branch is created and stamped on the ticket. TDD: test first, watch it
-fail, then implement. Never hand-edit a ticket file - the script owns that format.
+fail, say what it failed with, then implement. Never hand-edit a ticket file -
+the script owns that format and a markdown formatter hook will corrupt the JSON
+frontmatter if you do. Progress goes in with `work-order.sh note`.
+
+The plan is the authority but it is not pre-verified. Phase 0 shipped two fixes
+to defects in its own plan text that were only visible on execution. If a step
+does not survive being run, fix it, flag the deviation, and record it as a note.
 
 Do not suggest IP addresses, tool versions, or architecture patterns
 that contradict CONTEXT_STATE.md without flagging the conflict first.
