@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "work-order permissions. Merge these into the consuming project's",
+    ".claude/settings.local.json - do not overwrite the file.",
+    "",
+    "The deny list is the load-bearing half. work-order.sh close is the sanctioned",
+    "path for deleting a branch, and it refuses unless gh reports the PR MERGED.",
+    "Leaving raw 'git branch -D' and 'git push --delete' allowed would let an agent",
+    "hand-roll the cleanup and skip that check entirely, which is the one failure",
+    "this skill exists to prevent."
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(bash .claude/skills/work-order/scripts/work-order.sh *)",
+      "Bash(bash *//work-order/scripts/work-order.sh *)",
+      "Bash(bash .claude/skills/work-order/testing/run-tests.sh)",
+      "Bash(jq *)",
+      "Bash(git status *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(git merge --ff-only *)",
+      "Bash(gh pr view *)",
+      "Bash(lavish-axi *)",
+      "Bash(podman build *)",
+      "Bash(podman run *)"
+    ],
+    "deny": [
+      "Bash(git branch -D *)",
+      "Bash(git branch -d *)",
+      "Bash(git push origin --delete *)",
+      "Bash(git push --delete *)"
+    ]
+  }
+}

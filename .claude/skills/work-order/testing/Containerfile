@@ -1,0 +1,29 @@
+# Test image for work-order.
+#
+# The suite needs three binaries the stock slim images do not carry: bash (the
+# scripts use arrays and [[ ]]), jq (work-order reads build-plan.json), and git
+# (close rewrites history). gh is deliberately NOT installed - it is stubbed
+# per-case, because the point of the close tests is controlling what gh reports.
+#
+# Built with the network on, then run with --network=none. The build is the only
+# step allowed to fetch; the cases themselves must prove they reach nothing.
+#
+# Pinned by digest, not by tag. `debian:stable-slim` is a floating tag - it moves
+# when a new point release lands, and a suite that silently rebases its own base
+# image is a suite that can start failing for reasons unrelated to the change
+# being tested. Repin deliberately:
+#   podman pull docker.io/library/debian:stable-slim
+#   podman image inspect docker.io/library/debian:stable-slim \
+#     --format '{{index .RepoDigests 0}}'
+FROM docker.io/library/debian@sha256:328d16499860ae6cb9b345e2e4cebca08c2a36e4f7278482c7bd1f39d71e5bfd
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bash jq git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# A deterministic identity, so commits made by the close tests do not depend on
+# whoever is running them.
+RUN git config --system user.email "test@example.com" \
+  && git config --system user.name "work-order tests" \
+  && git config --system init.defaultBranch main \
+  && git config --system --add safe.directory '*'

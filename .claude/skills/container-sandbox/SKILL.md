@@ -8,6 +8,7 @@ description: Run all dependency-heavy tasks (npm, go, pip) in isolated Podman co
 **RULE:** Never run `npm install`, `go mod download`, or `pip install` on the host.
 
 ## 1. Choosing the Sandbox
+
 - **Small Tasks:** Use the **Single-Use Container** (Podman).
 - **Cluster Tasks:** Use the **Kind Sandbox** (Kind + Podman).
 - **Terraform Tasks:** Use the **Ministack Sandbox** (see section below).
@@ -15,6 +16,7 @@ description: Run all dependency-heavy tasks (npm, go, pip) in isolated Podman co
 ## 2. Dependency Management (The "No-Clutter" Way)
 
 ### Node.js (npm)
+
 Instead of `npm install`, tell the agent to run:
 
 **Step 1 — check for a project golden image first.**
@@ -33,6 +35,7 @@ podman run --rm --userns=keep-id -v .:/app:Z -w /app \
 ```
 
 **Fallback** — if no golden image exists or GHCR auth is unavailable:
+
 ```bash
 podman run --rm -v .:/app:Z -w /app node:24-alpine sh -c "npm install && npm test"
 ```
@@ -156,7 +159,62 @@ podman stop ministack_${MINISTACK_PORT} && podman rm ministack_${MINISTACK_PORT}
 
 ---
 
+## Kind Sandbox
+
+**RULE:** Use Kind any time behaviour depends on a real Kubernetes API - controllers, operators, admission, RBAC, probes, watch streams, or anything a manifest does once it is actually admitted.
+Ministack proves Terraform _plans_; Kind proves Kubernetes _behaves_.
+They answer different questions and neither substitutes for the other.
+
+### What belongs here
+
+| Question                                                                   | Sandbox                                             |
+| -------------------------------------------------------------------------- | --------------------------------------------------- |
+| Does this Terraform parse, validate and plan?                              | Ministack                                           |
+| Does this manifest get admitted, and does the controller do what I expect? | Kind                                                |
+| Does a readiness probe actually gate Service endpoints?                    | Kind                                                |
+| Does Argo CD clone from this repo URL?                                     | Kind                                                |
+| Does this chart render?                                                    | Podman + `alpine/helm` (no cluster needed)          |
+| Does the frontend look right?                                              | Podman single-container preview (no cluster needed) |
+
+### Harness
+
+`scripts/kind-sandbox.sh` in this repo wraps the lifecycle.
+It writes a repo-local, git-ignored kubeconfig (`.kubeconfig-kind-sandbox`) and never touches `~/.kube/config`, matching the rule the EKS kubeconfig already follows.
+
+```bash
+make -f Makefile.test kind-up          # create (idempotent)
+export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
+kubectl get nodes
+make -f Makefile.test kind-down        # delete cluster + kubeconfig
+```
+
+`KIND_SANDBOX_NAME` overrides the cluster name so a test can run its own cluster without stepping on the one you are working in.
+`tests/kind-sandbox.sh` uses this.
+
+Never let `KUBECONFIG` go empty when scripting against this harness.
+An empty value makes `kubectl` silently fall back to the user's `~/.kube/config`, which this repo must never read, and which will block on whatever unreachable endpoint that file happens to hold.
+
+### Why this exists in a repo about EKS
+
+The whole point of this project is a cluster you tear down nightly, so the expensive thing is not compute, it is the minutes between "I changed a manifest" and "I know whether it worked".
+Kind closes that loop in seconds against the same API server version family, for nothing.
+Bring the EKS cluster up to verify the AWS-shaped parts (IRSA, the ALB controller, EBS CSI) and nothing else.
+
+### What Kind cannot tell you
+
+Anything that is really AWS: IRSA token exchange, real IAM, the AWS Load Balancer Controller provisioning an actual ALB, EBS volumes, RDS reachability.
+A green Kind run is necessary before spending money, never sufficient.
+Say so explicitly when reporting results, rather than letting a Kind pass read as a full pass.
+
+### Teardown
+
+Kind clusters survive reboots and each one holds a container plus its images.
+Always `kind-down` when finished, and `kind get clusters` if something feels slow.
+
+---
+
 ## Lifecycle Management
+
 - **Pre-flight:** Always run `./scripts/verify-readiness.sh` before starting a cluster.
 - **Teardown:** When the task is complete, run `./scripts/cleanup-kind-podman.sh`.
 - **Maintenance:** If disk space is low or images are outdated, run `./scripts/prune-images.sh`.
@@ -168,6 +226,7 @@ podman stop ministack_${MINISTACK_PORT} && podman rm ministack_${MINISTACK_PORT}
 **RULE: Never ask the user to look at a page with no data.**
 
 When a frontend feature makes API calls, spin up a `podman compose` stack with:
+
 - The real backend (or a mock) seeded with realistic data
 - The frontend dev server
 - All services on the same compose network
@@ -198,11 +257,11 @@ echo "Using port $FREE_PORT"
 
 Run the probe once per service that needs a host port. Each service gets its own `FREE_PORT` call.
 
-| Service | Host port |
-|---------|-----------|
-| Frontend | `$FREE_PORT` — probed, confirmed open, 30000+ |
-| Backend API | `$FREE_PORT_2` — separately probed, confirmed open, 30000+ |
-| Mock backend | internal only — no host port needed |
+| Service      | Host port                                                  |
+| ------------ | ---------------------------------------------------------- |
+| Frontend     | `$FREE_PORT` — probed, confirmed open, 30000+              |
+| Backend API  | `$FREE_PORT_2` — separately probed, confirmed open, 30000+ |
+| Mock backend | internal only — no host port needed                        |
 
 ---
 
@@ -241,6 +300,7 @@ echo "Auto-stops in 30 minutes (container: $CONTAINER_NAME)"
 ```
 
 Then verify with curl before handing the URL to the user:
+
 ```bash
 sleep 2 && curl -s -o /dev/null -w "%{http_code}" "http://localhost:${FREE_PORT}/"
 # Must return 200 before reporting the URL
@@ -283,7 +343,7 @@ When the project already has a working backend image (`<service>:dev`):
          retries: 15
 
      be:
-       image: myapp-be:dev           # pre-built dev image
+       image: myapp-be:dev # pre-built dev image
        volumes:
          - ./myapp-be:/app:Z
          - ./test/init.py:/init.py:ro,Z
@@ -300,14 +360,14 @@ When the project already has a working backend image (`<service>:dev`):
      frontend:
        # Prefer the project golden image (:latest-amd64) if available; fall back to node:24-alpine
        image: ghcr.io/${GHCR_USER}/<project>-base:latest-amd64
-       user: "0"   # run as root in dev compose — avoids UID mismatch with volume mounts
+       user: "0" # run as root in dev compose — avoids UID mismatch with volume mounts
        volumes:
          - ./myapp-fe:/app:Z
        working_dir: /app
        ports:
-         - "13000:3000"             # or whatever port Vite uses
+         - "13000:3000" # or whatever port Vite uses
        environment:
-         API_PROXY_TARGET: http://be:8000   # see proxy env var rule below
+         API_PROXY_TARGET: http://be:8000 # see proxy env var rule below
        command: npm run dev -- --host
        depends_on:
          - be
@@ -316,6 +376,7 @@ When the project already has a working backend image (`<service>:dev`):
 4. **Spin up:** `podman compose -f compose.test.yml up --build -d`
 
 5. **Verify the API responds** before directing the user to the browser:
+
    ```bash
    curl -s http://localhost:18000/api/v1/<resource>/ | python3 -m json.tool | head -20
    curl -s http://localhost:13000/api/v1/<resource>/          # through the Vite proxy
@@ -334,6 +395,7 @@ Vite exposes **all** `VITE_*` env vars to the browser bundle at dev-server start
 **The fix:** use a non-`VITE_` prefixed variable for the server-side proxy target only.
 
 In `vite.config.ts`:
+
 ```ts
 proxy: {
   '/api': {
@@ -344,9 +406,10 @@ proxy: {
 ```
 
 In `compose.test.yml`:
+
 ```yaml
 environment:
-  API_PROXY_TARGET: http://be:8000   # server-side only — NOT exposed to browser
+  API_PROXY_TARGET: http://be:8000 # server-side only — NOT exposed to browser
   # do NOT set VITE_API_URL here
 ```
 
@@ -364,6 +427,7 @@ When there is no pre-built backend image, create a zero-dependency Node.js mock:
    - Logs all requests so you can verify API contracts
 
 2. **Create `test/mock-api/Dockerfile`**:
+
    ```dockerfile
    # Prefer the project golden image (:latest-amd64) if available; fall back to node:24-alpine
    FROM ghcr.io/${GHCR_USER}/<project>-base:latest-amd64
@@ -380,7 +444,7 @@ When there is no pre-built backend image, create a zero-dependency Node.js mock:
 
 ### podman-compose 1.0.6 known limitations
 
-- **One-shot containers in dependency chains don't work.** `depends_on: condition: service_completed_successfully` is ignored — podman uses `--requires` which requires the dependency to be *running*, not *completed*. A one-shot init container that exits will break the chain for all downstream services.
+- **One-shot containers in dependency chains don't work.** `depends_on: condition: service_completed_successfully` is ignored — podman uses `--requires` which requires the dependency to be _running_, not _completed_. A one-shot init container that exits will break the chain for all downstream services.
   - **Workaround:** merge migrations and seed into the main service startup script (see `start-be.sh` pattern above).
 
 - **`condition: service_healthy`** works correctly for postgres with a `pg_isready` healthcheck.
@@ -390,12 +454,14 @@ When there is no pre-built backend image, create a zero-dependency Node.js mock:
 ---
 
 ### Seed data guidelines
+
 - Include enough records to exercise every UI state: empty results, filtered results, edge-case values.
 - Use realistic names, addresses, phone numbers — not `"foo"` / `"bar"` / `999`.
 - Insert seed data in **non-alphabetical order** when testing sort fixes — this is the only way to prove the sort is actually working.
 - Use `ON CONFLICT DO NOTHING` so the script is safe to re-run.
 
 ### Teardown
+
 ```bash
 podman compose -f compose.test.yml down
 ```
