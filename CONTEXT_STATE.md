@@ -7,8 +7,8 @@
 
 | Field        | Value                                                                              |
 | ------------ | ---------------------------------------------------------------------------------- |
-| last_updated | 2026-08-20 15:01 UTC                                                               |
-| updated_by   | context-compaction skill, Phase 1 close-out                                        |
+| last_updated | 2026-08-20 17:02 UTC                                                               |
+| updated_by   | context-compaction skill, Phase 2 close-out                                        |
 | project      | daily-eks-practice                                                                 |
 | repo         | see `git remote -v` - the owner string is PII per `CLAUDE.md` and is not committed |
 
@@ -41,54 +41,69 @@
 | Prometheus/Grafana | observability      | kube-prometheus-stack, scenario 07                                                                                                         |
 | RDS                | database           | tiny instance, scenario 11                                                                                                                 |
 | gh CLI             | GitHub auth        | scopes: `gist, read:org, repo, workflow`. **`write:packages` not yet granted** (needed at Phase 5 only)                                    |
-| Node / Python      | app / glue         | node v20.20.2, python3 3.12.3 (stdlib only, no pip deps)                                                                                   |
+| Node / Python      | app / glue         | Host node v20.20.2 is **never used**; the drill workspace runs in `docker.io/node:22-alpine`. python3 3.12.3, stdlib only, no pip deps     |
+| drill workspace    | the grader / GUI   | npm workspaces at `drill/`. `make -f Makefile.test drill-install drill-test drill-typecheck drill-build drill-clean`, all inside Podman    |
 | prettier           | markdown/HTML fmt  | **Not a repo dependency.** It runs from the user's global agent hook on every Write/Edit outside `work-orders/`. See `.prettierignore`     |
 
 ## Active Tasks
 
-| Priority | Task                                                            | Status  | Next Action                                                                                                                                       |
-| -------- | --------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1        | Execute `WO-20260819-a56c - Phase 2: the semantic grader`       | ready   | **Unblocked by Phase 1 and the natural next.** It consumes Phase 1's TOML directly and its AC-H3 runs Phase 1's fixtures through the TS validator |
-| 2        | Execute `WO-20260819-98da - Phase 3: the in-cluster git server` | ready   | Also startable. Independent chain, so it can run in parallel with Phase 2 or after it                                                             |
-| 3        | Port scenarios 01-02 and 04-12 to the drill format              | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                                          |
+| Priority | Task                                                                                                | Status  | Next Action                                                                                                                                                                          |
+| -------- | --------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1        | Execute `WO-20260819-98da - Phase 3: Terraform - the in-cluster git server Argo CD reads`           | ready   | **The natural next and the epic's one real risk.** Task 3.2 Step 7 proves on kind, at $0, that Argo CD will clone in-cluster dumb-HTTP git. Five-rung fallback ladder is pre-written |
+| 2        | Execute `WO-20260819-ca7c - Phase 5: the mothership GUI, its container image, and the first visual` | ready   | Also startable now that Phase 2 is done, and it is the **first visual**. Under-linked though - see the graph mismatch below, it cannot finish without Phase 4                        |
+| 3        | Port scenarios 01-02 and 04-12 to the drill format                                                  | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                                                                             |
 
 **The epic is cut.** `WO-20260819-f5c9 - Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill` and its eight children, one child per plan phase, in `work-orders/`.
 Phase 0 (`WO-20260819-844f`) is **done and archived**, shipped in PR #11.
 Phase 1 (`WO-20260819-11df`) is **done and archived**, shipped in PR #14, merge commit `0a5ab10`.
+Phase 2 (`WO-20260819-a56c`) is **done and archived**, shipped in PR #16, merge commit `c84a156`.
 Run `bash .claude/skills/work-order/scripts/work-order.sh next` for what is startable and `... tree` for the shape; `work-orders/INDEX.md` is the generated router.
 The epic depends on all eight children so it never appears as startable work itself.
 
 The `work-order` skill is now **vendored into this repo** at `.claude/skills/work-order/`, a copy rather than a symlink, same as `container-sandbox`.
 Its source of truth is `~/dotfiles/claude/skills/work-order` at dotfiles commit `4c6b696`, and the copy will drift from it - there is no version field to detect that automatically.
 
-Nothing is in progress. Phases 0 and 1 are the only implementation code on `main`; everything else is planning artifacts and tickets.
+Nothing is in progress. Phases 0, 1 and 2 are the only implementation code on `main`; everything else is planning artifacts and tickets.
 
-**What Phase 1 shipped**, because Phase 2 builds directly on it:
+**What Phase 1 shipped**, because everything downstream reads it:
 
 - `scenarios/answers/03.toml` is the single source of truth for scenario 03. Only 03 is ported; the other eleven answer blocks are still hand-written and pass through byte-for-byte.
 - `scripts/answers.py` - `load()`, `load_path()`, `available()`, `AnswersError`, and the validator. Its module docstring carries the validated shape.
 - `scripts/gen-answers.py` - `split()` / `render()` / `generate()`, plus `--check` and `--stdout`. `make answers-gen` regenerates; `answers-check` is now a prerequisite of `make -f Makefile.test test`.
-- `tests/fixtures/answers-invalid/` - ten invalid TOML files, one per rule, plus a README carrying the full validated shape as tables. **This is a contract, not scaffolding.** Phase 2's AC-H3 runs the same directory through `drill/server/src/grader/answers.ts`, which is the only thing stopping the two validators drifting.
+- `tests/fixtures/answers-invalid/` - ten invalid TOML files, one per rule, plus a README carrying the full validated shape as tables. **This is a contract, not scaffolding.** The two validators are now pinned to each other by it: both reject all ten with byte-identical messages.
+
+**What Phase 2 shipped**, because Phase 5 consumes it directly:
+
+- `drill/` is an npm workspace tree, `@drill/shared` and `@drill/server`, installed and tested **only** in Podman. `drill/README.md` is its documentation.
+- `drill/shared/src/index.ts` is the websocket protocol. `Verdict`, `SessionState`, `Attempt`, `DependencyStatus` and the `ClientMessage` / `ServerMessage` unions are defined **once, here**, and Phase 5 consumes them unchanged.
+- `drill/server/src/grader/` is the grader: `aliases.ts` (shell alias expansion), `parse.ts` (`parseCommand`, `normaliseResource`, `commandVerbs`), `answers.ts` (the TypeScript half of the TOML schema), `index.ts` (the three graders plus hint dispatch). All pure functions - no cluster, no AWS, no network, no PTY.
+- `GradeContext` is the grader's only door for facts a submission cannot carry: `committed` (the file as cluster git has it, for the `uncommitted` hint) and `accepted` (this session's earlier passes, for the `only-imperative` nudge). Every field optional; absent means "not known", never "false". **Phase 5 supplies these** from the workspace and from `SessionState.attempts`.
+- 58 tests, all in Podman. `scenario-03.test.ts` grades the real `03.toml` end to end and asserts every authored hint key has a trigger that fires it, so a curriculum hint cannot be added and left dead.
 
 ## Decisions Made
 
-| Date       | Decision                                                                                                 | Reason                                                                                                                                                                                                                                                                                      |
-| ---------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-08-19 | Three-stage pipeline: spec -> plan -> work-order tickets. Never skip a stage, never hand-write a ticket  | Each stage's output is the next stage's input, so a compaction or a fresh agent resumes from a file rather than from conversation history. work-order adds branch, PR and cleanup                                                                                                           |
-| 2026-08-19 | **Self-contained git.** The drill never contacts github.com; Argo reads only in-cluster git              | The spec's init-container-clones-GitHub cannot work - `scripts/argo-repo.py` supplies the token _after_ apply, so a private repo fails the first apply. Seeding from a local `git bundle` removes the PAT, removes the egress dependency, and reuses one primitive in both directions       |
-| 2026-08-19 | Self-contained is **not** simulated                                                                      | The in-cluster server runs genuine git; Argo does a genuine clone and sync. Only the remote's location changes. A faked GitOps step would teach a mock of the skill                                                                                                                         |
-| 2026-08-19 | The standalone Argo spike was **cut**                                                                    | It built the same manifest Task 3.2 builds, proved it, deleted it, then Task 3.2 rebuilt it. A negative result never killed the design - it only meant swapping the container                                                                                                               |
-| 2026-08-19 | Argo-clones-cluster-git is validated as Task 3.2 Step 7 on kind, with a ranked five-rung fallback ladder | `ministack` never runs a pod, so without a kind step the discovery would land in Phase 7 on real EKS. Rung 5 (helm-on-submit, no Argo) is the floor and the only rung that stops teaching GitOps                                                                                            |
-| 2026-08-19 | `drill_allowed_cidrs = ["auto"]`, resolved to the current public /32 at plan time                        | Residential addresses are DHCP. A pinned literal goes stale on a lease change and locks the user out with no error - the browser just hangs                                                                                                                                                 |
-| 2026-08-19 | Application auth **deferred**; source IP is the only control                                             | Verified the target is a directly-assigned residential IPv4, not carrier-grade NAT, so the /32 identifies one machine. Triggers to revisit are recorded in plan Task 4.1                                                                                                                    |
-| 2026-08-19 | GUI image is a **public** GHCR package under the user's own account                                      | The repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image holds nothing new. Public removes an `imagePullSecret` and one more credential in the cluster                                                                                                       |
-| 2026-08-19 | **Never create a personal access token.** Extend the grant `gh` already holds                            | A PAT is a second credential with its own expiry that must be stored, and every candidate here is bad: `config.toml` is serialised into Terraform state, a shell export lands in history, a dotfile is one `git add -A` from being committed                                                |
-| 2026-08-19 | Grader is TypeScript in the cluster; Python stays laptop-side CLI glue                                   | Grading runs per submission inside the Node process. Python would mean shipping a runtime in the image. `bootstrap.py` stays Python so `make up` needs only `python3`                                                                                                                       |
-| 2026-08-20 | The epic depends on all eight of its children                                                            | Without those edges the epic itself appears in `work-order.sh next` once approved, reading as startable work. Its only real job is to close after its children do                                                                                                                           |
-| 2026-08-20 | `kind create/delete cluster` is always called with `--kubeconfig`                                        | Without it kind merges the new context into the user's `~/.kube/config`, which this repo must never write. Verified as a live regression guard in `tests/kind-sandbox.sh`, which samples that file's mtime and fails if it moves                                                            |
-| 2026-08-20 | The `work-order` skill is vendored into the repo, copied not symlinked                                   | Both the epic and this file's hydration prompt reference `.claude/skills/work-order/scripts/work-order.sh`, and that path resolved to nothing for any clone. A symlink would point outside the repo and break the same way                                                                  |
-| 2026-08-20 | `PRACTICE_ANSWERS.html` is in `.prettierignore`; the generator owns its formatting                       | The generated block is not prettier-stable - prettier re-wraps every `<h3>` and `<p>` in it while leaving the eleven hand-written blocks alone. Without the ignore, one formatter pass makes `gen-answers.py --check`, and so `make -f Makefile.test test`, fail until somebody regenerates |
-| 2026-08-20 | Scenario 03's answer block renders as plain escaped text; the inline `<code>` spans were not preserved   | TOML prose is plain text and must be HTML-escaped. Keeping `<code>` would mean inventing a markup convention in the TOML that the TypeScript grader then has to strip. Deferred as a design decision, not an oversight - revisit if a ported card actually needs it                         |
+| Date       | Decision                                                                                                 | Reason                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-08-19 | Three-stage pipeline: spec -> plan -> work-order tickets. Never skip a stage, never hand-write a ticket  | Each stage's output is the next stage's input, so a compaction or a fresh agent resumes from a file rather than from conversation history. work-order adds branch, PR and cleanup                                                                                                                                                                                                                                         |
+| 2026-08-19 | **Self-contained git.** The drill never contacts github.com; Argo reads only in-cluster git              | The spec's init-container-clones-GitHub cannot work - `scripts/argo-repo.py` supplies the token _after_ apply, so a private repo fails the first apply. Seeding from a local `git bundle` removes the PAT, removes the egress dependency, and reuses one primitive in both directions                                                                                                                                     |
+| 2026-08-19 | Self-contained is **not** simulated                                                                      | The in-cluster server runs genuine git; Argo does a genuine clone and sync. Only the remote's location changes. A faked GitOps step would teach a mock of the skill                                                                                                                                                                                                                                                       |
+| 2026-08-19 | The standalone Argo spike was **cut**                                                                    | It built the same manifest Task 3.2 builds, proved it, deleted it, then Task 3.2 rebuilt it. A negative result never killed the design - it only meant swapping the container                                                                                                                                                                                                                                             |
+| 2026-08-19 | Argo-clones-cluster-git is validated as Task 3.2 Step 7 on kind, with a ranked five-rung fallback ladder | `ministack` never runs a pod, so without a kind step the discovery would land in Phase 7 on real EKS. Rung 5 (helm-on-submit, no Argo) is the floor and the only rung that stops teaching GitOps                                                                                                                                                                                                                          |
+| 2026-08-19 | `drill_allowed_cidrs = ["auto"]`, resolved to the current public /32 at plan time                        | Residential addresses are DHCP. A pinned literal goes stale on a lease change and locks the user out with no error - the browser just hangs                                                                                                                                                                                                                                                                               |
+| 2026-08-19 | Application auth **deferred**; source IP is the only control                                             | Verified the target is a directly-assigned residential IPv4, not carrier-grade NAT, so the /32 identifies one machine. Triggers to revisit are recorded in plan Task 4.1                                                                                                                                                                                                                                                  |
+| 2026-08-19 | GUI image is a **public** GHCR package under the user's own account                                      | The repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image holds nothing new. Public removes an `imagePullSecret` and one more credential in the cluster                                                                                                                                                                                                                                     |
+| 2026-08-19 | **Never create a personal access token.** Extend the grant `gh` already holds                            | A PAT is a second credential with its own expiry that must be stored, and every candidate here is bad: `config.toml` is serialised into Terraform state, a shell export lands in history, a dotfile is one `git add -A` from being committed                                                                                                                                                                              |
+| 2026-08-19 | Grader is TypeScript in the cluster; Python stays laptop-side CLI glue                                   | Grading runs per submission inside the Node process. Python would mean shipping a runtime in the image. `bootstrap.py` stays Python so `make up` needs only `python3`                                                                                                                                                                                                                                                     |
+| 2026-08-20 | The epic depends on all eight of its children                                                            | Without those edges the epic itself appears in `work-order.sh next` once approved, reading as startable work. Its only real job is to close after its children do                                                                                                                                                                                                                                                         |
+| 2026-08-20 | `kind create/delete cluster` is always called with `--kubeconfig`                                        | Without it kind merges the new context into the user's `~/.kube/config`, which this repo must never write. Verified as a live regression guard in `tests/kind-sandbox.sh`, which samples that file's mtime and fails if it moves                                                                                                                                                                                          |
+| 2026-08-20 | The `work-order` skill is vendored into the repo, copied not symlinked                                   | Both the epic and this file's hydration prompt reference `.claude/skills/work-order/scripts/work-order.sh`, and that path resolved to nothing for any clone. A symlink would point outside the repo and break the same way                                                                                                                                                                                                |
+| 2026-08-20 | `PRACTICE_ANSWERS.html` is in `.prettierignore`; the generator owns its formatting                       | The generated block is not prettier-stable - prettier re-wraps every `<h3>` and `<p>` in it while leaving the eleven hand-written blocks alone. Without the ignore, one formatter pass makes `gen-answers.py --check`, and so `make -f Makefile.test test`, fail until somebody regenerates                                                                                                                               |
+| 2026-08-20 | **`CONTEXT_STATE.md` is updated on the work branch and ships inside that phase's PR**                    | The flow is CONTEXT_STATE -> PR -> cleanup -> hydration prompt. A separate PR whose only content is the state file is ceremony: it doubles the review surface for a phase and leaves `main` briefly describing a world that no longer exists. `work-order.sh close` still opens its own PR afterwards, and that is fine - it is generated bookkeeping (merge SHA, archive move, INDEX regeneration), not authored content |
+| 2026-08-20 | The drill workspace runs on `node:22-alpine`, not the plan's `node:20-alpine`                            | The tests are TypeScript executed with no build step, `node --test --experimental-strip-types`. Type stripping landed in Node 22.6 and test-runner globs in Node 21, so on Node 20 not one test in Phase 2 executes. `tsc` still emits `dist/` for the Phase 5 image                                                                                                                                                      |
+| 2026-08-20 | `drill/node_modules` is a **named Podman volume**, not a directory in the bind mount                     | AC-H5 requires no `node_modules` on the host. A plain bind mount satisfies "npm ran in a container" but still writes the whole tree to disk - verified, six package directories appeared. With the volume the host holds an empty mountpoint. `make -f Makefile.test drill-clean` drops it                                                                                                                                |
+| 2026-08-20 | An accept rule's `verb` is **tool-qualified** for non-kubectl commands                                   | `AcceptRule` has no `tool` key, so `git-revert` and `curl-loop` are the only way an answers file can say which tool it means. `commandVerbs()` returns every label a command answers to, kubectl being the unqualified default. Without this, `03.toml`'s own tasks 4 and 5 were ungradeable                                                                                                                              |
+| 2026-08-20 | A hint may fire on a **passing** verdict                                                                 | `only-imperative` is the case: `kubectl rollout undo` is the correct rollback, and the lesson is that Argo CD is about to put the bad version back. Marking it wrong would teach the opposite of the truth, so `passed` stays `true` and the nudge rides in `hint`. Documented on `Verdict.hint` because Phase 5 renders it                                                                                               |
+| 2026-08-20 | Scenario 03's answer block renders as plain escaped text; the inline `<code>` spans were not preserved   | TOML prose is plain text and must be HTML-escaped. Keeping `<code>` would mean inventing a markup convention in the TOML that the TypeScript grader then has to strip. Deferred as a design decision, not an oversight - revisit if a ported card actually needs it                                                                                                                                                       |
 
 ## Lessons Learned
 
@@ -103,6 +118,10 @@ Nothing is in progress. Phases 0 and 1 are the only implementation code on `main
 - 2026-08-20: Plan Task 1.2's own Step 1 test contradicted its own Step 6. It asserted `changed == ["03"]`, but once Step 6 writes the generated file, regenerating 03 is a no-op and `changed` is `[]`. A test that asserts "the generator changed something" goes red exactly when the repo is in its correct, up-to-date state. Assert the invariant that must always hold - here, that no unrelated block changed - never the transient one.
 - 2026-08-20: Plan Task 1.2's Step 6 verification curled `localhost:8000`, but `scripts/serve-answers.sh` picks a **random** port in 8000-8998 unless `PORT` is set, and serves at `/PRACTICE_ANSWERS.html`, not `/`. As written it would have hit a directory listing and quietly reported the wrong number. Pin `PORT` and request the real file path.
 - 2026-08-20: The user's global agent hook runs `npx prettier --write` on every Write/Edit outside `work-orders/`. Any generated file this repo commits must therefore either be prettier-stable or be listed in `.prettierignore`, or a later agent touching it turns the static suite permanently red. Write generated files from a script via Bash, never with the Write tool.
+- 2026-08-20: `npm test` proves nothing about types. Node strips TypeScript rather than checking it, so plan Task 2.3's `parse.ts` passed every test while failing `tsc` with three `TS2412`s. Run `drill-typecheck` as well as `drill-test`, or a type error ships green.
+- 2026-08-20: Unit tests written alongside a feature cannot catch a curriculum that names something the code will never produce. `03.toml` accepted `verb = "curl-loop"` and `verb = "git-revert"`, which the parser never emits, so two of six tasks were unpassable and their hints unreachable - and every unit test passed. The test that found it grades the answers file's own model answers with the real loader, parser and grader. Do that for every ported scenario.
+- 2026-08-20: A grader hint that needs context the submission cannot carry is not a "later" problem, it is dead curriculum. `uncommitted` and `only-imperative` were both authored in `03.toml` and neither could ever fire. The fix is an explicit optional context argument where absent means "not known" rather than "false", so no caller is punished for what it could not look up.
+- 2026-08-20: `tsc --noEmit` in a workspace that references another via `types: ./dist/...` fails on a fresh clone, because `dist/` is git-ignored and nothing has built it. Build the referenced workspace first in the `typecheck` script; verify by deleting every `dist/` and `tsbuildinfo` before running it.
 
 ## Blockers
 
@@ -128,7 +147,6 @@ The two graph mismatches, stated plainly so nobody rediscovers them the hard way
 - **Phase 4's declared dependency is not justified by the interfaces.** `WO-20260819-1fea` declares `depends_on: [98da]`, yet Tasks 4.1 and 4.2 consume nothing from Phase 3 - only `vpc_id`, `enable_alb_controller`, and their own two new config values.
   The edge is most likely about sequencing the Terraform threading through `modules/stack` rather than a real data handoff.
   If that is all it is, Phase 4 could run in parallel with Phase 3 rather than behind it.
-
 ## Hydration Prompt
 
 Copy-paste this at the start of a new session:
@@ -137,94 +155,89 @@ Copy-paste this at the start of a new session:
 Read CONTEXT_STATE.md in this project root before doing anything else.
 Use the Infrastructure and Toolchain tables as ground truth.
 
-Work WO-20260819-a56c - Phase 2: the semantic grader.
-It is `ready`, it is unblocked by Phase 1, and it is the route we picked.
+Work WO-20260819-98da - Phase 3: Terraform - the in-cluster git server Argo CD
+reads. It is `ready`, it is startable now, and it is the epic's one real risk.
 Read the ticket first:
-work-orders/WO-20260819-f5c9/WO-20260819-a56c-phase-2-the-semantic-grader.md
+work-orders/WO-20260819-f5c9/WO-20260819-98da-phase-3-terraform-the-in-cluster-git-server-argo.md
 
-Then read Tasks 2.1 through 2.4 of
+Then read Tasks 3.1 through 3.3 of
 docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md:
-  Task 2.1 the TypeScript workspace, in Podman  - plan lines 1288-1580
-  Task 2.2 alias expansion                      - plan lines 1581-1737
-  Task 2.3 semantic command parsing             - plan lines 1738-2058
-  Task 2.4 grading and hints                    - plan lines 2059-2664
+  Task 3.1 config values and variable threading  - plan lines 2669-2938
+  Task 3.2 the cluster git server                - plan lines 2939-3285
+  Task 3.3 seed cluster git, repoint the Argo Application - plan lines 3286-3601
 The plan is the authority for every step; the ticket is the contract. Read the
 plan's ## Global Constraints section too - it binds this ticket in full and is
-deliberately not restated in it. Read "Where each language runs, and why"
-(plan lines 67-92) as well: it is the reason the grader is TypeScript and the
-renderer is Python, and it names the known wart this ticket has to defuse.
+deliberately not restated in it. Read "The self-contained git rule" (plan lines
+32-66) as well: it is the standing rule this whole phase implements, it
+supersedes the spec's Q1 seeding sentence, and it is what deletes rung 5 from
+Task 3.2's fallback ladder rather than merely deprioritising it.
 
 Start with:
-bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-a56c
+bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-98da
 That creates the branch and stamps it onto the ticket. Do not create the branch
-by hand. The work-order skill is vendored into this repo as of Phase 0, so that
-path resolves - do not go looking in ~/dotfiles for it.
+by hand. The work-order skill is vendored into this repo, so that path resolves.
 
-This ticket is four tasks and it is strict TDD throughout, same as Phase 1: for
-every task, write the failing test, RUN it, say out loud what it failed with,
-then implement. A test that was never seen failing proves nothing. Phase 1's
-worst plan defect was caught exactly that way, and only because the test was
-actually run - it was invisible on reading.
+**The close-out flow, which changed after Phase 2 and is not optional:**
+CONTEXT_STATE.md -> PR -> cleanup -> hydration prompt. Update CONTEXT_STATE.md
+on the work branch as part of the work, so it ships inside THIS phase's PR.
+Never open a separate PR whose only content is the state file. After the merge,
+`work-order.sh close --id ...` opens its own PR for the merge SHA, the archive
+move and the INDEX regeneration - that one is generated bookkeeping and is
+expected. Leave the next hydration prompt naming the next work order by BOTH
+its id and its full title.
 
-What Phase 1 already built, which this ticket consumes rather than rebuilds:
-- scenarios/answers/03.toml is the single source of truth for scenario 03. Only
-03 is ported. The other eleven answer blocks are hand-written passthrough.
-- scripts/answers.py is the PYTHON validator. Its module docstring carries the
-validated shape in full. tests/fixtures/answers-invalid/README.md carries the
-same shape as tables plus a fixture-to-rule map. Read one of them before
-writing drill/server/src/grader/answers.ts - do not re-derive the schema from
-the TOML file, because the schema is the contract and 03.toml is only one
-instance of it.
-- tests/fixtures/answers-invalid/ is ten invalid TOML files, one per rule. AC-H3
-requires the TypeScript validator to reject ALL TEN. This is the whole point of
-the directory: it is the only thing stopping the two validators drifting, and
-a drift means a file passes generation and fails grading.
+This ticket is three tasks and it is strict TDD throughout, same as Phases 0-2:
+write the failing test, RUN it, say out loud what it failed with, then
+implement. A test that was never seen failing proves nothing. Every phase so
+far has shipped fixes to defects in its own plan text - two in Phase 0, three
+in Phase 1, five in Phase 2 - and every one of them was invisible on reading.
+
+What this phase is, in one line: a permanent in-cluster git server in namespace
+`git` becomes the only repo Argo CD ever reads, seeded by streaming a
+`git bundle` in from the local repo over `kubectl exec`. The drill never
+contacts github.com.
 
 Ground rules that bite on this ticket specifically:
-- Everything runs in Podman. npm install NEVER runs on the host and no
-node_modules directory may appear on the host - that is AC-H5, and it is
-observable, so observe it rather than assuming it. Use the vendored
-container-sandbox skill (.claude/skills/container-sandbox/SKILL.md).
-- The grader is PURE FUNCTIONS over strings and files. No cluster, no AWS, no
-network, no PTY, no websocket. If a test needs a cluster, the design is wrong.
-- No UI. The GUI is Phase 5 (WO-20260819-ca7c).
-- The shared types Verdict, SessionState, Attempt and DependencyStatus are
-defined ONCE here in @drill/shared and Phase 5 consumes them unchanged. Getting
-them wrong here is a Phase 5 rewrite, so treat them as an interface, not as
-scratch types.
-- A wrong answer must return a hint naming what was actually wrong (AC-H4). A
-generic failure is a fail. The hints are already authored in 03.toml under
-[[tasks.hints]] with their `when` triggers - use them, do not invent a parallel
-set.
-- Do not change scripts/answers.py or the fixtures to make the TypeScript side
-pass. If the two disagree, decide which is right on the merits and fix that
-one, then say which you changed and why.
+- **Terraform variables have NO defaults, ever.** Thread each new value through
+scripts/config.example.toml -> terraform/envs/dev/variables.tf -> envs/dev/main.tf
+-> modules/stack/variables.tf -> modules/stack/main.tf -> the target module.
+Run Terraform only through scripts/bootstrap.py / make, never bare. That is
+AC-H5 and it is checkable by grep.
+- **Never run terraform apply, make up/apply/down, or otherwise touch real AWS
+without explicit user approval.** Plans and validation are fine. This phase is
+$0: ministack for the plan, kind for the cluster behaviour.
+- Task 3.2 Step 7 is the acceptance test that de-risks the whole GitOps half:
+on kind, does Argo CD clone from in-cluster dumb-HTTP git? A five-rung fallback
+ladder is already written into the task. **If you land below rung 2, report to
+the user before Task 3.3 repoints the Argo Application**, because rungs 3-5
+change cluster_git_url. That is AC-H3.
+- The readiness gate is the `.seeded` marker: no endpoints until the bundle
+lands, so Argo retries cleanly instead of syncing a half-served repo. That is
+AC-H2 and it is observable with `kubectl get endpoints -n git`.
+- scripts/argo-repo.py is KEPT, not deleted. It exists for
+scenarios/09-gitops-argocd.md, which teaches manual PAT-and-UI repo
+registration against real GitHub. The drill simply never calls it.
 - Do not port scenarios other than 03. Do not pre-solve scenarios in committed
-defaults - helm/practice-app/values.yaml must stay at 1.27-alpine.
-- PRACTICE_ANSWERS.html is generated for 03 and is in .prettierignore. Never
-hand-edit it and never write it with the Write tool; run `make answers-gen`.
-- Zero AWS calls. $0. Nothing here needs a cluster at all.
+defaults - helm/practice-app/values.yaml must stay at 1.27-alpine, and there is
+now a test in drill/ that fails if it moves.
+- PRACTICE_ANSWERS.html is generated and is in .prettierignore. Never hand-edit
+it and never write it with the Write tool; run `make answers-gen`.
+- No PII in git. No AWS account ids, profile names, real domains, CIDRs or
+repo-owner strings outside scripts/config.toml and generated files.
 - Plain dashes, never em dashes. One full sentence per line in long Markdown.
-- Never hand-edit a ticket file. work-order.sh owns that format, and a markdown
-formatter hook will corrupt the JSON frontmatter if you do. Progress goes in
-with `work-order.sh note --id ... --text "..."`.
-
-The plan is authoritative but it is NOT pre-verified. Phase 0 shipped two fixes
-to defects in its own plan text and Phase 1 shipped three more, and all five were
-invisible on reading - they only appeared on execution. If a step does not
-survive being run, fix it, tell the user plainly that you deviated and why, and
-record it with `work-order.sh note`.
+- Never hand-edit a ticket file. work-order.sh owns that format, and the
+markdown formatter hook will corrupt the JSON frontmatter if you do. Progress
+goes in with `work-order.sh note --id ... --text "..."`.
 
 When the work is done: evidence each acceptance criterion with
-`work-order.sh evidence --id WO-20260819-a56c --index N --observed "..."`.
+`work-order.sh evidence --id WO-20260819-98da --index N --observed "..."`.
 `done` refuses while any is unobserved, and that refusal is the gate working -
-observe the thing, never tick it. There are FIVE criteria on this ticket, not
-four.
+observe the thing, never tick it. There are FIVE criteria on this ticket.
 
-Definition of done, from CLAUDE.md: `make -f Makefile.test test` passes, plus
-`make -f Makefile.test drill-install drill-test` which this ticket adds. If a
-scenario changed then the card, scenario_testing/check.sh and
-PRACTICE_ANSWERS.html all agree.
+Definition of done, from CLAUDE.md: `make -f Makefile.test test` passes, a
+ministack plan was attempted and its result reported, and
+`make -f Makefile.test drill-install drill-test` still passes since Phase 2
+wired the drill workspace into the repo.
 
 Do not suggest IP addresses, tool versions, or architecture patterns that
 contradict CONTEXT_STATE.md without flagging the conflict first.
