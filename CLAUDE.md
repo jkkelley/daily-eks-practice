@@ -15,6 +15,18 @@ See `CONTEXT_STATE.md` for current infrastructure state, active tasks, decisions
 Read it before starting any task.
 Check its `last_updated` field first; if it is more than 7 days old, verify the infrastructure rows against reality before trusting them, and refresh it with the `context-compaction` skill.
 
+## The close-out flow
+
+**`CONTEXT_STATE.md` -> PR -> cleanup -> hydration prompt.** In that order, every time.
+
+1. Update `CONTEXT_STATE.md` **on the work branch, as part of the work**, before the PR is opened. It is part of the deliverable, not paperwork that follows it.
+2. Open the PR. It carries the code and the state file together, so one review sees the change and the record of the change.
+3. After the merge, run `bash .claude/skills/work-order/scripts/work-order.sh close --id WO-...`. It opens its own PR for the merge SHA, the archive move and the `INDEX.md` regeneration. That one is generated bookkeeping and is expected.
+4. Leave the hydration prompt at the bottom of `CONTEXT_STATE.md` naming the next work order by **both its id and its full title**, so the next session starts from a file rather than from memory.
+
+**Never open a PR whose only content is `CONTEXT_STATE.md`.**
+It doubles the review surface for one piece of work and leaves `main` briefly describing a world that no longer exists.
+
 ## Hard rules
 
 1. **Never run `terraform apply`, `make up/apply/down`, or otherwise touch real AWS without explicit user approval.** The user drives all applies and destroys. Plans and validation are fine.
