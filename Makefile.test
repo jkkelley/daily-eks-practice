@@ -14,9 +14,9 @@ HELM_IMAGE := docker.io/alpine/helm:latest
 HELM       := podman run --rm -v $(CURDIR)/helm:/apps:Z -w /apps $(HELM_IMAGE)
 
 .DEFAULT_GOAL := test
-.PHONY: test fmt-check validate helm-lint helm-template history-scrubber tflint scan ministack ministack-down kind-up kind-down kind-status
+.PHONY: test fmt-check validate helm-lint helm-template history-scrubber answers-check tflint scan ministack ministack-down kind-up kind-down kind-status
 
-test: fmt-check validate helm-lint history-scrubber ## Static checks (terraform + chart; helm via Podman)
+test: fmt-check validate helm-lint history-scrubber answers-check ## Static checks (terraform + chart + answers; helm via Podman)
 
 fmt-check: ## terraform fmt -check
 	terraform -chdir=terraform fmt -recursive -check
@@ -39,6 +39,11 @@ helm-template: ## Render the chart with default values (inside Podman)
 
 history-scrubber: ## E2E test for the safe git-filter-repo identity wrapper
 	bash tests/scrub-git-identity.sh
+
+answers-check: ## Fail if PRACTICE_ANSWERS.html is stale vs scenarios/answers/*.toml
+	python3 scripts/gen-answers.py --check
+	python3 tests/test_answers.py
+	python3 tests/test_gen_answers.py
 
 tflint: ## Lint if tflint is installed
 	@command -v tflint >/dev/null 2>&1 && tflint --chdir=$(TFDIR) --recursive || echo "tflint not installed - skipping"

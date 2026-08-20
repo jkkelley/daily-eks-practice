@@ -43,7 +43,7 @@ export KUBECONFIG := $(KUBECONFIG_FILE)
 .DEFAULT_GOAL := help
 .PHONY: help config init plan apply up down output kubeconfig kubeconfig-env app-deploy \
         app-status argo-repo argo-sync argo-ui argo-password grafana-ui scenario check serve-answers \
-        fmt clean guard-env
+        answers-gen fmt clean guard-env
 
 help: ## Show this help
 	@echo "Daily EKS Practice ($(DETECTED_OS)) - ENV=$(ENV), profile=$(AWS_PROFILE), region=$(AWS_REGION)"
@@ -133,6 +133,9 @@ check: ## Verify a scenario's end state, e.g. make check N=03
 
 serve-answers: ## Serve the sealed answer key locally; scope to one card with N=NN (e.g. make serve-answers N=02)
 	$(SERVE_ANSWERS) $(if $(filter command line,$(origin N)),$(N),)
+
+answers-gen: ## Regenerate PRACTICE_ANSWERS.html from scenarios/answers/*.toml
+	$(PYTHON) scripts/gen-answers.py
 
 fmt: ## terraform fmt -recursive
 	terraform -chdir=terraform fmt -recursive
