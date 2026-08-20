@@ -4,7 +4,7 @@
   "slug": "phase-1-answers-toml-as-the-single-source-of-tru",
   "title": "Phase 1: answers TOML as the single source of truth",
   "type": "feature",
-  "status": "in-review",
+  "status": "done",
   "priority": "p1",
   "created": "2026-08-19",
   "updated": "2026-08-20",
@@ -12,8 +12,8 @@
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-1-answers-toml-as-the-single-source-of-tru",
   "pr": 14,
-  "merge_sha": null,
-  "closed": null,
+  "merge_sha": "0a5ab10544355fa0939bcfc114700d702a59bad3",
+  "closed": "2026-08-20",
   "approval": {
     "via": "lavish",
     "at": "2026-08-19"
