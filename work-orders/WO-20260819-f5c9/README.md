@@ -8,7 +8,6 @@ One level down only. A child of a child is listed in its own directory, not here
 
 | ID | status | pri | waiting on | title |
 |---|---|---|---|---|
-| `WO-20260819-98da` | done | p1 | - | [Phase 3: Terraform - the in-cluster git server Argo CD reads](WO-20260819-98da-phase-3-terraform-the-in-cluster-git-server-argo.md) |
 | `WO-20260819-1fea` | ready | p1 | - | [Phase 4: Terraform - the shared ALB, the source-IP security group, and non-orphaning teardown](WO-20260819-1fea-phase-4-terraform-the-shared-alb-the-source-ip-s.md) |
 | `WO-20260819-ca7c` | ready | p1 | - | [Phase 5: the mothership GUI, its container image, and the first visual](WO-20260819-ca7c-phase-5-the-mothership-gui-its-container-image-a.md) |
 | `WO-20260819-7840` | ready | p1 | WO-20260819-ca7c | [Phase 6: session lifecycle, the sync watcher, and the Makefile handover](WO-20260819-7840-phase-6-session-lifecycle-the-sync-watcher-and-t.md) |

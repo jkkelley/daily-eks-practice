@@ -12,8 +12,8 @@
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-3-terraform-the-in-cluster-git-server-argo",
   "pr": 19,
-  "merge_sha": null,
-  "closed": null,
+  "merge_sha": "02c142390eea51f6b77cf1654655551f6827f463",
+  "closed": "2026-08-20",
   "approval": {
     "via": "lavish",
     "at": "2026-08-19"
