@@ -1,0 +1,24 @@
+# The image every `make -f Makefile.test drill-*` command runs in.
+#
+# node:22-alpine plus the toolchain node-gyp needs, and nothing else.
+#
+# node-pty ships no linux-x64 prebuild. Its install script is
+# `node scripts/prebuild.js || node-gyp rebuild`, and on Linux the first half
+# reports "Rebuilding because directory prebuilds/linux-x64 does not exist" and
+# falls straight through to a source build. So a stock node image cannot install
+# this workspace on ANY Linux base. Verified on both node:22-alpine and
+# node:22-bookworm-slim, which fail identically with "Could not find any Python
+# installation to use" - the plan's suggested Debian fallback does not fix it,
+# because the missing thing was never the libc.
+#
+# Staying on Alpine rather than moving to the full node:22-bookworm keeps one
+# libc across the whole toolchain. node-pty is a native module, the drill GUI's
+# runtime image is Alpine, and a .node built against glibc cannot be loaded by a
+# musl runtime.
+#
+# tmux is here because TerminalSession's production path spawns
+# `tmux new-session -A`, and a test suite that only ever passes `shell: /bin/sh`
+# would leave that path unexercised until it failed in front of the user.
+FROM docker.io/node:22-alpine
+
+RUN apk add --no-cache python3 make g++ tmux
