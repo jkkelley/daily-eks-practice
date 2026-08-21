@@ -74,6 +74,7 @@ up: init ## terraform apply, auto-approved (creates AWS resources - COSTS MONEY)
 	$(BOOT) $(ENV) apply -auto-approve
 
 down: guard-env ## terraform destroy, auto-approved (RUN THIS WHEN DONE to stop charges)
+	@$(PYTHON) scripts/pre-destroy.py
 	$(BOOT) $(ENV) init -input=false
 	$(BOOT) $(ENV) destroy -auto-approve
 
