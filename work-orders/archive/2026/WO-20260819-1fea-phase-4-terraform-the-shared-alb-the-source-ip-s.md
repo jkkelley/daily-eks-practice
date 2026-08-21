@@ -12,8 +12,8 @@
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-4-terraform-the-shared-alb-the-source-ip-s",
   "pr": 25,
-  "merge_sha": null,
-  "closed": null,
+  "merge_sha": "5bcb09795f726a53f7b7c621e39ef6402f6c919a",
+  "closed": "2026-08-20",
   "approval": {
     "via": "lavish",
     "at": "2026-08-19"
