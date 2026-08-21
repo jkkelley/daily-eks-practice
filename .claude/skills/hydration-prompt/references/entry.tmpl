@@ -1,0 +1,71 @@
+### Ticket
+
+`<WO-ID>` - `<full title>`. Position `<n>` of `<total>`.
+Predecessor `<WO-ID>` - `<full title>`, merged, closed and archived.
+
+### What just landed
+
+What the previous ticket actually put on `main`, in enough detail that the reader
+does not have to go and diff it. Name the files and the shapes, not the commits.
+
+### What is NOT done
+
+The single most valuable section, and the one most often written dishonestly.
+State plainly what was left unbuilt, what was never applied, and what an
+acceptance criterion recorded as unmet. If nothing reached a real system, say so
+in those words and say what proves it - a command and its empty output.
+
+Anything carried onto a different ticket is named here by ID and full title, so
+it cannot be quietly dropped.
+
+### Stale or false in the docs
+
+Every place the specification, the runbook or an older ticket now says something
+untrue, with the correction. A reader who trusts a stale doc loses a day.
+
+### Your scope
+
+What this ticket builds. Where the files go, and where they explicitly do not go
+when two similar things already exist.
+
+### Before you start
+
+Prerequisites and anything unsettled that must be answered before work begins.
+If a question here has no answer, the agent asks the user rather than choosing
+one and building on it.
+
+Write `None.` when there is genuinely nothing. An empty section is
+indistinguishable from a forgotten one.
+
+### Read in this order
+
+An ordered list, not a pile of links. Start with `CLAUDE.md`, then
+`CONTEXT_STATE.md` top 10 checkpoints, then the specification sections that
+apply, then the ticket file, then any external runbook and the exact steps of it.
+
+### Reuse, it is proven
+
+The components that already work, what they take, and the sharp edge on each.
+This is where a reader learns not to rewrite something that exists.
+
+### The verification ladder
+
+How to prove the work without burning a real run per attempt. Cheapest rung
+first. Name what each rung has caught before, so it reads as evidence rather
+than ceremony.
+
+### Traps, already paid for
+
+One line each: the symptom first, then the cause. The symptom is what a reader
+recognises at the moment it happens; the cause is only useful afterwards.
+
+### Workflow
+
+The literal commands for approve, start, evidence, submit, done and close, with
+the project's own paths filled in. Copy-paste, not description.
+
+### Conventions
+
+The house rules that apply to every reply and every commit: ticket references
+carry ID and full title, plain-language reporting, no agent co-author lines, no
+em dashes, failing tests reported as failing.
