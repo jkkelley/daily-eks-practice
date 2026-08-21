@@ -41,11 +41,16 @@ BUNDLE_DEST = "/tmp/seed.bundle"
 # work-orders/ is the build log. The server goes to great lengths to keep accept
 # rules out of the browser; there is no point in that if `cat` reaches them.
 #
-# This is NOT a security boundary and must not be sold as one. The repository is
-# public and PRACTICE_ANSWERS.html is committed to it, so a determined learner can
-# always go and read the answers - that has always been true and is fine. The point
-# is that they should not TRIP OVER them while drilling, the same reason the answer
-# key is a separate sealed file instead of being printed on the card.
+# The reason is SIMULATION FIDELITY, not secrecy, and the difference matters when
+# somebody later argues about how strict to be. This is not a security boundary and
+# must not be sold as one: the repository is public and PRACTICE_ANSWERS.html is
+# committed to it, so anyone who wants the answers can go and read them, and that is
+# fine. What the filter buys is that the environment looks like an environment. A
+# real engineer's working tree holds the application they are deploying - not the
+# curriculum that set them the task, not the grader marking it, not the tickets that
+# built the trainer. Seeding all of that makes it obvious you are inside somebody's
+# project repo, and the whole point of this thing is that it is a place that
+# genuinely works for practising Kubernetes.
 #
 # Add a path here when a scenario genuinely needs it in the workspace. Scenario 12
 # is about terraform, so porting it will mean adding terraform/ - and that is the
