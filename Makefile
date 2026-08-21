@@ -43,7 +43,7 @@ export KUBECONFIG := $(KUBECONFIG_FILE)
 
 .DEFAULT_GOAL := help
 .PHONY: help config init plan apply up down output kubeconfig kubeconfig-env git-seed app-deploy \
-        app-status argo-repo argo-sync argo-ui argo-password grafana-ui scenario check serve-answers \
+        app-status argo-repo argo-sync argo-ui argo-password drill-allow grafana-ui scenario check serve-answers \
         answers-gen fmt clean guard-env
 
 help: ## Show this help
@@ -122,6 +122,9 @@ argo-ui: ## Port-forward the Argo CD UI to https://localhost:8080 (user: admin)
 	@echo "Argo CD -> http://localhost:8080  (user: admin, password below)"
 	@$(MAKE) --no-print-directory argo-password
 	kubectl -n argocd port-forward svc/argocd-server 8080:80
+
+drill-allow: ## Re-point the drill ALB security group at your CURRENT public IP
+	@$(PYTHON) scripts/drill-allow.py
 
 grafana-ui: ## Port-forward Grafana to http://localhost:3000 (user: admin)
 	@echo "Grafana -> http://localhost:3000  (user: admin, password: make output -> grafana_admin_password)"
