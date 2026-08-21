@@ -5,7 +5,8 @@ import { loadConfig, DEFAULT_PORT } from "./config.ts";
 const paths = {
   DRILL_WEB_ROOT: "/app/web",
   DRILL_ANSWERS_DIR: "/app/scenarios/answers",
-  DRILL_WORKSPACE: "/workspace",
+  DRILL_WORKSPACE: "/drill/workspace",
+  DRILL_LOG_DIR: "/drill/pty",
   DRILL_SCENARIO: "03",
 };
 
@@ -15,6 +16,14 @@ test("the port and host have defaults; the paths do not", () => {
   assert.equal(cfg.host, "0.0.0.0");
   assert.equal(cfg.webRoot, "/app/web");
   assert.equal(cfg.scenario, "03");
+});
+
+test("the pty log lives outside the workspace, so it is not in the learner's git status", () => {
+  const cfg = loadConfig({ ...paths });
+  assert.ok(
+    !cfg.logDir.startsWith(cfg.workspaceDir),
+    "the terminal log must not sit inside the cloned repo",
+  );
 });
 
 test("DRILL_PORT overrides the default", () => {

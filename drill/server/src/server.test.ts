@@ -12,6 +12,9 @@ const ANSWERS_DIR = new URL("../../../scenarios/answers", import.meta.url)
 const WORKSPACE = new URL("../test-fixtures/workspace", import.meta.url)
   .pathname;
 
+/** The terminal log never goes near the workspace; these tests never open one. */
+const LOG_DIR = join(tmpdir(), "drill-server-test-logs");
+
 let app: FastifyInstance;
 
 before(async () => {
@@ -21,6 +24,7 @@ before(async () => {
     webRoot: WEB_ROOT,
     answersDir: ANSWERS_DIR,
     workspaceDir: WORKSPACE,
+    logDir: LOG_DIR,
     scenario: "03",
   });
 });
@@ -122,6 +126,7 @@ test("session state starts at the first task with nothing passed", async () => {
     webRoot: WEB_ROOT,
     answersDir: ANSWERS_DIR,
     workspaceDir: WORKSPACE,
+    logDir: LOG_DIR,
     scenario: "03",
   });
   const state = (
@@ -162,6 +167,7 @@ test("only-imperative fires on the first kubectl rollback and stops once the git
     webRoot: WEB_ROOT,
     answersDir: ANSWERS_DIR,
     workspaceDir: WORKSPACE,
+    logDir: LOG_DIR,
     scenario: "03",
   });
   const submit = (answer: string) =>
@@ -207,6 +213,7 @@ test("a file task grades the workspace on disk, not what was typed", async () =>
     webRoot: WEB_ROOT,
     answersDir: ANSWERS_DIR,
     workspaceDir: dir,
+    logDir: LOG_DIR,
     scenario: "03",
   });
   const verdict = (
@@ -245,6 +252,7 @@ test("a right-but-uncommitted file is graded against cluster git, not the worksp
     webRoot: WEB_ROOT,
     answersDir: ANSWERS_DIR,
     workspaceDir: dir,
+    logDir: LOG_DIR,
     scenario: "03",
     // Cluster git is still on the old tag, which is what Argo CD would sync.
     readCommitted: async () => "frontend:\n  image:\n    tag: 1.27-alpine\n",
@@ -274,6 +282,7 @@ test("no reader means commit state is not graded at all, never graded as false",
     webRoot: WEB_ROOT,
     answersDir: ANSWERS_DIR,
     workspaceDir: dir,
+    logDir: LOG_DIR,
     scenario: "03",
     readCommitted: async () => undefined,
   });
@@ -286,6 +295,33 @@ test("no reader means commit state is not graded at all, never graded as false",
   ).json();
   assert.equal(verdict.passed, true, "absent means not known, never false");
   await s.close();
+});
+
+// --- the editor's file access ---------------------------------------------------
+
+test("the editor can read the file its task names", async () => {
+  const res = await app.inject({
+    method: "GET",
+    url: "/api/file?path=helm/practice-app/values.yaml",
+  });
+  assert.equal(res.statusCode, 200);
+  assert.match(res.json().content, /1\.27-alpine/);
+});
+
+test("the editor cannot read its way out of the workspace", async () => {
+  for (const path of ["../../../etc/passwd", "/etc/passwd", ".git/config"]) {
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/file?path=${encodeURIComponent(path)}`,
+    });
+    assert.equal(res.statusCode, 400, `${path} was not refused`);
+    assert.ok(!res.body.includes("root:"), `${path} leaked a file`);
+  }
+});
+
+test("asking for no path at all is a 400, not a directory read", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/file" });
+  assert.equal(res.statusCode, 400);
 });
 
 // --- the SPA fallback ----------------------------------------------------------

@@ -17,6 +17,8 @@ import {
   type AnswerTask,
 } from "./grader/answers.ts";
 import { grade, type GradeContext } from "./grader/index.ts";
+import { readWorkspaceFile, WorkspaceError } from "./workspace.ts";
+import { registerTerminal } from "./ws.ts";
 import type { ServerOptions } from "./config.ts";
 
 /**
@@ -74,6 +76,27 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   app.get("/api/session", async () => state);
 
   app.get("/api/tasks", async () => answers.tasks.map(toPublic));
+
+  // The editor opens the file the current task names. It is a route rather than a
+  // websocket message because Monaco asks for it once, on mount, and a request that
+  // has an answer is a request.
+  app.get<{ Querystring: { path?: string } }>(
+    "/api/file",
+    async (req, reply) => {
+      const path = req.query.path;
+      if (!path) return reply.code(400).send({ error: "path is required" });
+      try {
+        return {
+          path,
+          content: await readWorkspaceFile(opts.workspaceDir, path),
+        };
+      } catch (e) {
+        if (e instanceof WorkspaceError)
+          return reply.code(400).send({ error: e.message });
+        throw e;
+      }
+    },
+  );
 
   app.post<{ Body: { taskId: string; answer: string } }>(
     "/api/submit",
@@ -134,6 +157,8 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
       return verdict;
     },
   );
+
+  await registerTerminal(app, opts, state);
 
   await app.register(fastifyStatic, { root: opts.webRoot, wildcard: false });
   app.setNotFoundHandler((req, reply) => {

@@ -5,6 +5,16 @@ export interface ServerOptions {
   webRoot: string;
   answersDir: string;
   workspaceDir: string;
+  /**
+   * Where the PTY log is teed, and deliberately NOT derived from workspaceDir.
+   *
+   * It has to be on the same PVC as the workspace, or a pod restart replays
+   * nothing, and it has to be OUTSIDE the workspace, or it shows up in the
+   * learner's `git status` in a drill whose whole subject is committing. Both
+   * constraints are about where the volume is mounted, which is a deployment fact
+   * this process cannot see, so it is asked for rather than guessed.
+   */
+  logDir: string;
   scenario: string;
 }
 
@@ -41,6 +51,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerOptions {
     webRoot: required("DRILL_WEB_ROOT"),
     answersDir: required("DRILL_ANSWERS_DIR"),
     workspaceDir: required("DRILL_WORKSPACE"),
+    logDir: required("DRILL_LOG_DIR"),
     scenario: required("DRILL_SCENARIO"),
   };
 }

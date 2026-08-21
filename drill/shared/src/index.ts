@@ -40,6 +40,13 @@ export type ServerMessage =
   | { type: "verdict"; verdict: Verdict }
   | { type: "session"; state: SessionState }
   | { type: "deps"; deps: DependencyStatus[] }
+  /**
+   * The autosave landed on disk. The editor shows the same "saved" indicator VS
+   * Code does, and it has to mean the server wrote the file rather than that the
+   * browser sent a frame - the two differ exactly when it matters, which is when
+   * the save was refused.
+   */
+  | { type: "file:saved"; path: string }
   | { type: "error"; message: string };
 
 /** One link in the startup dependency chain, surfaced in the GUI's status view. */
