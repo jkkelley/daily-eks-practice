@@ -4,7 +4,7 @@
   "slug": "phase-4-terraform-the-shared-alb-the-source-ip-s",
   "title": "Phase 4: Terraform - the shared ALB, the source-IP security group, and non-orphaning teardown",
   "type": "feature",
-  "status": "in-review",
+  "status": "done",
   "priority": "p1",
   "created": "2026-08-19",
   "updated": "2026-08-20",
