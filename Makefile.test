@@ -62,6 +62,7 @@ answers-check: ## Fail if PRACTICE_ANSWERS.html is stale vs scenarios/answers/*.
 script-tests: ## Unit tests for the laptop-side scripts in scripts/ (offline, stdlib only)
 	python3 -m unittest tests.test_resolve_auto_cidrs
 	python3 tests/test_git_seed.py
+	python3 tests/test_gen_argocd_app.py
 
 cluster-git-test: ## Prove on kind that Argo CD clones in-cluster git ($0; needs `ministack` first)
 	bash tests/cluster-git-argo.sh

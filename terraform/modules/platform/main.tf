@@ -189,6 +189,14 @@ resource "helm_release" "argocd" {
 
   values = [yamlencode({
     configs = {
+      cm = {
+        # Argo polls its source every 180s by default. The drill loop is push-then-
+        # watch in one browser, and a three-minute wait after a push is a bad drill.
+        # The usual warnings about low intervals are about hundreds of Applications
+        # hitting github.com rate limits; here it is one Application against a git
+        # server two hops away, with manifests cached by commit SHA. Cost is nil.
+        "timeout.reconciliation" = "10s"
+      }
       params = {
         "server.insecure" = true # plain HTTP behind port-forward/Ingress; TLS is a scenario
       }
