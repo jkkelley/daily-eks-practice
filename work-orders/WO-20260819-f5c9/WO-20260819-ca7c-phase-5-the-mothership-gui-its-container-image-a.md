@@ -4,13 +4,13 @@
   "slug": "phase-5-the-mothership-gui-its-container-image-a",
   "title": "Phase 5: the mothership GUI, its container image, and the first visual",
   "type": "feature",
-  "status": "ready",
+  "status": "in-progress",
   "priority": "p1",
   "created": "2026-08-19",
-  "updated": "2026-08-19",
+  "updated": "2026-08-21",
   "created_at": "2026-08-19T19:32:20-05:00",
   "parent": "WO-20260819-f5c9",
-  "branch": null,
+  "branch": "feat/phase-5-the-mothership-gui-its-container-image-a",
   "pr": null,
   "merge_sha": null,
   "closed": null,
@@ -59,7 +59,8 @@ The drill has no surface. Grading exists but there is nowhere to type, nowhere t
 ## Acceptance criteria
 
 
-- [ ] `AC-H1` *(human)* the UI is served from a Vite dev server in Podman on a probed port in 30000+ and shown to the user at Task 5.3, and the ticket stops there until they have looked at it
+- [x] `AC-H1` *(human)* the UI is served from a Vite dev server in Podman on a probed port in 30000+ and shown to the user at Task 5.3, and the ticket stops there until they have looked at it
+  - observed `2026-08-21` Served from Vite in Podman on a probed port (make -f Makefile.test drill-dev, port 57290 this run) and driven in a real headless Chrome over CDP. Screenshots captured of the tasks view, the card view and a graded run. Typing 'git log --oneline' in the browser terminal reached the shell and printed '625fb78 (HEAD -> master) preview workspace'. Submitting 'kubectl -n practice-app rollout undo deploy/practice-app-frontend' on task 5 returned a PASS carrying the only-imperative hint, and the status row moved to 1/6 PASSED. NOT YET SEEN BY THE USER - the ticket is held here, which is the second half of this criterion.
 - [ ] `AC-H2` *(human)* Tasks 5.4 and 5.5 are expanded from interface level into full step-by-step tasks only after that review, because they depend on what the user says when they see it
 - [ ] `AC-H3` *(human)* the built image is inspected and contains no scripts/config.toml and no .kubeconfig file, proving the deny-by-default .containerignore holds after the build context widened to the repo root
 - [ ] `AC-H4` *(human)* the pod comes up on kind and serves the terminal, the editor and both panels
@@ -82,6 +83,11 @@ _none_
 ## Notes
 
 _Newest first. Appended only by `work-order note` - never by hand._
+
+- `2026-08-21` Still blocked on the user, unchanged from the Phase 5 hydration prompt: scripts/config.toml needs enable_cluster_git, drill_ingress_group_name and drill_allowed_cidrs before any real plan, and 'gh auth refresh -h github.com -s write:packages' is interactive and must be run by them. Neither bites before Task 5.5.
+- `2026-08-21` AC-H1 is evidenced for the serve-and-show half only. The user has not looked at it yet, so the ticket stays in-progress at Task 5.3 and AC-H2, H3, H4 and H5 are all untouched: H2 waits on the review, H3 and H5 need the deployment from 5.5, H4 needs the image on kind.
+- `2026-08-21` Carried forward, unchanged: AC-H3 from WO-20260819-1fea (one ALB across three Ingresses) is still unobservable - no Ingress ships until Task 5.5. The GradeContext obligation from CONTEXT_STATE is DONE: accepted comes from SessionState.attempts and committed arrives through an injected readCommitted seam that Task 5.5 fills with a git-backed reader. The workspace-is-a-git-clone rule is not yet implementable either; it lands with the PVC in Task 5.5. Protocol addition: ServerMessage gains file:saved, so the editor's saved indicator means the server wrote the file. Two new server routes beyond the plan's list, both needed by 5.3: GET /api/scenario for the card panel and GET /api/file for Monaco, the latter jailed by workspace.ts along with file:save.
+- `2026-08-21` Tasks 5.1-5.3 shipped in 86776dd, 69565f0, f35c707. Stopped at 5.3 for the user's review, per AC-H1. 107 tests pass; typecheck, build and the static suite are green. Nine defects fixed in the plan's own text or code, each found by running it: node-pty cannot install on any stock node image (the plan's Debian fallback fails identically, so Makefile.test now builds drill/Containerfile.build); a session-state test asserted against a shared server four earlier tests had submitted to; loadConfig turned a bad DRILL_PORT into NaN and Fastify would listen on a random port; the pty log path was derived as workspaceDir/../pty, which in the pod resolves off the PVC; openLog was async so the shell's first output missed the log; dispose ended the log stream before killing the PTY; the terminal's first resize was sent before the socket opened and silently dropped, which left the terminal BLANK while tmux was healthy; tmux's attach redraw was lost because the ws route subscribes after constructing the session; and WebglAddon draws nothing at all under software rendering.
 
 ## Outcome
 
