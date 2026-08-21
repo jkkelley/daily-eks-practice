@@ -23,6 +23,7 @@ import {
   WorkspaceError,
 } from "./workspace.ts";
 import { registerTerminal } from "./ws.ts";
+import { gitStatus } from "./git.ts";
 import type { ServerOptions } from "./config.ts";
 
 /**
@@ -97,6 +98,11 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   // template > out.yaml` changes the tree behind the panel's back, and a stale tree
   // in a drill about editing files is worse than a re-walk that costs milliseconds.
   app.get("/api/tree", async () => listWorkspaceTree(opts.workspaceDir));
+
+  // What git makes of the workspace. Reports only - stage, unstage and commit are
+  // deliberately absent, because `git add && git commit` in the terminal IS
+  // scenario 03's model answer and a button would let it be skipped.
+  app.get("/api/git/status", async () => gitStatus(opts.workspaceDir));
 
   // The editor opens the file the current task names. It is a route rather than a
   // websocket message because Monaco asks for it once, on mount, and a request that

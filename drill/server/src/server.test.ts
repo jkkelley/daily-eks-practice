@@ -343,6 +343,16 @@ test("the explorer gets the workspace tree", async () => {
   );
 });
 
+test("the source control view gets a status, repo or no repo", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/git/status" });
+  assert.equal(res.statusCode, 200);
+  const status = res.json() as { repo: boolean; files: unknown[] };
+  // The fixture workspace is a plain directory, not a clone. The route must still
+  // answer - a missing repo is a state the panel renders, not a failed request.
+  assert.equal(status.repo, false);
+  assert.deepEqual(status.files, []);
+});
+
 test("the editor cannot read its way out of the workspace", async () => {
   for (const path of ["../../../etc/passwd", "/etc/passwd", ".git/config"]) {
     const res = await app.inject({

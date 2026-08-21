@@ -20,20 +20,24 @@ SCENARIO=${DRILL_SCENARIO:-03}
 rm -rf "$WORKSPACE"
 mkdir -p "$WORKSPACE" "$LOGS" "$WEBROOT"
 
-# A representative slice of the repo, not one file. The explorer is the point of
-# the panel and a tree with a single leaf tells you nothing about whether it works.
-# In the cluster this is a full git clone; here it is a copy of the parts a drill
-# ever touches, and deliberately NOT scripts/, which holds config.toml.
-for dir in helm scenarios; do
-  cp -r "/repo/$dir" "$WORKSPACE/$dir"
-done
-cp /repo/README.md /repo/CLAUDE.md /repo/COMPASS.md "$WORKSPACE/" 2>/dev/null || true
+# ONLY what the learner's repository holds, which is what scripts/git-seed.py
+# seeds cluster git with - see DRILL_PATHS there. The preview has to match, or it
+# shows a workspace nobody will ever get.
+#
+# Not scenarios/ (which contains the ANSWER KEY), not docs/ (the plan, which
+# explains every task), not drill/ (the grader's source), not CLAUDE.md or
+# COMPASS.md or README.md. The terminal is a real shell in this tree, so anything
+# copied here is something `ls` and `cat` reach, and the server's care over never
+# sending accept rules to the browser would be pointless.
+cp -r /repo/helm "$WORKSPACE/helm"
 
 # A real repo, so the terminal's git behaves and `git status` shows the edit the
 # editor just made. The remote is a dead end on purpose: this preview has no
 # cluster git to push to, and it must not inherit the repo's real origin.
 if [ ! -d "$WORKSPACE/.git" ]; then
-  git -C "$WORKSPACE" init -q
+  # -b main, because that is what git-seed.py creates and what the Argo CD
+  # Application targets. A preview on `master` would be a different environment.
+  git -C "$WORKSPACE" init -q -b main
   git -C "$WORKSPACE" config user.email drill@localhost
   git -C "$WORKSPACE" config user.name "drill preview"
   git -C "$WORKSPACE" add -A

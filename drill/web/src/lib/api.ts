@@ -57,3 +57,22 @@ export interface TreeNode {
 }
 
 export const getTree = () => json<TreeNode[]>("/api/tree");
+
+export interface GitFile {
+  path: string;
+  index: string;
+  worktree: string;
+  staged: boolean;
+  untracked: boolean;
+  from?: string;
+}
+
+export interface GitStatus {
+  repo: boolean;
+  branch: string | null;
+  ahead: number;
+  behind: number;
+  files: GitFile[];
+}
+
+export const getGitStatus = () => json<GitStatus>("/api/git/status");

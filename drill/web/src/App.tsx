@@ -14,6 +14,8 @@ import {
   getScenario,
   getTasks,
   getTree,
+  getGitStatus,
+  type GitStatus,
   type PublicTask,
   type ScenarioMeta,
   type TreeNode,
@@ -27,7 +29,11 @@ import {
 import { languageFor } from "./lib/language.ts";
 import { TerminalPanel } from "./panels/TerminalPanel.tsx";
 import { Explorer } from "./panels/Explorer.tsx";
-import { ActivityRail } from "./panels/ActivityRail.tsx";
+import {
+  ActivityRail,
+  type SidebarView,
+} from "./panels/ActivityRail.tsx";
+import { SourceControl } from "./panels/SourceControl.tsx";
 import { ThemePicker } from "./panels/ThemePicker.tsx";
 import { AnswersPanel } from "./panels/AnswersPanel.tsx";
 import { HelpPanel } from "./panels/HelpPanel.tsx";
@@ -58,7 +64,8 @@ export function App() {
     null,
   );
 
-  const [explorerOpen, setExplorerOpen] = useState(true);
+  const [sidebar, setSidebar] = useState<SidebarView | null>("explorer");
+  const [git, setGit] = useState<GitStatus | null>(null);
   const [picking, setPicking] = useState(false);
   const [theme, setTheme] = useState(loadSavedTheme);
 
@@ -72,6 +79,29 @@ export function App() {
     void getTree()
       .then(setTree)
       .catch(() => setTree([]));
+  }, []);
+
+  /**
+   * Poll git while the drill is running.
+   *
+   * Commits happen in the TERMINAL, not here - that is the whole design - so
+   * nothing in this app knows when the working tree changed. There is no event to
+   * subscribe to, and a stale "1 change" badge next to a clean tree teaches the
+   * opposite of the lesson. A `git status` on a small workspace is a few
+   * milliseconds; three seconds of it is cheaper than being wrong.
+   */
+  useEffect(() => {
+    let alive = true;
+    const read = () =>
+      void getGitStatus()
+        .then((s) => alive && setGit(s))
+        .catch(() => undefined);
+    read();
+    const timer = window.setInterval(read, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -170,9 +200,10 @@ export function App() {
     <div className="shell">
       <div className="stage">
         <ActivityRail
-          explorerOpen={explorerOpen}
-          onToggleExplorer={() => setExplorerOpen((v) => !v)}
+          view={sidebar}
+          onSelect={setSidebar}
           onOpenThemes={() => setPicking(true)}
+          changeCount={git?.files.length ?? 0}
         />
 
         <PanelGroup
@@ -180,16 +211,24 @@ export function App() {
           className="workbench"
           autoSaveId="drill-h"
         >
-          {explorerOpen && (
+          {sidebar && (
             <>
-              <Panel defaultSize={16} minSize={10} maxSize={34} order={1}>
-                <Explorer
-                  tree={tree}
-                  activePath={activePath}
-                  dirty={dirty}
-                  onOpen={openFile}
-                  taskPath={taskPath}
-                />
+              <Panel defaultSize={17} minSize={10} maxSize={34} order={1}>
+                {sidebar === "explorer" ? (
+                  <Explorer
+                    tree={tree}
+                    activePath={activePath}
+                    dirty={dirty}
+                    onOpen={openFile}
+                    taskPath={taskPath}
+                  />
+                ) : (
+                  <SourceControl
+                    status={git}
+                    activePath={activePath}
+                    onOpen={openFile}
+                  />
+                )}
               </Panel>
               <PanelResizeHandle className="handle" />
             </>
