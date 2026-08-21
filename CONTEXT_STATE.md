@@ -104,41 +104,9 @@ The plan document contradicts several of these and needs amending: its architect
 
 ## The drill loop
 
-Settled with the user 2026-08-21. Everything downstream depends on this, so it is stated once, here.
-
-**The browser is the only interface.** The user reaches one frontend pod through the ALB and never leaves it. Their own terminal is not part of the drill.
-
-```
-  USER'S BROWSER
-        |  one ALB, source-IP restricted
-        v
-  drill-gui pod            ns: practice-drill
-    terminal (real PTY, tmux) | IDE (Monaco) | answers + hints | Argo + Grafana proxied
-        |                          |
-        |  git commit && git push  |  edits values.yaml
-        |                          v
-        |                    workspace PVC  - a CLONE of cluster git,
-        |                                     so origin IS cluster git
-        v
-  git-server               ns: git        <- the "real" git the user sees
-    git daemon :9418, PVC /repos/repo.git
-        |
-        |  Argo polls every 10s
-        v
-  Argo CD                  ns: argocd
-    Application: automated sync; selfHeal per-scenario
-        |
-        |  syncs
-        v
-  practice-app             ns: practice-app
-    new image tag rolls out - the user watches it in the same browser
-```
-
-**What is real and what is simulated.** Real git, real push, real Argo clone and sync. The only simulated thing is *whose* repo the remote is. A drill push must never land on the user's actual GitHub account, and it cannot, because the workspace was cloned from cluster git.
-
-**The laptop's role is bring-up only**: `terraform apply` and one `make git-seed` to put the code in the cluster. After that the loop above is closed inside the cluster.
-
-**The learner never meets the plumbing.** git identity, `safe.directory`, `origin`, the absence of any GitHub credential in the pod - all pre-set. They see the scenario and the env, nothing else.
+**The north star lives in `COMPASS.md`, not here.** It is the drill loop diagram plus what it commits us to.
+`CLAUDE.md` carries the SOP for when and how it is updated.
+It is deliberately not duplicated into this file: this one is long and often read in pieces, and a half-read north star is worse than a pointer to a whole one.
 
 ## Decisions Made
 
@@ -176,6 +144,7 @@ Settled with the user 2026-08-21. Everything downstream depends on this, so it i
 | 2026-08-21 | Argo `automated` sync is **global**; `selfHeal` is **per-scenario, default off**    | Polling controls detection, `syncPolicy` controls action - separate switches. `selfHeal` reverts drift on anything the Application manages, so it would stomp any scenario where an imperative `kubectl` change is the exercise. Off by default so a new scenario cannot be silently sabotaged by a setting it never asked about |
 | 2026-08-21 | Scenario 03 sets `self_heal = true` deliberately                                    | Its task 3 asks for a rollback two ways and asks when the imperative one bites. With selfHeal on, `rollout undo` gets yanked back within ~10s and the trap springs in front of the learner. 03 has no task needing an imperative change to survive - the `rollout undo` is meant to be defeated. `03.toml` already documents both modes, so this is a teaching choice, not a correctness fix |
 | 2026-08-21 | **The learner sees the scenario and the env, nothing else**                          | Plumbing gotchas are solved invisibly: git identity, `safe.directory`, `origin`, and the absence of any GitHub credential in the pod are all pre-set. This is a design permission, not a shortcut - it is what lets the env behave like a real one without the learner meeting our scaffolding |
+| 2026-08-21 | `COMPASS.md` is the north star, single copy, and `CLAUDE.md` carries the SOP | A second copy of the drill loop drifts, and a drifted north star is worse than none because it is still trusted. COMPASS routes and never explains, capped at 100 lines, per the project-scaffold standard. Update rule: same PR as the change that caused it, by whoever made the change, and a change to the loop itself needs the user's approval before it is written |
 
 ## Lessons Learned
 

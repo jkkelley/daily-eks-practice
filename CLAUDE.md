@@ -3,6 +3,36 @@
 Agent rules for this repo.
 This is a **learning/practice** project: a small, cheap, spin-up/spin-down EKS playground with a Helm fe/be app, tiny RDS, Argo CD, and Prometheus/Grafana, driven through ticket-style scenario cards.
 
+## The north star
+
+**`COMPASS.md` holds the north star: the drill loop.** Read it before any change. Everything in this repo answers to that picture - a change that does not serve the loop is out of scope, and one that contradicts it is wrong.
+
+It is not duplicated here on purpose. One copy, in `COMPASS.md`. A second copy drifts, and a drifted north star is worse than none because it is trusted.
+
+### When COMPASS.md gets updated
+
+Only when the thing it depicts actually changes. Specifically:
+
+- a component enters or leaves the loop, or moves namespace
+- what the user interacts with changes
+- what is **real** versus **simulated** changes
+- a path in a pointer row moves, is renamed, or is deleted
+
+Routine work does not touch it. Adding a scenario, fixing a bug, threading a variable - none of those are north star changes.
+
+### How it gets updated
+
+1. **In the same PR as the change that caused it.** Never as a follow-up, never as its own PR. A north star that lags the code by even one merge has already lied to somebody.
+2. **By whoever made the change.** It is part of the deliverable, like a test.
+3. **A change to the loop itself needs the user's explicit approval before it is written.** Pointer rows and moved paths do not - fix those silently and immediately.
+4. **Staleness is a defect**, the same severity as a failing test. A row pointing at a path that no longer exists gets fixed in the change that moved the file.
+
+### What COMPASS.md is not
+
+It routes; it never explains. Hard cap 100 lines. The moment it explains something it has duplicated the file it points at, and the duplicate goes stale. If it does not fit in the cap, it belongs in the file being pointed at - not in a longer COMPASS.
+
+If a change contradicts the north star, stop and raise it. Do not quietly edit the picture to match the code.
+
 ## What this repo is
 
 A modular Terraform EKS project plus daily drill scenarios and a sealed answer key.
