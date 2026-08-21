@@ -61,6 +61,8 @@ Real git, real push, real Argo sync - only _whose_ repo the remote is is simulat
 | `terraform/envs/dev`                             | the only env; backend + one stack call          | changing what gets provisioned                   |
 | `terraform/modules/stack`                        | composition; the only place modules wire        | adding a module or threading a variable          |
 | `terraform/modules/platform/cluster-git.tf`      | the git server; rung verdict in its header      | touching the git protocol                        |
+| `terraform/modules/platform/drill-ingress.tf`    | the source-IP SG - the only control on the GUI  | anything about who can reach the drill           |
+| `scripts/pre-destroy.py`                         | teardown that does not orphan a billing ALB     | changing `make down`                             |
 | `terraform/modules/{vpc,eks,addons,rds,storage}` | raw resources, kept transparent                 | learning how a piece works                       |
 | `scripts/config.example.toml`                    | every config value, documented                  | adding a Terraform variable                      |
 | `scripts/bootstrap.py`                           | config -> tfvars -> terraform                   | anything Terraform runs through                  |
