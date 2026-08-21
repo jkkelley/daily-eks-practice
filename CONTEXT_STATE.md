@@ -7,8 +7,8 @@
 
 | Field        | Value                                                                              |
 | ------------ | ---------------------------------------------------------------------------------- |
-| last_updated | 2026-08-21 04:05 UTC                                                               |
-| updated_by   | Phase 5 Tasks 5.1-5.3 (WO-20260819-ca7c), held at the Task 5.3 review              |
+| last_updated | 2026-08-21 06:20 UTC                                                               |
+| updated_by   | Phase 5 review PASSED; 5.1-5.3 plus the IDE upgrade shipped (WO-20260819-ca7c)              |
 | project      | daily-eks-practice                                                                 |
 | repo         | see `git remote -v` - the owner string is PII per `CLAUDE.md` and is not committed |
 
@@ -51,7 +51,7 @@
 
 | Priority | Task                                                                                        | Status   | Next Action                                                                                                                                                                                  |
 | -------- | ------------------------------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1        | `WO-20260819-ca7c - Phase 5: the mothership GUI, its container image, and the first visual` | **held** | Tasks 5.1-5.3 are done and on the branch. **Waiting on the user to look at the GUI** - that is AC-H1, and AC-H2 forbids expanding 5.4/5.5 until they have. `make -f Makefile.test drill-dev` |
+| 1        | `WO-20260819-ca7c - Phase 5: the mothership GUI, its container image, and the first visual` | **in-progress** | **The Task 5.3 review PASSED - the user approved the GUI.** AC-H1 ticked, AC-H2 unblocked. Next action: expand Tasks 5.4 and 5.5 from interface level, then build them |
 | 2        | Carry AC-H3 into Phase 5's acceptance                                                       | ready    | Phase 4's AC-H3 asks for a plan showing one ALB across three Ingresses, but Phase 4 ships no Ingress on purpose. First observable at Phase 5 - do not let it lapse                           |
 | 3        | Port scenarios 01-02 and 04-12 to the drill format                                          | pending  | After the scenario 03 vertical slice is proven end to end. One at a time                                                                                                                     |
 | 4        | Apply the 2026-08-21 drill-loop decisions to shipped code                                   | partial  | Two of four are **done** - the Argo reconciliation timeout and the Application sync policy, shipped alongside this refresh. The two remaining touch Phase 1/2 code and Phase 5 - see below   |
@@ -135,6 +135,15 @@ Cluster git is the drill path and gets `automated`; the GitHub fallback is the p
 - Protocol addition in `@drill/shared`: `ServerMessage` gains `file:saved`, so the editor's saved indicator means the server wrote the file rather than that the browser sent a frame.
 - 107 tests, all in Podman.
 
+**What the Task 5.3 review changed, all of it shipped.** The user approved the shell, then asked for an IDE - explore the whole repo, several files open, switch themes - and for the source control view. Both are in.
+
+- `drill/web/src/panels/` gained `ActivityRail.tsx` (explorer / source control / themes, no dead icons), `Explorer.tsx`, `SourceControl.tsx` and `ThemePicker.tsx`. `EditorPanel.tsx` grew tabs, a breadcrumb and one Monaco model per path.
+- `drill/web/src/lib/` gained `themes.ts` (five original themes, each carrying Monaco data + chrome CSS variables + the eight ANSI colours for xterm) and `language.ts`, which is **deliberately** separate from `monaco.ts` - see the bundle-shape guard below.
+- Server: `GET /api/tree` (jailed, `.git` and `node_modules` hidden, capped), `GET /api/git/status`, `GET /api/scenario`, `GET /api/file`. `drill/server/src/git.ts` and `workspace.ts` are new.
+- `tests/test_web_bundle_shape.py` is new and is in `script-tests`. It asserts the Monaco import shape, because that invariant broke twice in opposite directions with every test green and the build output as the only witness.
+- **`scripts/git-seed.py` no longer seeds `--all`.** `DRILL_PATHS = ["helm"]`. See the decision rows; this was a Phase 3 defect that Task 5.5 would have inherited.
+- 122 tests. Entry bundle 489 KB with Monaco in the lazy chunk.
+
 ## The drill loop
 
 **The north star lives in `COMPASS.md`, not here.** It is the drill loop diagram plus what it commits us to.
@@ -196,6 +205,12 @@ It is deliberately not duplicated into this file: this one is long and often rea
 | 2026-08-21 | **Layout: activity rail on the far left, tasks and card stay on the right.** The user's pick from three | The rail is what makes it read as an IDE at a glance, and collapsing the explorer from it buys the editor width back on a small screen. Everything stays on one screen, so there is nothing to navigate to and no "which view am I in". **Fallback if four columns prove too dense below ~1440px:** the two-view toggle - the drill view exactly as it is now, plus a full-width IDE view - which was the runner-up and needs only a route, not a rebuild. Also considered and dropped: a plain file-tree column with no rail, which is less furniture but correspondingly less obviously an IDE |
 
 ## Lessons Learned
+
+- 2026-08-21: **A test suite can be entirely green while the product is unusable.** Every defect in the Task 5.3 and IDE work - a blank terminal, an empty editor, an unthemed panel, Monaco fetching itself from a CDN - passed the whole suite. For anything with a surface, running it and looking at it is a different instrument, not a formality after the tests.
+- 2026-08-21: Monaco applies `defaultValue` **once**, when it creates the model for a `path`, and ignores every later change to it. Mounting the editor against an empty placeholder pins the buffer empty forever: the file loads, the state updates, and the editor still shows nothing. Do not mount until the content is real.
+- 2026-08-21: A side-effect import is invisible to every tool. Splitting a pure helper out of `lib/monaco.ts` left **nothing** importing it, so `loader.config` never ran and the editor silently went back to a CDN - the same bug fixed an hour earlier from the opposite direction. When an import is load-bearing but unreferenced, assert its presence in a test.
+- 2026-08-21: `git -C <dir> status` **walks up** until it finds a repository. A directory that is not a repo but sits inside one reports the parent's status, with paths relative to a root the caller cannot use. Compare `rev-parse --show-toplevel` to the directory you meant.
+- 2026-08-21: `execFileSync("tmux", ...)` and friends make a test hang rather than fail when the assertion throws before the cleanup line - the pty keeps the event loop alive. A red test that hangs for 600s reads as a broken harness; put terminal disposal in an `after` hook, not after the assertions.
 
 - 2026-08-21: **A message sent on a websocket that is not yet `OPEN` is dropped silently, and the message most likely to be sent that early is the one that matters most.** The terminal's `ResizeObserver` fires on mount, before the socket connects, so the PTY never learned its real size: tmux redrew a 32-row screen into a 23-row terminal and the prompt landed in a row nothing displayed. The terminal was blank in front of a perfectly healthy session, with nothing in any log and no failing test. Re-send state on connect; do not assume a send at mount arrives.
 - 2026-08-21: A producer that starts before anyone can subscribe loses its first burst. tmux dumps its **entire** redraw the instant it attaches, and a websocket route cannot subscribe until it has constructed the session it wants to subscribe to. The log tee, registered in the constructor, caught those bytes; the browser did not. **Buffer until the first subscriber** whenever construction itself starts the output.
@@ -267,144 +282,150 @@ answers to it. A change that does not serve the drill loop is out of scope; one
 that contradicts it is wrong, and the fix is to stop and raise it, never to
 quietly edit the picture to match the code.
 
-Then read CLAUDE.md, especially its "The north star" section - that is the SOP
-for when and how COMPASS.md gets updated, and staleness in it is a defect of the
-same severity as a failing test.
+Then read CLAUDE.md, especially its "The north star" section, then this whole
+file. Use the Infrastructure and Toolchain tables as ground truth.
 
-Then read CONTEXT_STATE.md in this project root.
-Use the Infrastructure and Toolchain tables as ground truth.
+## THE JOB: FINISH PHASE 5.
 
-**You are resuming WO-20260819-ca7c - Phase 5: the mothership GUI, its container
-image, and the first visual, mid-ticket.** It is already `in-progress` on branch
-feat/phase-5-the-mothership-gui-its-container-image-a. Do NOT run
-`work-order.sh start` again. Read the ticket first, including its Notes, which
-carry what was found and what is carried forward:
+You are resuming WO-20260819-ca7c - Phase 5: the mothership GUI, its container
+image, and the first visual, MID-TICKET. It is already `in-progress` on branch
+feat/phase-5-the-mothership-gui-its-container-image-a with 8 commits on it and a
+clean tree. Do NOT run `work-order.sh start` again, and do NOT start anything
+else until Phase 5 is closed out.
+
+**Read the ticket's `## Notes` before you read anything else.** They are the
+finest-grained record of this work - every defect found, both IDE decisions with
+their fallbacks, the workspace-filter reasoning, and what is parked. This file
+routes; the Notes are the record:
 work-orders/WO-20260819-f5c9/WO-20260819-ca7c-phase-5-the-mothership-gui-its-container-image-a.md
 
-**Tasks 5.1, 5.2 and 5.3 are DONE** - commits 86776dd, 69565f0, f35c707. The GUI
-is real: server, PTY over websocket, and the four-panel React shell. 107 tests
-pass, typecheck and build are green, and the whole loop was driven in a browser.
+The previous session ended at 59% context. Rebuild your picture from this file
+and those Notes, not by trawling git history.
 
-**The ticket is HELD at the Task 5.3 review, and that hold is AC-H1 and AC-H2.**
-AC-H1 is evidenced for the serve-and-show half only. Before anything else,
-establish whether the user has actually looked at the GUI:
-  make -f Makefile.test drill-dev     # prints a localhost URL, ctrl-c to stop
-If they have not, show them and stop. **Do not expand Tasks 5.4 or 5.5 until
-they have** - AC-H2 says so in as many words, and those two tasks are specified
-at interface level precisely because they depend on what the user says when they
-see it.
+## WHAT IS DONE
 
-Then read Tasks 5.4 and 5.5 of
-docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md, starting at the
-`## Phase 5: The mothership GUI` heading, plus the plan's `## Global Constraints`
-section, which binds this ticket in full and is deliberately not restated in it.
+Tasks 5.1, 5.2 and 5.3, plus everything the user asked for at the 5.3 review.
+The GUI is real and was driven end to end in a browser: a command typed in the
+terminal reaches the shell and comes back, grading returns a verdict, the
+explorer lists the workspace, tabs and themes work, and the source control view
+shows an uncommitted edit. 122 tests, the static suite, typecheck and build are
+all green.
 
-**The plan is the authority and it is also wrong in places.** Nine defects in its
-Phase 5 text were fixed while executing 5.1-5.3, every one invisible on reading
-and every one found by running it. Read the Decisions and Lessons rows dated
-2026-08-21 before you follow a plan step literally. The sharpest: a terminal that
-was completely blank in front of a healthy session because a resize message was
-sent one tick before the websocket opened, and 106 passing tests said nothing.
+**AC-H1 is ticked and the review PASSED.** The user approved the GUI, so AC-H2 is
+unblocked and Tasks 5.4 and 5.5 may now be expanded.
 
-**What Phase 5 still owes, none of it started:**
-- Task 5.4 - the Argo CD widget over the Kubernetes API (not Argo's REST API, so
-  no token) and the reverse proxy. `DependencyStatus` already exists in
-  drill/shared and HelpPanel already renders a `deps` list; nothing sends one yet.
-- Task 5.5 - the Containerfile, the deny-by-default .containerignore, the GHCR
-  publish, and terraform/modules/platform/drill-gui.tf with the Ingress.
-- **AC-H3 from WO-20260819-1fea - Phase 4: Terraform - the shared ALB, the
-  source-IP security group, and non-orphaning teardown.** One ALB serving all
-  THREE Ingresses through the shared group name, not three ALBs. Still
-  unobservable until 5.5 ships an Ingress. Do not let it lapse.
+## WHAT IS LEFT, IN ORDER
+
+1. **AC-H2** - expand Tasks 5.4 and 5.5 from interface level into full
+   step-by-step tasks. They were left thin on purpose so they could be written
+   after the user had seen the UI. That has happened.
+2. **Task 5.4** - the Argo CD widget, reading the Application CRD through the
+   Kubernetes API rather than Argo's REST API so no token is needed, plus the
+   reverse proxy for Argo and Grafana. `DependencyStatus` already exists in
+   drill/shared and HelpPanel already renders a `deps` list; nothing sends one,
+   so that section of the card is a placeholder today.
+3. **Task 5.5** - drill/Containerfile, the deny-by-default .containerignore,
+   `drill_gui_image` threaded through config with no default, the GHCR publish,
+   and terraform/modules/platform/drill-gui.tf: namespace practice-drill, a
+   cluster-admin ServiceAccount, the Deployment, a Service on 8090, the 15 GB
+   gp3 PVC, and an Ingress carrying `drill_ingress_group_name` and
+   `drill_alb_security_group_id`.
+4. **AC-H3, AC-H4, AC-H5** all land at 5.5: image contents inspected, the pod up
+   on kind serving everything, and no imagePullSecret anywhere.
+5. **Phase 4's own AC-H3**, carried since that ticket: a plan showing ONE ALB
+   serving all THREE Ingresses through the shared group name, not three ALBs. It
+   has been waiting for an Ingress to exist. Do not let it lapse.
+6. Close out: CONTEXT_STATE -> `work-order.sh done` on the branch -> PR ->
+   `work-order.sh submit --pr N` -> after merge, `work-order.sh close`.
+
+## THINGS 5.5 MUST GET RIGHT, EACH OF WHICH BITES SILENTLY
+
 - **The workspace PVC is populated by `git clone` from cluster git, never by
   copying files.** A copied tree carries an origin pointing at the user's real
   GitHub and scenario 03's model answer is `git revert && git push`. This is the
-  single place the guarantee can leak, and 5.5 is where it becomes real.
-- `ServerDeps.readCommitted` in drill/server/src/server.ts is the seam waiting
-  for that clone - Task 5.5 fills it with a git-backed reader. Until then it is
-  unset, which means commit state is NOT KNOWN and is not graded. It must never
-  come to mean "not committed".
-- The runtime image must be Alpine and must carry tmux, git, kubectl and helm.
-  node-pty is a native module built against musl in drill/Containerfile.build,
-  and a .node built there cannot load in a glibc runtime.
-- drill/server/tsconfig.json has `include: ["src"]`, so `tsc -b` compiles the
-  *.test.ts files into dist/ too. Keep them out of a public image.
+  single place that guarantee can leak.
+- **`ServerDeps.readCommitted` in drill/server/src/server.ts is an unfilled
+  seam** waiting for that clone. Task 5.5 supplies a git-backed reader. Until
+  then it is unset, which means commit state is NOT KNOWN and is not graded. It
+  must never come to mean "not committed".
+- **The runtime image must be Alpine.** node-pty is a native module compiled from
+  source against musl in drill/Containerfile.build, and a .node built there
+  cannot load in a glibc runtime. It needs tmux, git, kubectl and helm on PATH.
+- **drill/server/tsconfig.json has `include: ["src"]`**, so `tsc -b` compiles the
+  *.test.ts files into dist/ as well. Keep them out of a public image.
+- **The image needs scenarios/answers/ for the grader** but the WORKSPACE must
+  not - see the DRILL_PATHS decision. Those are different trees; do not conflate
+  them.
+- Set `DRILL_TMUX_CONF=/app/drill/tmux.conf` and mount the PVC so that
+  `DRILL_WORKSPACE` and `DRILL_LOG_DIR` are siblings ON that volume, e.g.
+  /drill/workspace and /drill/pty. The log must be on the PVC or a pod restart
+  replays nothing, and outside the workspace or it shows up in `git status`.
 
-**Consumed from earlier phases. Do not rebuild any of it:**
+## CONSUMED FROM EARLIER PHASES - DO NOT REBUILD ANY OF IT
+
 - `drill_alb_security_group_id` and `drill_ingress_group_name` are outputs of
-  terraform/envs/dev, shipped by Phase 4. Every ops Ingress must carry the same
-  group name or it gets its own ALB. Annotate against these, never a literal.
-- `cluster_git_url` is an output too, and it is `git://`, NOT the `http://` the
-  plan's text assumes in places. Read the header of
-  terraform/modules/platform/cluster-git.tf before touching the protocol.
-- drill/shared/src/index.ts is the websocket protocol. It gained `file:saved` in
-  Task 5.2; everything else is Phase 2's and unchanged.
+  terraform/envs/dev, from Phase 4. Every ops Ingress must carry the same group
+  name or it gets its own ALB. Annotate against these, never a literal.
+- `cluster_git_url` is an output too, and it is `git://`, NOT `http://`. Read the
+  header of terraform/modules/platform/cluster-git.tf before touching the
+  protocol.
+- drill/shared/src/index.ts is the websocket protocol. It gained `file:saved`.
+- The drill has GitOps CD and NO CI. Real git, real push, real Argo clone and
+  sync, real rollout; only WHOSE repo the remote is is simulated. Nothing builds.
+  A simulated CI - Jenkins in the cluster, a pipeline on push - is new scope with
+  its own scenarios and does not exist anywhere in the plan.
 
-Ground rules that bite on the rest of this ticket:
+## GROUND RULES THAT BITE ON THIS TICKET
+
 - **The GUI is an unauthenticated cluster-admin web terminal.** The source-IP
-  allow list is the ONLY control on it. Never widen drill_allowed_cidrs to
-  0.0.0.0/0 - a Terraform precondition now fails the plan if you do.
-- **`write:packages` was granted 2026-08-21** and needs nothing further. It only
-  ever bought `make drill-image`, the push-from-the-laptop path; Task 5.5's CI
-  workflow publishes with the automatic GITHUB_TOKEN and the user's own Jenkins
-  CI/CD covers it too. NEVER create a personal access token.
-- **npm never runs on the host.** Everything goes through the built image
-  `localhost/daily-eks-practice-drill-node:22-alpine`; `drill-node-image` builds
-  it and every other drill target depends on it. Run `drill-typecheck` as well as
-  `drill-test` - `npm test` proves nothing about types.
+  allow list is the ONLY control. Never widen drill_allowed_cidrs to 0.0.0.0/0 -
+  a Terraform precondition fails the plan if you do.
+- **npm never runs on the host.** Everything goes through the BUILT image
+  localhost/daily-eks-practice-drill-node:22-alpine; `drill-node-image` builds it
+  and every other drill-* target depends on it. Run drill-typecheck as well as
+  drill-test - `npm test` proves nothing about types.
 - **Terraform variables have NO defaults, ever.** Thread new values
   config.example.toml -> envs/dev -> modules/stack -> the module. Run Terraform
   only through scripts/bootstrap.py / make, never bare.
 - **Never run terraform apply, make up/apply/down, or otherwise touch real AWS
   without explicit user approval.** Plans and validation are fine. Phase 5 is $0.
-- The user's scripts/config.toml is still missing three keys Phase 3 added, so
-  any real `make plan` fails until they add them - see the Blockers table. $0 work
-  is unaffected: pass TF_VAR_enable_cluster_git, TF_VAR_drill_ingress_group_name
-  and TF_VAR_drill_allowed_cidrs, which is how ministack was run in Phases 3 and 4.
-- Ports already taken: `make argo-ui` is 8080, `make grafana-ui` is 3000. The
-  drill GUI uses **8090**.
+- scripts/config.toml is still missing the three keys Phase 3 added, so any real
+  `make plan` fails until the user adds them - see Blockers. $0 work is
+  unaffected: pass TF_VAR_enable_cluster_git, TF_VAR_drill_ingress_group_name and
+  TF_VAR_drill_allowed_cidrs, which is how ministack ran in Phases 3 and 4.
+- `write:packages` IS granted. CI publishes with GITHUB_TOKEN. Never create a PAT.
+- Ports taken: argo-ui 8080, grafana-ui 3000. The drill GUI uses 8090.
 - Do not port scenarios other than 03. Do not pre-solve scenarios in committed
-  defaults - helm/practice-app/values.yaml must stay at 1.27-alpine, a test in
-  drill/ fails if it moves, and scenario 09 must keep manual sync on the GitHub
-  path.
+  defaults - helm/practice-app/values.yaml stays at 1.27-alpine, a drill test
+  fails if it moves, and scenario 09 keeps manual sync on the GitHub path.
 - PRACTICE_ANSWERS.html is generated and is in .prettierignore. Never hand-edit
-  it and never write it with the Write tool; run `make answers-gen`.
-- No PII in git. No AWS account ids, profile names, real domains, CIDRs or
-  repo-owner strings outside scripts/config.toml and generated files.
-- Plain dashes, never em dashes. One full sentence per line in long Markdown.
-- Never hand-edit a ticket file. work-order.sh owns that format, and the markdown
-  formatter hook will corrupt the JSON frontmatter if you do. Progress goes in
-  with `work-order.sh note --id ... --text "..."`.
+  it, never write it with the Write tool; run `make answers-gen`.
+- No PII in git. Plain dashes, never em dashes. One sentence per line in long
+  Markdown.
+- Never hand-edit a ticket file - the formatter hook corrupts its JSON
+  frontmatter. Progress goes in with `work-order.sh note`.
 
-Strict TDD, same as Phases 0-4: write the failing test, RUN it, say out loud what
-it failed with, then implement. **A test that has never been run against the
-broken version proves nothing** - when you claim a test catches a defect,
-temporarily restore the defect, watch it go red, and restore back. And for
-anything with a surface, run it and look at it: all four Task 5.3 defects passed
-the entire suite.
+## HOW TO WORK
 
-When the work is done: evidence each acceptance criterion with
-`work-order.sh evidence --id WO-20260819-ca7c --index N --observed "..."`. AC-H1
-is already evidenced. `done` refuses while any of the rest is unobserved, and
-that refusal is the gate working - observe the thing, never tick it.
+Strict TDD: write the failing test, RUN it, say what it failed with, then
+implement. **A test that has never been run against the broken version proves
+nothing** - restore the defect, watch it go red, restore back.
+
+And for anything with a surface, RUN IT AND LOOK AT IT. Every single defect in
+Phase 5 so far passed the full suite and was found by looking. The preview is
+`make -f Makefile.test drill-dev`, which prints a localhost URL.
 
 Definition of done, from CLAUDE.md: `make -f Makefile.test test` passes, a
 ministack plan was attempted and its result reported, and
 `make -f Makefile.test drill-install drill-typecheck drill-test` passes.
-`make -f Makefile.test cluster-git-test` is Phase 3's kind acceptance test and
-should still pass too - run `ministack` first, it reads that plan.
+`make -f Makefile.test cluster-git-test` should still pass too - run `ministack`
+first, it reads that plan.
 
-**The close-out flow, which is not optional:**
-CONTEXT_STATE.md -> PR -> cleanup -> hydration prompt. CONTEXT_STATE.md is
-already updated on the branch for 5.1-5.3; extend it rather than starting over,
-and it ships inside THIS phase's PR. Never open a separate PR whose only content
-is the state file. Run `work-order.sh done` on the branch BEFORE the PR. When you
-open the PR, record it with `work-order.sh submit --pr N`. After the merge,
-`work-order.sh close --id ...` opens its own PR for the merge SHA, the archive
-move and the INDEX regeneration - that one is generated bookkeeping and is
-expected. Leave the next hydration prompt naming the next work order by BOTH its
-id and its full title.
+Evidence each acceptance criterion with `work-order.sh evidence --id
+WO-20260819-ca7c --index N --observed "..."`. AC-H1 is already evidenced. `done`
+refuses while any of the rest is unobserved, and that refusal is the gate
+working - observe the thing, never tick it.
 
 Do not suggest IP addresses, tool versions, or architecture patterns that
-contradict CONTEXT_STATE.md without flagging the conflict first.
+contradict this file without flagging the conflict first.
 ```
