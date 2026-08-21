@@ -23,6 +23,7 @@ Examples:
 import ipaddress
 import json
 import subprocess
+import os
 import sys
 from pathlib import Path
 
@@ -146,12 +147,38 @@ def find_placeholders(d: dict, prefix: str = "") -> list:
     return found
 
 
+def config_path() -> Path:
+    """Which config file to read, in order of decreasing specificity.
+
+    `DAILY_EKS_CONFIG` exists for the $0 sandbox harnesses - ministack and the kind
+    acceptance tests. They need A set of values to render Terraform with, not YOUR
+    set: there is no AWS in either, no ALB, and the image is loaded locally, so every
+    value that identifies you is inert there. Pointing them at the checked-in example
+    means a sandbox run cannot fail because somebody's personal config is a few
+    commits behind the variables, and cannot succeed because of something in it that
+    is not in the repo.
+
+    It is deliberately NOT a way to keep a second real config. The fallback below
+    already covers "no config yet", and this covers "config exists but is not the one
+    this run should use". Anything else belongs in scripts/config.toml.
+    """
+    override = os.environ.get("DAILY_EKS_CONFIG", "").strip()
+    if override:
+        path = Path(override)
+        if not path.is_absolute():
+            path = REPO / path
+        if not path.exists():
+            sys.exit(f"bootstrap: DAILY_EKS_CONFIG points at {path}, which does not exist")
+        return path
+    return CONFIG if CONFIG.exists() else CONFIG_EXAMPLE
+
+
 def load_config() -> dict:
-    cfg_path = CONFIG if CONFIG.exists() else CONFIG_EXAMPLE
+    cfg_path = config_path()
     if not cfg_path.exists():
         sys.exit("bootstrap: no scripts/config.toml or scripts/config.example.toml found")
-    if cfg_path == CONFIG_EXAMPLE:
-        log("bootstrap: using scripts/config.example.toml (copy it to scripts/config.toml to customize)")
+    if cfg_path != CONFIG:
+        log(f"bootstrap: using {cfg_path.relative_to(REPO)} (copy it to scripts/config.toml to customize)")
     with open(cfg_path, "rb") as f:
         return tomllib.load(f)
 
