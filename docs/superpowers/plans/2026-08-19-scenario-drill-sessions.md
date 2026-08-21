@@ -94,16 +94,16 @@ Task 1.1 Steps 6-7 build a shared fixture set of deliberately-invalid TOML, and 
 
 Each phase is an independently reviewable deliverable and is intended to become one work-order ticket under a single epic.
 
-| Phase | Deliverable                                       | Cost                | Needs approval |
-| ----- | ------------------------------------------------- | ------------------- | -------------- |
-| 0     | Local sandbox harness                             | $0 (kind)           | no             |
-| 1     | Answers TOML as the single source of truth        | $0                  | no             |
-| 2     | The grader                                        | $0 (Podman)         | no             |
-| 3     | Terraform: cluster git                            | $0 (ministack)      | no             |
-| 4     | Terraform: ALB, shared IngressGroup, source-IP SG | $0 (ministack)      | no             |
-| 5     | The mothership GUI - **first visual**             | $0 (Podman + kind)  | no             |
-| 6     | Session lifecycle, watcher, Makefile handover     | $0 (kind)           | no             |
-| 7     | Live verification on real EKS                     | ~$6.50 for a 30h cycle | **YES**     |
+| Phase | Deliverable                                       | Cost                   | Needs approval |
+| ----- | ------------------------------------------------- | ---------------------- | -------------- |
+| 0     | Local sandbox harness                             | $0 (kind)              | no             |
+| 1     | Answers TOML as the single source of truth        | $0                     | no             |
+| 2     | The grader                                        | $0 (Podman)            | no             |
+| 3     | Terraform: cluster git                            | $0 (ministack)         | no             |
+| 4     | Terraform: ALB, shared IngressGroup, source-IP SG | $0 (ministack)         | no             |
+| 5     | The mothership GUI - **first visual**             | $0 (Podman + kind)     | no             |
+| 6     | Session lifecycle, watcher, Makefile handover     | $0 (kind)              | no             |
+| 7     | Live verification on real EKS                     | ~$6.50 for a 30h cycle | **YES**        |
 
 **The one live risk is in Task 3.2**, not in Phase 0. Whether Argo CD will clone from an in-cluster git server over plain HTTP is unproven, and it is the assumption the whole GitOps half rests on. It is validated as Task 3.2's acceptance test on kind, at $0, against the manifests that actually ship. Task 3.2 carries a ranked fallback ladder so a failure there is a menu pick rather than a redesign. See "The cluster git protocol risk" inside Task 3.2.
 
@@ -5200,77 +5200,164 @@ git commit -m "feat: drill GUI shell - terminal, editor, answers and help panels
 
 ### Task 5.4: The Argo CD widget and the reverse proxy
 
+**Expanded from interface level on 2026-08-21**, after the Task 5.3 review, as the plan's self-review requires.
+What the review changed is recorded at the end of this task under "What the review changed".
+
 **Files:**
 
-- Create: `drill/server/src/integrations/argo.ts`, `drill/server/src/integrations/deps.ts`, `drill/server/src/proxy.ts`
+- Create: `drill/server/src/integrations/k8s.ts`, `drill/server/src/integrations/argo.ts`, `drill/server/src/integrations/deps.ts`, `drill/server/src/proxy.ts`
 - Create: `drill/web/src/panels/ArgoWidget.tsx`
-- Test: `drill/server/src/integrations/argo.test.ts`
+- Modify: `drill/server/src/server.ts` (two routes), `drill/server/src/config.ts` (three option fields), `drill/web/src/App.tsx` (a third tab), `drill/web/src/lib/api.ts`, `drill/web/src/theme.css`
+- Test: `drill/server/src/integrations/argo.test.ts`, `drill/server/src/integrations/deps.test.ts`
 
 **Interfaces:**
 
 - Consumes: `DependencyStatus` from `@drill/shared`.
 - Produces:
-  - `getApplication(name: string): Promise<{ sync: string; health: string; revision: string; resources: Array<{kind: string; name: string; status: string}> }>` - reads the Argo CD `Application` through the Kubernetes API with `@kubernetes/client-node`, not through Argo's REST API, so no Argo token is needed and the in-cluster ServiceAccount is enough.
-  - `checkDependencies(): Promise<DependencyStatus[]>` - one entry each for `cluster-git`, `argocd`, `practice-app`, derived from Deployment readiness and Service endpoints.
-  - `registerProxy(app, { argo, grafana })` - `@fastify/http-proxy` mounts at `/argo/*` and `/grafana/*`, injecting backend-held tokens and stripping `X-Frame-Options` and CSP `frame-ancestors` on the way through. Built now, exercised when scenario 07 is ported.
+  - `K8sReader` - a three-method read-only seam over the Kubernetes API.
+  - `getApplication(reader, name, namespace): Promise<ArgoApplication>` carrying `sync`, `health`, `revision` and a resource tree.
+  - `checkDependencies(reader, opts): Promise<DependencyStatus[]>` - one entry each for `cluster-git`, `argocd` and `practice-app`.
+  - `registerProxy(app, { argo, grafana })` - `@fastify/http-proxy` at `/argo/*` and `/grafana/*`, stripping the framing headers on the way through.
 
-- [ ] **Step 1: Write the failing test with a fake Kubernetes client**
+**Why the Kubernetes API and not Argo's REST API.**
 
-Create `drill/server/src/integrations/argo.test.ts` asserting: a synced healthy Application maps to `{sync:"Synced", health:"Healthy"}`; a missing Application returns a `state: "absent"` dependency rather than throwing; a 403 from the API surfaces as a clear "the drill ServiceAccount cannot read Applications" message rather than an empty widget.
+Argo's own API needs a bearer token, which needs an account, which needs rotating, and it is a second network hop to a service that may not be up.
+The `Application` CRD's `.status` already carries sync state, health, the synced revision and the full resource tree, and the drill pod's ServiceAccount is `cluster-admin`, so reading the CRD needs no new credential at all.
+This is the same reasoning that put cluster git behind `git daemon` rather than behind an authenticated host: fewer credentials beats more features when the feature is a status read.
 
-- [ ] **Step 2: Run it to verify it fails, then implement**
+- [ ] **Step 1: Build the reader seam first, because it is what makes the rest testable**
 
-Reading the `Application` CRD through the Kubernetes API rather than Argo's REST API is the choice worth writing down in a comment: it removes an auth dance, an extra network hop, and a token to rotate, and the CRD's `.status` already carries everything the widget shows.
+Create `drill/server/src/integrations/k8s.ts`.
+It holds one interface and one factory, and deliberately holds no logic:
 
-- [ ] **Step 3: Build the widget**
+```ts
+export interface K8sReader {
+  readCustomObject(g: CustomObjectRef): Promise<unknown | undefined>;
+  readDeployment(
+    name: string,
+    namespace: string,
+  ): Promise<DeploymentSnapshot | undefined>;
+  readEndpoints(name: string, namespace: string): Promise<number | undefined>;
+}
+```
 
-Sync status, health, target revision, and the resource tree, styled as this app rather than as an iframe of Argo. For scenario 03 task 5 this is the whole point: watching Argo put the bad version back after a `rollout undo`, in a panel next to the terminal where you ran it, is the lesson landing.
+Every method returns `undefined` for "not found" and throws only for something that is genuinely wrong, which is the distinction the widget renders as "absent" versus an error banner.
 
-- [ ] **Step 4: Note what is deferred**
+`clusterReader()` wires `@kubernetes/client-node` and is the only place in the repo that imports it.
+That containment is the point of the seam: the generated client's surface changed wholesale between 0.x and 1.x and will change again, and when it does exactly one 60-line file needs editing.
+Everything with logic in it takes a `K8sReader` and is tested against a fake.
 
-The proxy needs Grafana's `root_url` plus `serve_from_sub_path` and Argo CD's server rootpath to work under a subpath. Both are settable through Helm values already under our control and both are fiddly enough to verify against the current chart versions rather than from memory. Verify them when scenario 07 is ported; do not do subpath surgery for a scenario that does not need it.
+A 403 must not be swallowed.
+`cluster-admin` means a 403 is a misconfigured ServiceAccount, not a missing object, and a widget that renders empty in that case sends the reader looking at Argo instead of at their RBAC.
+Map it to a thrown error whose message names the ServiceAccount.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 2: Write the failing tests for the Application mapping**
+
+Create `drill/server/src/integrations/argo.test.ts` with a fake `K8sReader` and assert:
+
+1. A synced, healthy Application maps to `{ sync: "Synced", health: "Healthy" }` and carries its `revision`.
+2. A missing Application returns `present: false` rather than throwing, because Argo not having been told about the app yet is a normal state during startup.
+3. A 403 propagates as an error naming the ServiceAccount, rather than as an empty widget.
+4. `OutOfSync` plus `Progressing` survives the mapping unchanged - the mapper must not normalise or prettify the strings, because they are Argo's vocabulary and the learner is going to type them into `argocd app get`.
+5. The resource tree is flattened to `{ kind, name, status }` and a resource with no `status` becomes `"Unknown"` rather than disappearing.
+6. A short revision is preserved and a 40-character sha is truncated to 7 for display, with the full value kept - the panel is narrow and a full sha pushes the health column off the edge.
+
+- [ ] **Step 3: Run them red, then implement `argo.ts`**
+
+The whole file is a mapper over `.status`.
+Resist adding a cache: the widget polls every three seconds, a `get` on one CRD is a single etcd read, and a cache is a way to show a stale sync state during exactly the fifteen seconds the drill is about.
+
+- [ ] **Step 4: `deps.ts` and its tests**
+
+`checkDependencies` answers the startup question the help panel already has a slot for.
+Three entries, and the derivation of each is the part worth testing:
+
+| name           | ready when                                          | starting when                       | waiting when                                    | absent when        |
+| -------------- | --------------------------------------------------- | ----------------------------------- | ----------------------------------------------- | ------------------ |
+| `cluster-git`  | Service has at least one ready endpoint             | Deployment exists, no endpoints yet | -                                               | Deployment missing |
+| `argocd`       | `argocd-server` Deployment has `readyReplicas >= 1` | Deployment exists, not ready        | -                                               | Deployment missing |
+| `practice-app` | frontend Deployment ready                           | Deployment exists, not ready        | Argo Application exists but Deployment does not | neither exists     |
+
+`waiting` for `practice-app` is the one that earns its place.
+"Argo knows about it, Kubernetes has not made it yet" is the normal state for the first ninety seconds of a drill, and it is a genuinely different thing from "nothing has been told to create this", which is what `absent` means.
+Collapsing the two produces a status line that says the app is missing while Argo is actively creating it.
+
+Every lookup is wrapped so one failure cannot take the whole list down: a dependency that throws becomes `{ state: "absent", detail: <the error> }`, because the panel is a diagnostic and the moment it needs to work is the moment something is broken.
+
+- [ ] **Step 5: Serve it, and push deps down the socket**
+
+Add `GET /api/argo` and `GET /api/deps` to `server.ts`, both behind the same optional-reader pattern `readCommitted` uses: no reader configured means the route answers `{ present: false }` and the widget says so, rather than the server refusing to start outside a cluster.
+That is what makes `make -f Makefile.test drill-dev` keep working on the laptop with no cluster anywhere.
+
+`ServerMessage` already carries `deps`, so the websocket pushes the dependency list on connect and every ten seconds after.
+Ten rather than three: the startup chain changes on the scale of pods starting, and this one is three API reads rather than one.
+
+- [ ] **Step 6: The widget**
+
+A third tab in the right-hand panel, beside `tasks` and `card`, labelled `argo`.
+The rail is for sidebar views and this is not one; the review approved the right panel's shape, and a third tab is the change that leaves it approved.
+
+It shows sync state, health, the short revision, and the resource tree, styled as this application rather than as an iframe of Argo.
+Sync and health get the same dot vocabulary the status bar already uses, so `Synced`/`Healthy` reads at a glance and `OutOfSync` does not.
+
+For scenario 03 task 5 this panel is the entire lesson.
+You run `kubectl rollout undo`, the pods roll back, and then you watch Argo notice, mark the app `OutOfSync`, and put the bad version back - next to the terminal where you ran the command that did not stick.
+The `only-imperative` hint already tells you this in words. The widget is the same sentence told in a way you cannot argue with.
+
+- [ ] **Step 7: The proxy, built and deliberately not exercised**
+
+`registerProxy` mounts `@fastify/http-proxy` at `/argo` and `/grafana`, taking upstreams from config so neither hostname is compiled in.
+Both upstreams refuse to be framed by default, so the reply hook strips `X-Frame-Options` and rewrites CSP `frame-ancestors` - without that the iframe renders a blank rectangle and the browser console is the only clue why.
+
+Not registered unless the upstream is configured.
+An unconfigured proxy that answers with a connection error is worse than a route that is not there.
+
+What is deferred, and why deferring is right: serving under a subpath needs Grafana's `root_url` plus `serve_from_sub_path`, and Argo CD's `server.rootpath`.
+Both are Helm values already under our control, and both are version-sensitive enough to be worth verifying against the charts actually installed rather than from memory.
+Scenario 07 is what installs those charts, so that is when to verify them.
+Do not do subpath surgery now for a scenario that does not exist yet.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add drill/server/src/integrations/ drill/server/src/proxy.ts drill/web/src/panels/ArgoWidget.tsx
 git commit -m "feat: native Argo CD widget and the reverse proxy for full-app integrations"
 ```
 
+**What the review changed.**
+
+Two things, both small, both recorded so the next reader does not wonder whether this task was written before or after somebody looked at the product:
+
+- The widget is a third tab in the existing right-hand panel rather than a fourth panel or a rail view. The user approved the layout as it stands and asked for no changes to it, so the correct move is the one that adds the widget without moving anything.
+- The dot vocabulary and the theme variables come from what shipped at 5.3 rather than being invented here. There are five themes now, and a widget with its own hardcoded green is a widget that looks broken in four of them.
+
 ---
 
 ### Task 5.5: Container image and in-cluster deployment
+
+**Expanded from interface level on 2026-08-21**, after the Task 5.3 review.
 
 **Files:**
 
 - Create: `drill/Containerfile`, `.containerignore` (repo root, because the build context is the repo root)
 - Create: `scripts/drill-image.py`, `.github/workflows/drill-image.yml`
 - Create: `terraform/modules/platform/drill-gui.tf`
-- Modify: `terraform/modules/platform/drill-ingress.tf` (add the Ingress), `Makefile` (add `drill-image`), `scripts/config.example.toml`
-- Test: kind deploy, plus the `.containerignore` assertion in Step 3
+- Modify: `Makefile` (add `drill-image`), `scripts/config.example.toml`, the variable chain from `envs/dev` down to `modules/platform`
+- Test: `tests/test_containerignore.py` (static), plus the built-image assertion in Step 4 and the kind deploy in Step 8
 
-**Interfaces:**
+**Five things this task must get right, each of which fails silently.**
 
-- Consumes: `drill_alb_security_group_id`, `drill_ingress_group_name` from Task 4.1; `cluster_git_url` from Task 3.2.
-- Produces:
-  - A **public** GHCR package under the user's own account, tagged with the short git sha and `latest`, running the Fastify server with the built web app.
-  - `make drill-image` (local publish) and `.github/workflows/drill-image.yml` (publish on push to `main`, using the automatic `GITHUB_TOKEN`, no PAT).
-  - Namespace `practice-drill`, ServiceAccount `drill` bound to `cluster-admin`, Deployment `drill-gui`, Service on 8090, PVC `drill-workspace` (15 GB gp3), and an Ingress in the shared group.
-  - New config value `drill_gui_image` threaded like the others.
+Listed first because every one of them produces a drill that comes up and looks correct:
 
-**Where the image is published, and what it costs to get there.**
+1. **The workspace is populated by `git clone`, never by a copy.** The workspace is the learner's working tree and `git push` from it is scenario 03's model answer. A copied directory has no remote, and the push fails at the moment the drill is testing.
+2. **`readCommitted` must be filled.** The seam has been sitting unimplemented since Task 5.1. Left unset it means "commit state is not known", the `uncommitted` hint never fires, and the gap between saved and committed - the GitOps lesson - goes ungraded while every test stays green.
+3. **The runtime image stays Alpine.** `node-pty` was compiled against musl in the builder. Copy those artifacts into a glibc runtime and the module fails to load, which surfaces as a terminal that never connects rather than as a build error.
+4. **`*.test.ts` must not reach `dist/`.** `tsc -b` compiles what the tsconfig includes, and the test files sit beside the source. They pull `node:test` into a production image and inflate it for nothing.
+5. **The image needs `scenarios/answers/`; the workspace must not have it.** These are two different trees and conflating them undoes the fix from 2026-08-21. The image carries the answer key because the grader reads it server-side. The workspace is a clone of cluster git, which carries `helm/` only.
 
-The image goes to **GHCR under the user's own account**, as a **public** package, referenced through the `drill_gui_image` config value.
+- [ ] **Step 1: Thread `drill_gui_image` through the config chain**
 
-Public rather than private is a deliberate choice with a short justification. GHCR packages are private by default even when the repo is public, and a private package means an `imagePullSecret` in the cluster holding a GitHub credential that has to be created, rotated and cleaned up. That cost buys nothing here: the repo is public and `PRACTICE_ANSWERS.html` is already committed to it, so the image contains nothing a reader could not already read. Public package, no pull secret, one fewer credential in the cluster.
-
-`drill_gui_image` must be a config value, not a constant. `CLAUDE.md` forbids repo-owner strings outside git-ignored `scripts/config.toml`, and `ghcr.io/<username>/...` is exactly such a string.
-
-**No multi-arch.** `ami_type` is `AL2023_x86_64_STANDARD` on `t3.medium`, and Podman on WSL2 builds `amd64` natively. A single-arch build is correct. Do not reach for buildx or `--platform`; if the node group is ever moved to Graviton, that is the moment to revisit and not before.
-
-- [ ] **Step 1: Add `drill_gui_image` to the config template**
-
-In `scripts/config.example.toml`, in the drill platform block added by Task 3.1:
+Add to `scripts/config.example.toml`, in the drill platform block:
 
 ```toml
 # The drill GUI image, in YOUR OWN registry. Published by `make drill-image`
@@ -5279,31 +5366,52 @@ In `scripts/config.example.toml`, in the drill platform block added by Task 3.1:
 # repo is public and the answer key is already committed, so the image holds
 # nothing that is not already readable.
 drill_gui_image = "ghcr.io/<your-github-username>/daily-eks-practice-drill-gui"
+drill_gui_tag   = "latest"
+enable_drill_gui = true
 ```
 
-Thread it through env -> stack -> platform exactly as Task 3.1 Steps 2 to 5 did, with no `default =`. The tag is supplied separately at deploy time from the git sha, so this value is the repository path only.
+Three values, not one.
+`drill_gui_tag` is separate because the repository path is a property of who you are and the tag is a property of which build you are running, and pinning a sha for a debugging session should not mean editing the value that carries your username.
+`enable_drill_gui` mirrors `enable_cluster_git` so the GUI can be switched off without unpicking the module, which matters because it is the only thing in the stack that creates an ALB.
 
-- [ ] **Step 2: Write the Containerfile and a deny-by-default `.containerignore`**
+Declare each with **no `default =`** in `envs/dev/variables.tf`, `modules/stack/variables.tf` and `modules/platform/variables.tf`, and wire them through `envs/dev/main.tf` and `modules/stack/main.tf`, exactly as Task 3.1 did.
 
-Multi-stage: build the workspaces, then a slim runtime carrying `node`, `tmux`, `git`, `kubectl` and `helm` on PATH, because the terminal is only useful if the tools the card asks for are there. Run as a non-root user with a writable `/workspace`.
+- [ ] **Step 2: Write the Containerfile**
 
-**The build context is the repo root, not `drill/`.** The grader reads `scenarios/answers/<scenario>.toml` at runtime, and those live outside `drill/`. Widening the context is what makes `.containerignore` security-critical rather than a build-speed optimisation: with the root in scope, `scripts/config.toml` is in scope, and that file holds the AWS account id, the profile name and the operator's public IP. Baking it into a **public** image would publish all three.
+Multi-stage. Builder is `node:22-alpine` plus `python3 make g++` for `node-pty`'s node-gyp build - the same toolchain `drill/Containerfile.build` already documents, and for the same reason: there is no prebuilt binary for linux-x64 on either libc.
 
-So `.containerignore` denies everything and allows two paths, rather than listing things to exclude:
+Runtime is `node:22-alpine` plus `tmux`, `git`, `kubectl`, `helm` and `curl`.
+The terminal is only useful if the tools the card names are on `PATH`, and a card that says `helm upgrade` against an image without helm is a broken drill that looks like a broken answer.
+
+The runtime **must stay Alpine**, per the list above.
+
+Run as a non-root user with a writable workspace mount.
+`git` refuses to serve or operate on a repo whose owner uid differs from the running uid, which is the same "dubious ownership" trap `cluster-git.tf` already documents - use one uid, 1001, and an `fsGroup` to match, so the cloned workspace is owned by the user that will be committing in it.
+
+- [ ] **Step 3: The deny-by-default `.containerignore`**
+
+The build context is the repo root, not `drill/`, because the grader reads `scenarios/answers/<scenario>.toml` at runtime.
+Widening the context is what makes this file security-critical rather than a build-speed optimisation: with the root in scope, `scripts/config.toml` is in scope, and that file holds the AWS account id, the profile name and the operator's public IP.
+Baking those into a **public** image publishes all three.
+
+So the file denies everything and then allows, rather than listing things to exclude:
 
 ```
 # Deny by default. An exclude-list leaks the next secret file somebody adds;
-# an allow-list cannot. Only these two trees have any business in the image.
+# an allow-list cannot.
 *
 !drill/
 !scenarios/answers/
 ```
 
-Create it at the repo root as `.containerignore`, not under `drill/`, because that is where the context now is.
+Create it at the repo root as `.containerignore`.
 
-- [ ] **Step 3: Prove the ignore file actually holds**
+Add `tests/test_containerignore.py` to the static suite asserting the file starts with a bare `*` and that no `!` line would re-admit `scripts/`, `.kubeconfig*` or `terraform/`.
+An allow-list is one careless `!` from being an exclude-list, and the static test catches that in a second where the built-image check in Step 4 needs a build.
 
-An allow-list `.containerignore` is worth nothing unproven, and this is the one build failure that ships a credential rather than breaking a pipeline.
+- [ ] **Step 4: Prove the ignore file holds, against the built image**
+
+This is the one build failure that ships a credential rather than breaking a pipeline, so it is checked against the image and not against the file.
 
 ```bash
 podman build -t localhost/drill-gui:dev -f drill/Containerfile .
@@ -5311,170 +5419,57 @@ podman run --rm --entrypoint /bin/sh localhost/drill-gui:dev -c \
   'ls /app/scripts/config.toml /app/.kubeconfig-daily-eks-practice 2>&1; ls /app/scenarios/answers/'
 ```
 
-Expected: both secret paths report `No such file or directory`, and `03.toml` is listed. If `config.toml` is present, stop and fix `.containerignore` before pushing anything anywhere.
+Expected: both secret paths report `No such file or directory`, and `03.toml` is listed.
+If `config.toml` is present, stop and fix `.containerignore` before pushing anything anywhere.
 
-- [ ] **Step 4: Authenticate to GHCR by extending the existing `gh` grant**
+This is `AC-H3`.
 
-**This is the decision, not a preference: scope the token `gh` already holds. Do not create a personal access token.**
+- [ ] **Step 5: Authenticate to GHCR by extending the existing `gh` grant**
 
-Settled 2026-08-19, and it applies to any future GHCR or GitHub API scope this project needs, not just this one.
+**Scope the token `gh` already holds. Do not create a personal access token.**
+Settled 2026-08-19, and it applies to any future GHCR or GitHub API scope this project needs.
 
 ```bash
 gh auth refresh -h github.com -s write:packages
 gh auth token | podman login ghcr.io -u "$(gh api user -q .login)" --password-stdin
 ```
 
-Expected: `Login Succeeded!`. The refresh preserves the scopes already granted and adds the one named, and it mints a replacement token - which matters only because `scripts/argo-repo.py` calls `gh auth token`, and it will simply pick up the new one.
+`gh auth refresh` is interactive - it prints a one-time code and blocks on a browser - so an agent cannot run it.
+Print the command, wait, then confirm with `gh auth status`.
+**Done on 2026-08-21**; `write:packages` is in the scopes line and no PAT was created.
 
-`gh auth refresh` is **interactive**. It prints a one-time code and blocks until it is entered in a browser, so an agent cannot run it. Print the command and have the user run it, then confirm with `gh auth status` that `write:packages` appears in the scopes line.
+Why this rather than a PAT: a PAT has to live somewhere, and every candidate is worse.
+`scripts/config.toml` is serialised into `config.auto.tfvars.json` and thence into Terraform state; a shell export lands in `~/.zsh_history`; a dotfile is one `git add -A` from being committed.
+`gh` keeps its token in its own config outside this repo, and `scripts/argo-repo.py` already depends on that path working, so this is not a new dependency.
 
-Why this rather than a PAT, so nobody re-opens it:
+**Escape hatch, not an option.** If an org SSO configuration refuses the scope change, a classic PAT with `write:packages` is the only way through - reach for it only after the refresh has actually failed, say plainly that it was forced, and use `read -rsp` so the token never reaches a file or a history entry.
+Fine-grained tokens are not a substitute; GHCR writes expect a classic token.
 
-- **Nothing new to store.** A PAT has to live somewhere, and every candidate is worse: `scripts/config.toml` gets serialised into `config.auto.tfvars.json` and thus into Terraform state, a shell export leaks into `~/.zsh_history`, and a dotfile is one `git add -A` from being committed. `gh` keeps its token in its own config outside this repo.
-- **Nothing new to rotate.** A PAT is a second credential with its own expiry, and the failure mode is a 90-day-later `denied` that nobody connects to the token they made in August.
-- **Already proven here.** `scripts/argo-repo.py` depends on `gh auth token` working, so this path is not a new dependency, it is the one the repo already has.
+- [ ] **Step 6: `make drill-image` and the CI workflow**
 
-**Escape hatch, not an option.** If `gh auth refresh` is refused - some org SSO configurations block scope changes on an existing grant - a classic PAT with `write:packages` is the only way through. Reach for it only after the refresh has actually failed, and say plainly that it was forced. Fine-grained tokens are not a substitute; GHCR writes expect a classic token, so do not spend time fighting a fine-grained one.
+`scripts/drill-image.py` reads `drill_gui_image` through `bootstrap.py --print`, refuses the `<your-github-username>` placeholder, tags with the short git sha **and** `latest`, and warns on a dirty tree because that tag will not reproduce from git.
 
-Steps, verbatim, because the settings page is easy to land on the wrong version of:
+`.github/workflows/drill-image.yml` publishes on push to `main` under `paths:` covering `drill/**` and `scenarios/answers/**`, using the automatic `GITHUB_TOKEN` with `permissions: packages: write`.
+It derives the owner from `GITHUB_REPOSITORY_OWNER` lowercased, so no username is committed there either.
+CI is the long-term publishing path because it builds from what is on `main`; the local target is for iterating.
 
-1. Go to `https://github.com/settings/tokens` and confirm the heading says **Tokens (classic)**. If it says "Fine-grained tokens", switch tabs.
-2. **Generate new token** -> **Generate new token (classic)**.
-3. Note: `daily-eks-practice drill GUI image push`.
-4. Expiration: 90 days. Not "no expiration" - this token can publish packages under their account.
-5. Scopes: tick **`write:packages`** only. It auto-selects `read:packages` and `repo`; leave those, untick everything else.
-6. **Generate token**, then copy it. GitHub shows it exactly once.
-7. Log in without the token ever touching a file in this repo or a shell history entry:
+- [ ] **Step 7: The Kubernetes manifests**
 
-```bash
-read -rsp "GHCR token: " GHCR_TOKEN && echo
-echo "$GHCR_TOKEN" | podman login ghcr.io -u <your-github-username> --password-stdin
-unset GHCR_TOKEN
-```
+`terraform/modules/platform/drill-gui.tf`, following `cluster-git.tf`'s shape - `kubectl_manifest` with `yamlencode`, counted on `enable_drill_gui`.
 
-`read -rs` keeps it off the screen, and because it is never typed as an argument it never reaches `~/.zsh_history`. Do not put this token in `scripts/config.toml`; that file is read by `bootstrap.py` and written into `config.auto.tfvars.json`, and a registry credential has no business in Terraform state.
+Namespace `practice-drill`, ServiceAccount `drill` bound to `cluster-admin`, Deployment `drill-gui`, Service on 8090, a 15 GB gp3 PVC, and an Ingress in the shared group.
 
-**In CI, no credential is involved at all.** The workflow added in Step 5 uses the automatic `GITHUB_TOKEN` with `permissions: packages: write`. That is the long-term answer for publishing, because it builds from what is on `main` rather than from whatever happened to be on someone's laptop. The `gh` scope above is for iterating locally.
+`cluster-admin` is deliberate and gets a comment: a read-only role cannot do scenario 10's break/fix, which is the entire reason that scenario exists.
 
-- [ ] **Step 5: Add `make drill-image` and the CI workflow**
+An **init container clones cluster git into the PVC**, and clones rather than copies for the reason at the top of this task.
+It must be idempotent - the PVC survives pod restarts, so a second start finds a populated workspace and must leave it alone rather than clobbering a half-finished drill.
 
-Add to `Makefile`, and to `.PHONY`:
+The Ingress carries `alb.ingress.kubernetes.io/group.name` set to `drill_ingress_group_name` and `alb.ingress.kubernetes.io/security-groups` set to the source-restricted SG from Task 4.1.
+Without the group annotation every ops Ingress provisions its own ALB, which is the difference between one load balancer and three - and it is the first point at which `WO-20260819-1fea`'s carried AC-H3 is observable at all.
 
-```make
-drill-image: ## Build and push the drill GUI image to your own registry
-	@$(PYTHON) scripts/drill-image.py
-```
+**No `imagePullSecret` anywhere**, because the package is public. That is `AC-H5`.
 
-Create `scripts/drill-image.py`:
-
-```python
-#!/usr/bin/env python3
-"""Build and push the drill GUI image to the registry named in config.toml.
-
-The image reference is config-driven because it contains a GitHub username, which
-CLAUDE.md keeps out of the repo. The tag is the short git sha so a running pod can
-always be traced back to a commit - :latest cannot answer "what is actually running".
-"""
-import subprocess
-import sys
-from pathlib import Path
-
-REPO = Path(__file__).resolve().parent.parent
-
-
-def run(*cmd: str) -> None:
-    print("+ " + " ".join(cmd))
-    if subprocess.run(cmd, cwd=REPO).returncode != 0:
-        sys.exit(f"drill-image: {cmd[0]} failed")
-
-
-def main() -> int:
-    out = subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "--print", "drill_gui_image"],
-        capture_output=True,
-        text=True,
-    )
-    if out.returncode != 0:
-        sys.exit("drill-image: drill_gui_image is not set in scripts/config.toml")
-    image = out.stdout.strip()
-    if "<" in image:
-        sys.exit(f"drill-image: drill_gui_image is still the placeholder ({image}) - set it to your own registry")
-
-    sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
-    dirty = subprocess.check_output(["git", "status", "--porcelain"], text=True).strip()
-    if dirty:
-        print("drill-image: WARNING - working tree is dirty, this tag will not reproduce from git")
-
-    run("podman", "build", "-t", f"{image}:{sha}", "-t", f"{image}:latest", "-f", "drill/Containerfile", ".")
-    run("podman", "push", f"{image}:{sha}")
-    run("podman", "push", f"{image}:latest")
-    print(f"drill-image: pushed {image}:{sha}")
-    print("drill-image: if this is the first push, make the package PUBLIC at")
-    print("  https://github.com/users/<you>/packages -> the package -> Package settings -> Change visibility")
-    print("  Otherwise the cluster will need an imagePullSecret it is not configured for.")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-```
-
-Then create `.github/workflows/drill-image.yml`. This is path 4c, and it uses the automatic `GITHUB_TOKEN` - no PAT, no repository secret to manage:
-
-```yaml
-name: drill GUI image
-
-on:
-  push:
-    branches: [main]
-    paths:
-      - "drill/**"
-      - "scenarios/answers/**"
-      - ".github/workflows/drill-image.yml"
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  packages: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Lowercase, because the owner may have capitals and registry paths may not.
-      - name: Compute the image reference
-        id: img
-        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/daily-eks-practice-drill-gui" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: drill/Containerfile
-          push: true
-          tags: |
-            ${{ steps.img.outputs.ref }}:${{ github.sha }}
-            ${{ steps.img.outputs.ref }}:latest
-```
-
-The workflow derives the owner from `GITHUB_REPOSITORY_OWNER` rather than hardcoding it, so no username is committed here either. `paths:` keeps it from rebuilding on every documentation commit.
-
-- [ ] **Step 6: Write the Kubernetes manifests**
-
-`cluster-admin` is deliberate and worth the comment: read-only cannot do scenario 10's break/fix, which is the whole reason that scenario exists. The 15 GB gp3 PVC costs about 1.6 cents for a 10-hour drill; size is irrelevant here and orphaning is the real risk, which Task 4.2's pre-destroy already covers.
-
-The Ingress carries `alb.ingress.kubernetes.io/group.name` set to `drill_ingress_group_name` and `alb.ingress.kubernetes.io/security-groups` set to the source-restricted SG. Without the group annotation every ops Ingress provisions its own ALB, which is the difference between one load balancer and three.
-
-- [ ] **Step 7: Deploy to kind and click through it**
+- [ ] **Step 8: Deploy to kind and click through it**
 
 ```bash
 make -f Makefile.test kind-up
@@ -5485,12 +5480,16 @@ kubectl apply -f <rendered manifests>
 kubectl -n practice-drill port-forward svc/drill-gui 8090:8090
 ```
 
-Expected: the GUI loads at `http://localhost:8090`, the terminal attaches, and `kubectl get nodes` works from inside it. **Second point to show the user**, this time running the way it will actually run.
+Expected: the GUI loads at `http://localhost:8090`, the terminal attaches, and `kubectl get nodes` works from inside it.
+**Second point to show the user**, this time running the way it will actually run. That is `AC-H4`.
 
-- [ ] **Step 8: Commit**
+The Ingress is not exercised here - kind has no ALB controller - so `AC-H3` from `WO-20260819-1fea` is evidenced from the rendered manifest and the `terraform plan`, not from a live load balancer. Say which it was.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add drill/Containerfile .containerignore scripts/drill-image.py .github/workflows/drill-image.yml Makefile terraform/modules/platform/drill-gui.tf terraform/modules/platform/drill-ingress.tf scripts/config.example.toml terraform/
+git add drill/Containerfile .containerignore scripts/drill-image.py .github/workflows/drill-image.yml \
+  Makefile terraform/ scripts/config.example.toml tests/test_containerignore.py
 git commit -m "feat: drill GUI image and in-cluster deployment behind the shared ALB"
 ```
 
@@ -5738,11 +5737,11 @@ Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions
 
 **Spec coverage.** Every section maps to a task. Vocabulary and the autosave/commit/push split -> Tasks 5.3 and 6.2. Startup dependency chain -> Task 5.4's `checkDependencies`. Makefile handover -> Task 6.4. Q1 (one Argo source) -> Tasks 3.2 and 3.3. Q2 (save file, not diary) -> Task 6.1. Q2a (the watcher) -> Task 6.2. Q3 (ALB with three conditions) -> Tasks 4.1 and 4.2; the shared IngressGroup lands in Task 5.5 with the Ingress that needs it. Q4 (contextual integrations) -> Task 5.4. Q5 (one long-lived pod, append-only sessions) -> Tasks 5.5 and 6.1. Q6 (TypeScript both ends) -> Task 2.1. Q7 (refusal and port 8090) -> Tasks 6.4 and 5.1. Build-time items: `drill-progress/` in `.gitignore` -> Task 6.1 Step 1, before the directory can exist; three config values -> Task 3.1; port 8090 -> `config.ts`. Answers TOML as source of truth generating the HTML -> Phase 1. Semantic grading with the alias table -> Phase 2. `cluster-admin` -> Task 5.5. Concurrent-scenario refusal -> Task 6.3. Exit and tear down from the GUI -> Task 6.5. Testing section -> grader unit tests (Phase 2), byte-identical generator test (Task 1.2), `make -f Makefile.test test` kept passing throughout, the Argo acceptance test on kind (Task 3.2 Step 7), and live drilling (Phase 7 Step 4).
 
-**Two known gaps, both deliberate.** Phases 6.1 through 6.5 and Tasks 5.4 and 5.5 are specified at interface-and-intent level rather than with full TDD code blocks, because they depend on choices Phase 5's first visual will change - panel layout, what the session state actually needs to carry, and what the user says when they see it. Expanding them now would be writing code against a UI nobody has looked at. **Expand them into full step-by-step tasks after Task 5.3's review**, before those tickets are cut. The second gap: Task 5.4's proxy is designed and stubbed but only exercised when scenario 07 is ported, exactly as the spec says.
+**Two known gaps, both deliberate.** Phases 6.1 through 6.5 and Tasks 5.4 and 5.5 were specified at interface-and-intent level rather than with full TDD code blocks, because they depend on choices Phase 5's first visual will change - panel layout, what the session state actually needs to carry, and what the user says when they see it. Expanding them earlier would have been writing code against a UI nobody had looked at. **Tasks 5.4 and 5.5 were expanded on 2026-08-21**, after the Task 5.3 review, and each now carries a "what the review changed" note so the ordering is auditable. Phase 6 is still interface-level and is expanded when its ticket is cut. The second gap: Task 5.4's proxy is designed and stubbed but only exercised when scenario 07 is ported, exactly as the spec says.
 
 **Type consistency.** `Verdict`, `SessionState`, `Attempt` and `DependencyStatus` are defined once in `@drill/shared` (Task 2.1) and used unchanged in Tasks 2.4, 5.1, 5.2, 5.3 and 5.4. `AnswerTask` and `AcceptRule` are defined in Task 2.4's `answers.ts` and consumed in 2.4 and 5.1. `ParsedCommand` is defined in Task 2.3 and consumed only in 2.4. The `grader` discriminator has the same three values in `scripts/answers.py`, `drill/server/src/grader/answers.ts` and `GraderKind`.
 
-**Placeholder scan.** Clean through Task 5.3. Tasks 5.4 onward carry the interface-level treatment noted above, which is flagged rather than hidden.
+**Placeholder scan.** Clean through Task 5.5. Phase 6 carries the interface-level treatment noted above, which is flagged rather than hidden.
 
 ---
 
