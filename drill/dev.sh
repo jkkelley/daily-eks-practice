@@ -7,12 +7,28 @@
 # than a compose stack is the whole difference between `make -f Makefile.test
 # drill-dev` and a second file to maintain.
 #
-# The workspace is a scratch copy under /tmp, NOT a mount of the repo. Nothing here
-# should be able to write to the working tree, and the editor panel autosaves.
+# The workspace is a throwaway copy, NOT a mount of the repo. Nothing here should be
+# able to write to the working tree, and the editor panel autosaves.
+#
+# It lives at ~/practice-app rather than somewhere under /tmp because a prompt
+# sitting in /tmp/drill-workspace tells the learner they are in a scratch directory
+# inside somebody's test harness. They are meant to be on a machine. A checkout in a
+# folder in your home directory is what being on one looks like.
+#
+# A directory INSIDE the home rather than the home itself, which is the part that
+# matters beyond looks: `~` is then one level up from the git tree, so every dotfile
+# a shell writes - history most of all - lands outside it. In a drill whose whole
+# subject is what is and is not committed, a .ash_history turning up in `git status`
+# is not a cosmetic problem.
+#
+# /home/drill itself is created and chowned by drill/Containerfile.build, because
+# /home is root-owned and this container runs as the host user via --userns=keep-id.
 set -eu
 
-WORKSPACE=/tmp/drill-workspace
-LOGS=/tmp/drill-pty
+HOME=/home/drill
+export HOME
+WORKSPACE="$HOME/practice-app"
+LOGS="$HOME/.drill/pty"
 # Vite serves the UI in dev; the server still wants a web root that exists.
 WEBROOT=/tmp/drill-web
 SCENARIO=${DRILL_SCENARIO:-03}
@@ -52,6 +68,7 @@ DRILL_TMUX_CONF=/repo/drill/tmux.conf \
 DRILL_SCENARIO="$SCENARIO" \
 DRILL_HOST=127.0.0.1 \
 DRILL_SESSION_ID=preview \
+  HOME="$HOME" \
   node --experimental-strip-types /repo/drill/server/src/index.ts &
 SERVER=$!
 trap 'kill "$SERVER" 2>/dev/null || true' EXIT INT TERM

@@ -24,6 +24,10 @@ import {
 } from "./workspace.ts";
 import { registerTerminal } from "./ws.ts";
 import { gitStatus } from "./git.ts";
+import type { K8sReader } from "./integrations/k8s.ts";
+import { absentApplication, getApplication } from "./integrations/argo.ts";
+import { resolveDependencies } from "./integrations/deps.ts";
+import { registerProxy } from "./proxy.ts";
 import type { ServerOptions } from "./config.ts";
 
 /**
@@ -42,6 +46,16 @@ import type { ServerOptions } from "./config.ts";
  */
 export interface ServerDeps extends ServerOptions {
   readCommitted?: (path: string) => Promise<string | undefined>;
+  /**
+   * Read-only access to the Kubernetes API, when there is one.
+   *
+   * Absent is the ordinary case on a laptop: `make -f Makefile.test drill-dev` runs
+   * the whole GUI in a container with no cluster anywhere, and it has to keep
+   * working. So the Argo and dependency routes answer "not available here" rather
+   * than the server refusing to start - the same shape as `readCommitted`, for the
+   * same reason.
+   */
+  reader?: K8sReader;
 }
 
 /** The task shape the browser is allowed to see. */
@@ -103,6 +117,20 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   // deliberately absent, because `git add && git commit` in the terminal IS
   // scenario 03's model answer and a button would let it be skipped.
   app.get("/api/git/status", async () => gitStatus(opts.workspaceDir));
+
+  // What Argo CD makes of the app. For scenario 03 task 5 this is the whole lesson:
+  // you run `kubectl rollout undo`, the pods roll back, and then you watch Argo
+  // notice, mark the app OutOfSync and put the bad version back - next to the
+  // terminal where you ran the command that did not stick.
+  app.get("/api/argo", async () =>
+    opts.reader
+      ? getApplication(opts.reader, opts.argoAppName, opts.argoNamespace)
+      : absentApplication(opts.argoAppName, opts.argoNamespace),
+  );
+
+  // The startup chain, so "why is nothing happening" has an answer that is not
+  // "the drill is broken".
+  app.get("/api/deps", async () => resolveDependencies(opts));
 
   // The editor opens the file the current task names. It is a route rather than a
   // websocket message because Monaco asks for it once, on mount, and a request that
@@ -186,6 +214,10 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   );
 
   await registerTerminal(app, opts, state);
+  await registerProxy(app, {
+    ...(opts.argoUpstream ? { argo: opts.argoUpstream } : {}),
+    ...(opts.grafanaUpstream ? { grafana: opts.grafanaUpstream } : {}),
+  });
 
   await app.register(fastifyStatic, { root: opts.webRoot, wildcard: false });
   app.setNotFoundHandler((req, reply) => {

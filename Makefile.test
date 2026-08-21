@@ -97,7 +97,7 @@ kind-down: ## Delete the kind sandbox cluster and its kubeconfig
 	bash scripts/kind-sandbox.sh down
 
 drill-node-image: ## Build the Podman image the drill workspaces run in (node + node-gyp toolchain)
-	@podman build -q -t $(NODE_IMAGE) -f drill/Containerfile.build drill >/dev/null
+	@podman build -q --build-arg DEV_UID=$$(id -u) -t $(NODE_IMAGE) -f drill/Containerfile.build drill >/dev/null
 
 drill-install: drill-node-image ## npm install for the drill workspaces (inside Podman)
 	$(NODE) npm install
@@ -114,7 +114,7 @@ drill-build: drill-node-image ## Build the drill workspaces (inside Podman)
 drill-dev: drill-node-image ## Vite dev server for the drill GUI, in Podman, on a probed free port
 	@PORT=$$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1])"); \
 	 echo ""; echo "  drill GUI -> http://localhost:$$PORT"; echo "  ctrl-c to stop"; echo ""; \
-	 podman run --rm -it --userns=keep-id -p $$PORT:5173 \
+	 podman run --rm -it --userns=keep-id --hostname drill -p $$PORT:5173 \
 	   -v $(CURDIR):/repo:Z \
 	   -v $(NODE_MODULES):/repo/drill/node_modules:Z \
 	   -w /repo/drill \
@@ -124,6 +124,9 @@ drill-dev: drill-node-image ## Vite dev server for the drill GUI, in Podman, on 
 	#   assumes the drill server is running on the laptop. It never is - npm does
 	#   not run on the host in this repo. dev.sh starts the server and Vite in this
 	#   one container, so the proxy target is loopback.
+	# --hostname drill, because the shell prompt shows it. The default is the
+	# container id, and `60dc3755f2fa:~$` announces that you are inside somebody's
+	# build artifact. The in-cluster pod sets the same thing in its spec.
 
 drill-clean: ## Drop the node_modules volume, the empty host mountpoint and the node image
 	-podman volume rm $(NODE_MODULES)

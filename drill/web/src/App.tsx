@@ -15,6 +15,8 @@ import {
   getTasks,
   getTree,
   getGitStatus,
+  getArgo,
+  type ArgoApplication,
   type GitStatus,
   type PublicTask,
   type ScenarioMeta,
@@ -37,6 +39,7 @@ import { SourceControl } from "./panels/SourceControl.tsx";
 import { ThemePicker } from "./panels/ThemePicker.tsx";
 import { AnswersPanel } from "./panels/AnswersPanel.tsx";
 import { HelpPanel } from "./panels/HelpPanel.tsx";
+import { ArgoWidget } from "./panels/ArgoWidget.tsx";
 import { StatusBar } from "./panels/StatusBar.tsx";
 import type { OpenFile } from "./panels/EditorPanel.tsx";
 
@@ -45,7 +48,7 @@ const EditorPanel = lazy(() =>
   import("./panels/EditorPanel.tsx").then((m) => ({ default: m.EditorPanel })),
 );
 
-type Side = "answers" | "help";
+type Side = "answers" | "help" | "argo";
 
 export function App() {
   const { send, onMessage, connected } = useDrillSocket();
@@ -66,6 +69,7 @@ export function App() {
 
   const [sidebar, setSidebar] = useState<SidebarView | null>("explorer");
   const [git, setGit] = useState<GitStatus | null>(null);
+  const [argo, setArgo] = useState<ArgoApplication | null>(null);
   const [picking, setPicking] = useState(false);
   const [theme, setTheme] = useState(loadSavedTheme);
 
@@ -103,6 +107,29 @@ export function App() {
       clearInterval(timer);
     };
   }, []);
+
+  /**
+   * Poll Argo, but only while its tab is open.
+   *
+   * Three seconds because the interesting window is short: after a `rollout undo`
+   * you have until Argo's next reconciliation to see the app go OutOfSync, and the
+   * cluster is configured to reconcile every ten. Gating on the tab keeps a drill
+   * that never opens this panel from making an API call a thousand times an hour.
+   */
+  useEffect(() => {
+    if (side !== "argo") return;
+    let alive = true;
+    const read = () =>
+      void getArgo()
+        .then((a) => alive && setArgo(a))
+        .catch(() => undefined);
+    read();
+    const timer = window.setInterval(read, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [side]);
 
   useEffect(() => {
     applyChrome(themeById(theme));
@@ -287,6 +314,14 @@ export function App() {
                 >
                   card
                 </button>
+                <button
+                  className="tab"
+                  role="tab"
+                  aria-selected={side === "argo"}
+                  onClick={() => setSide("argo")}
+                >
+                  argo
+                </button>
                 <span className="grow" />
                 <span>{meta?.title ?? ""}</span>
               </header>
@@ -297,8 +332,10 @@ export function App() {
                     state={state}
                     onGraded={onGraded}
                   />
-                ) : (
+                ) : side === "help" ? (
                   <HelpPanel meta={meta} deps={deps} />
+                ) : (
+                  <ArgoWidget app={argo} />
                 )}
               </div>
             </section>

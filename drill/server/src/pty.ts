@@ -104,6 +104,11 @@ export class TerminalSession {
       cols: 120,
       rows: 32,
       cwd: opts.cwd,
+      // HOME is inherited, not set. The workspace is a directory INSIDE the
+      // learner's home rather than the home itself, so `~` is one level up and
+      // every dotfile a shell writes - history most of all - lands outside the
+      // git tree. In a drill whose entire subject is what is and is not
+      // committed, a .ash_history showing up in `git status` is not cosmetic.
       env: { ...process.env, TERM: "xterm-256color" },
     });
 

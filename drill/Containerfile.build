@@ -23,3 +23,15 @@
 FROM docker.io/node:22-alpine
 
 RUN apk add --no-cache python3 make g++ tmux git
+
+# The learner's home, which is also the drill workspace.
+#
+# A shell that opens in /tmp/drill-workspace announces that it is a scratch
+# directory in somebody's test harness. A shell that opens in a home directory is
+# just a machine you have been given. The in-cluster image gets this properly, with
+# a real user; here the container runs as the HOST user via --userns=keep-id, so the
+# directory has to be owned by whatever uid that turns out to be or git refuses to
+# operate in it ("detected dubious ownership") - the same trap cluster-git.tf
+# documents.
+ARG DEV_UID=1000
+RUN mkdir -p /home/drill && chown "${DEV_UID}:${DEV_UID}" /home/drill

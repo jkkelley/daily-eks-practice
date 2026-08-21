@@ -76,3 +76,26 @@ export interface GitStatus {
 }
 
 export const getGitStatus = () => json<GitStatus>("/api/git/status");
+
+/** One row of Argo's resource tree. Argo's own vocabulary, deliberately unnormalised. */
+export interface ArgoResource {
+  kind: string;
+  name: string;
+  namespace?: string;
+  status: string;
+  health?: string;
+}
+
+export interface ArgoApplication {
+  present: boolean;
+  name: string;
+  namespace: string;
+  sync: string;
+  health: string;
+  revision: string;
+  revisionShort: string;
+  message?: string;
+  resources: ArgoResource[];
+}
+
+export const getArgo = () => json<ArgoApplication>("/api/argo");

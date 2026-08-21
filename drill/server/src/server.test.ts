@@ -26,6 +26,8 @@ before(async () => {
     workspaceDir: WORKSPACE,
     logDir: LOG_DIR,
     scenario: "03",
+    argoNamespace: "argocd",
+    argoAppName: "practice-app",
   });
 });
 
@@ -142,6 +144,8 @@ test("session state starts at the first task with nothing passed", async () => {
     workspaceDir: WORKSPACE,
     logDir: LOG_DIR,
     scenario: "03",
+    argoNamespace: "argocd",
+    argoAppName: "practice-app",
   });
   const state = (
     await fresh.inject({ method: "GET", url: "/api/session" })
@@ -183,6 +187,8 @@ test("only-imperative fires on the first kubectl rollback and stops once the git
     workspaceDir: WORKSPACE,
     logDir: LOG_DIR,
     scenario: "03",
+    argoNamespace: "argocd",
+    argoAppName: "practice-app",
   });
   const submit = (answer: string) =>
     s
@@ -229,6 +235,8 @@ test("a file task grades the workspace on disk, not what was typed", async () =>
     workspaceDir: dir,
     logDir: LOG_DIR,
     scenario: "03",
+    argoNamespace: "argocd",
+    argoAppName: "practice-app",
   });
   const verdict = (
     await s.inject({
@@ -268,6 +276,8 @@ test("a right-but-uncommitted file is graded against cluster git, not the worksp
     workspaceDir: dir,
     logDir: LOG_DIR,
     scenario: "03",
+    argoNamespace: "argocd",
+    argoAppName: "practice-app",
     // Cluster git is still on the old tag, which is what Argo CD would sync.
     readCommitted: async () => "frontend:\n  image:\n    tag: 1.27-alpine\n",
   });
@@ -298,6 +308,8 @@ test("no reader means commit state is not graded at all, never graded as false",
     workspaceDir: dir,
     logDir: LOG_DIR,
     scenario: "03",
+    argoNamespace: "argocd",
+    argoAppName: "practice-app",
     readCommitted: async () => undefined,
   });
   const verdict = (

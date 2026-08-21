@@ -22,6 +22,27 @@ export interface ServerOptions {
    */
   tmuxConf?: string;
   scenario: string;
+  /**
+   * Where the Argo CD `Application` lives, and what it is called.
+   *
+   * These carry defaults, unlike every path above, and the difference is deliberate.
+   * A path is a deployment fact this process cannot see, so guessing one puts the
+   * PTY log off the PVC and nothing says so. These two are names of objects the
+   * platform module itself creates, and getting one wrong shows up immediately as a
+   * widget that says the Application is absent. Visible-when-wrong is what earns a
+   * default.
+   */
+  argoNamespace: string;
+  argoAppName: string;
+  /**
+   * Upstreams for the reverse proxy, absent unless configured.
+   *
+   * Absent means the route is not registered at all. A proxy mounted on an upstream
+   * that is not there answers every request with a connection error, which is worse
+   * than a 404: it looks like the integration is broken rather than switched off.
+   */
+  argoUpstream?: string;
+  grafanaUpstream?: string;
 }
 
 /**
@@ -60,5 +81,13 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerOptions {
     logDir: required("DRILL_LOG_DIR"),
     ...(env.DRILL_TMUX_CONF ? { tmuxConf: env.DRILL_TMUX_CONF } : {}),
     scenario: required("DRILL_SCENARIO"),
+    argoNamespace: env.DRILL_ARGO_NAMESPACE ?? "argocd",
+    argoAppName: env.DRILL_ARGO_APP ?? "practice-app",
+    ...(env.DRILL_ARGO_UPSTREAM
+      ? { argoUpstream: env.DRILL_ARGO_UPSTREAM }
+      : {}),
+    ...(env.DRILL_GRAFANA_UPSTREAM
+      ? { grafanaUpstream: env.DRILL_GRAFANA_UPSTREAM }
+      : {}),
   };
 }

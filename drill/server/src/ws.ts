@@ -13,6 +13,7 @@ import { join } from "node:path";
 import type { ClientMessage, ServerMessage, SessionState } from "@drill/shared";
 import { TerminalSession } from "./pty.ts";
 import { writeWorkspaceFile, WorkspaceError } from "./workspace.ts";
+import { resolveDependencies } from "./integrations/deps.ts";
 import type { ServerDeps } from "./server.ts";
 
 export async function registerTerminal(
@@ -49,6 +50,19 @@ export async function registerTerminal(
 
       term.onData((data) => send({ type: "term:output", data }));
 
+      // The startup chain, pushed rather than polled, because the panel that shows
+      // it is the one being read while the user waits for the cluster.
+      //
+      // Ten seconds, not the three the git poll uses: this is three API reads
+      // against the control plane rather than one `git status` on a local tree, and
+      // the thing being watched changes on the scale of pods starting.
+      const pushDeps = () =>
+        void resolveDependencies(opts)
+          .then((deps) => send({ type: "deps", deps }))
+          .catch(() => undefined);
+      pushDeps();
+      const depsTimer = setInterval(pushDeps, 10_000);
+
       socket.on("message", (raw: Buffer) => {
         let msg: ClientMessage;
         try {
@@ -81,8 +95,13 @@ export async function registerTerminal(
         }
       });
 
-      // tmux keeps the shell alive; only the local handle is dropped.
-      socket.on("close", () => term.dispose());
+      // tmux keeps the shell alive; only the local handle is dropped. The timer is
+      // not so forgiving: left running it holds a reference to a closed socket and
+      // hits the API server every ten seconds for a session nobody is watching.
+      socket.on("close", () => {
+        clearInterval(depsTimer);
+        term.dispose();
+      });
     });
   });
 }

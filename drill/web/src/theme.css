@@ -1054,3 +1054,70 @@ input.answer:focus,
   color: var(--fg);
   font-weight: 500;
 }
+
+/* --- argo widget ------------------------------------------------------------ */
+
+.argo-message {
+  margin: 10px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+/* The one moment in a drill worth interrupting for: Argo is about to undo what you
+   just did with kubectl. Warn-coloured rather than bad-coloured, because nothing is
+   broken - the tool is working exactly as designed, which is the lesson. */
+.argo-nudge {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-left: 2px solid var(--warn);
+  border-radius: 0 3px 3px 0;
+}
+
+.argo-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.argo-tree li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  min-width: 0;
+}
+.argo-tree .dot {
+  align-self: center;
+}
+.argo-kind {
+  flex: 0 0 auto;
+  color: var(--dim);
+}
+/* The name is the variable-length part, so it is the part that gives way. Without
+   the min-width:0 the flex item refuses to shrink and pushes health off the edge. */
+.argo-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.argo-health {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-size: 11px;
+}
+.argo-health.warn {
+  color: var(--warn);
+}
+.argo-health.bad {
+  color: var(--bad);
+}
