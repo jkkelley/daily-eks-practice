@@ -143,3 +143,18 @@ variable "tags" {
   description = "Tags for every AWS resource."
   type        = map(string)
 }
+
+variable "enable_drill_gui" {
+  description = "Deploy the in-cluster drill GUI (namespace \"practice-drill\"). Mirrors enable_cluster_git so the GUI - the only thing here that creates an ALB - can be switched off without unpicking the module."
+  type        = bool
+}
+
+variable "drill_gui_image" {
+  description = "Repository path for the drill GUI image, e.g. ghcr.io/<you>/daily-eks-practice-drill-gui. Config-driven because it carries a GitHub username, which CLAUDE.md keeps out of the repo."
+  type        = string
+}
+
+variable "drill_gui_tag" {
+  description = "Tag of the drill GUI image to run. Separate from the repository path: the path is a property of who you are, the tag of which build you are running."
+  type        = string
+}

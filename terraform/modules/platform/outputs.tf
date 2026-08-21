@@ -50,3 +50,18 @@ output "drill_ingress_group_name" {
   description = "Shared IngressGroup name; every ops Ingress must use it or it gets its own ALB."
   value       = var.drill_ingress_group_name
 }
+
+output "drill_gui_namespace" {
+  description = "Namespace the drill GUI runs in (\"\" when it is disabled)."
+  value       = local.drill_enabled ? local.drill_ns : ""
+}
+
+output "drill_gui_service" {
+  description = "Service name of the drill GUI, for `kubectl port-forward`."
+  value       = local.drill_enabled ? local.drill_app : ""
+}
+
+output "drill_gui_port" {
+  description = "Port the drill GUI listens on."
+  value       = local.drill_port
+}

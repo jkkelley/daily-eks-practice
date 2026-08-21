@@ -35,3 +35,16 @@ RUN apk add --no-cache python3 make g++ tmux git
 # documents.
 ARG DEV_UID=1000
 RUN mkdir -p /home/drill && chown "${DEV_UID}:${DEV_UID}" /home/drill
+
+# The same identity the runtime image has, so the preview and the pod agree about who
+# you are. This container runs as the HOST user via --userns=keep-id, so the account
+# is created for whatever uid that is rather than for a fixed one - and node:22-alpine
+# already ships a `node` user that may be sitting on it.
+COPY bin/callsign /usr/local/bin/callsign
+COPY profile.sh   /etc/profile.d/drill.sh
+RUN chmod 0755 /usr/local/bin/callsign \
+ && deluser node 2>/dev/null || true
+RUN addgroup -g "${DEV_UID}" pilot 2>/dev/null || true; \
+    adduser -u "${DEV_UID}" -G pilot -h /home/drill -s /bin/sh -D pilot 2>/dev/null || true; \
+    chown root:"${DEV_UID}" /etc/passwd /etc/group; \
+    chmod 0664 /etc/passwd /etc/group

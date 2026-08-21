@@ -8,6 +8,7 @@
 import { loadConfig } from "./config.ts";
 import { createServer } from "./server.ts";
 import { createReader } from "./integrations/k8s.ts";
+import { gitCommittedReader } from "./committed.ts";
 
 export const VERSION = "0.0.0";
 
@@ -19,7 +20,18 @@ const opts = loadConfig(process.env);
 // `exactOptionalPropertyTypes` draws the same distinction the code does: an absent
 // reader and a reader that is explicitly nothing are not the same statement.
 const reader = createReader(process.env);
-const app = await createServer({ ...opts, ...(reader ? { reader } : {}) });
+
+// The GitOps half of the grader. Always wired: it answers `undefined` - "not known,
+// so not graded" - whenever the workspace has no reachable remote, which is exactly
+// the preview case. Leaving it out on a laptop and in on a pod would mean the drill
+// grades differently in the two places it runs.
+const readCommitted = gitCommittedReader({ workspaceDir: opts.workspaceDir });
+
+const app = await createServer({
+  ...opts,
+  ...(reader ? { reader } : {}),
+  readCommitted,
+});
 
 // A pod gets SIGTERM and then 30 seconds. Closing Fastify first lets an in-flight
 // submission finish instead of the browser seeing a dropped socket and the drill

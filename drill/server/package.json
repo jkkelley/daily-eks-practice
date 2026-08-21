@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b tsconfig.build.json",
     "test": "node --test --experimental-strip-types 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },

@@ -69,6 +69,7 @@ script-tests: ## Unit tests for the laptop-side scripts in scripts/ (offline, st
 	python3 tests/test_drill_allow.py
 	python3 tests/test_pre_destroy.py
 	python3 tests/test_web_bundle_shape.py
+	python3 tests/test_containerignore.py
 
 cluster-git-test: ## Prove on kind that Argo CD clones in-cluster git ($0; needs `ministack` first)
 	bash tests/cluster-git-argo.sh

@@ -1,0 +1,147 @@
+# The drill GUI: one long-lived pod serving a terminal, an editor and the grader.
+#
+# ---- THE BUILD CONTEXT IS THE REPO ROOT, NOT drill/ -------------------------
+#
+# The grader reads scenarios/answers/<scenario>.toml at runtime, and those live
+# above drill/. Widening the context is what makes /.containerignore
+# security-critical rather than a build-speed optimisation: with the root in scope,
+# scripts/config.toml is in scope, and that file holds the AWS account id, the
+# profile name and the operator's public IP. Baking those into a PUBLIC image
+# publishes all three. That file denies everything and then allows two trees; read
+# it before widening anything here.
+#
+# Build from the root:  podman build -f drill/Containerfile .
+#
+# ---- ALPINE IS NOT A PREFERENCE -------------------------------------------
+#
+# node-pty is a native module with no linux-x64 prebuild, so it is compiled from
+# source in the builder below - against musl. A .node built against musl cannot be
+# loaded by a glibc runtime, and the failure is not a build error: the image builds,
+# the pod starts, the health check passes, and the TERMINAL SIMPLY NEVER CONNECTS.
+# Both stages are alpine and must stay that way. drill/Containerfile.build documents
+# the same constraint for the test image.
+#
+# Single-arch amd64 on purpose. The node group is AL2023_x86_64_STANDARD on
+# t3.medium and Podman on WSL2 builds amd64 natively, so buildx and --platform buy
+# nothing. If the nodes ever move to Graviton, that is the moment to revisit.
+
+# ---------------------------------------------------------------------------
+# Stage 1: build the workspaces.
+# ---------------------------------------------------------------------------
+FROM docker.io/node:22-alpine AS build
+
+# node-gyp's toolchain, for node-pty. python3 is the one whose absence produces
+# "Could not find any Python installation to use", which reads like a node problem.
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /build
+
+# Manifests first, so a source-only change does not re-run the install layer.
+COPY drill/package.json drill/package-lock.json ./
+COPY drill/shared/package.json ./shared/
+COPY drill/server/package.json ./server/
+COPY drill/web/package.json ./web/
+RUN npm ci
+
+COPY drill/ ./
+
+# tsc for shared+server (via tsconfig.build.json, which keeps *.test.ts out of
+# dist/) and vite for the web app.
+RUN npm run build
+
+# Drop devDependencies now that nothing needs to compile again. typescript, vite and
+# the type packages are most of node_modules and none of them runs in production.
+RUN npm prune --omit=dev
+
+# ---------------------------------------------------------------------------
+# Stage 2: the runtime.
+# ---------------------------------------------------------------------------
+FROM docker.io/node:22-alpine
+
+# The terminal is only useful if the tools the card names are on PATH. A card that
+# says `helm upgrade` against an image without helm is a broken drill that reads like
+# a broken answer.
+#
+# kubectl and helm come from Alpine's own repositories rather than from a curl of a
+# release tarball: one version to trust, no checksum to maintain by hand, and
+# `apk info` can answer what is installed.
+RUN apk add --no-cache \
+      tmux \
+      git \
+      curl \
+      ca-certificates \
+      kubectl \
+      helm \
+      libstdc++
+
+# The learner's account.
+#
+# uid 1001 with a matching group, and a real home at /home/drill - not because the
+# process needs one, but because the workspace is a directory INSIDE it and the
+# prompt shows where you are. `pilot@drill:~/practice-app$` is a machine you were
+# given; `/tmp/drill-workspace $` is a scratch directory in somebody's test harness.
+#
+# Named `pilot` rather than `node` or `app`, and renameable with `callsign`. The
+# account you are given is the first thing the environment says about itself.
+#
+# Matching uid/gid matters for git specifically: it refuses to operate in a repo
+# whose owner differs from the running user ("detected dubious ownership"), the same
+# trap cluster-git.tf documents. The PVC's fsGroup in drill-gui.tf is 1001 to match.
+RUN addgroup -g 1001 pilot \
+ && adduser -u 1001 -G pilot -h /home/drill -s /bin/sh -D pilot
+
+# `callsign` renames that account at runtime, without root, by writing its own line
+# in these two files. That needs permission on the FILES, which is what this grants -
+# the same thing OpenShift's arbitrary-uid images do. It is a real relaxation and it
+# buys an attacker nothing here: the terminal these files describe is already bound
+# to cluster-admin, so the interesting privilege was handed over long before this.
+RUN chown root:pilot /etc/passwd /etc/group \
+ && chmod 0664 /etc/passwd /etc/group
+
+COPY drill/bin/callsign /usr/local/bin/callsign
+COPY drill/profile.sh   /etc/profile.d/drill.sh
+RUN chmod 0755 /usr/local/bin/callsign
+
+WORKDIR /app
+
+# The built workspaces, plus the pruned production node_modules. The npm workspace
+# layout is preserved rather than flattened, because node_modules/@drill/shared is a
+# relative symlink into ../shared and flattening breaks it.
+COPY --from=build /build/node_modules   ./node_modules
+COPY --from=build /build/package.json   ./package.json
+COPY --from=build /build/shared/package.json ./shared/package.json
+COPY --from=build /build/shared/dist    ./shared/dist
+COPY --from=build /build/server/package.json ./server/package.json
+COPY --from=build /build/server/dist    ./server/dist
+COPY --from=build /build/web/dist       ./web/dist
+
+# The answer key. It lives in the IMAGE because the grader reads it server-side, and
+# it must never reach the WORKSPACE, which is a clone of cluster git and carries
+# helm/ only. Two different trees; conflating them is how the answers ended up in the
+# learner's `ls` once already.
+COPY scenarios/answers ./scenarios/answers
+
+COPY drill/tmux.conf ./tmux.conf
+
+ENV NODE_ENV=production \
+    DRILL_WEB_ROOT=/app/web/dist \
+    DRILL_ANSWERS_DIR=/app/scenarios/answers \
+    DRILL_TMUX_CONF=/app/tmux.conf \
+    DRILL_SCENARIO=03 \
+    DRILL_PORT=8090 \
+    DRILL_HOST=0.0.0.0 \
+    HOME=/home/drill \
+    DRILL_WORKSPACE=/home/drill/practice-app \
+    DRILL_LOG_DIR=/home/drill/.drill/pty
+
+# DRILL_WORKSPACE and DRILL_LOG_DIR are defaults, not decisions - the Deployment
+# sets both explicitly, because where the PVC is mounted is a deployment fact this
+# image cannot see. They are here so `podman run` gives a working container.
+
+USER pilot
+EXPOSE 8090
+
+# Re-apply the saved callsign before anything can spawn a shell, then run the server.
+# `node dist/index.js`, not the type-stripping dev path - stripping is for the
+# workspace tests; production runs compiled JavaScript.
+CMD ["/bin/sh", "-c", "callsign --apply || true; exec node /app/server/dist/index.js"]

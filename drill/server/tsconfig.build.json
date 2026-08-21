@@ -1,0 +1,15 @@
+{
+  // What the IMAGE is built from. `tsconfig.json` still includes the tests, because
+  // `npm run typecheck` must keep checking them - a test file that stops compiling is
+  // a defect, and excluding it from the only config that reads it hides that.
+  //
+  // Two configs rather than one, because the two jobs genuinely want different file
+  // sets: typecheck wants everything, emit wants everything that runs in production.
+  // Without this split `tsc -b` writes dist/**/*.test.js into a shipped image, drags
+  // node:test into it, and nothing anywhere fails.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "dist/.tsbuildinfo.build"
+  },
+  "exclude": ["src/**/*.test.ts"]
+}

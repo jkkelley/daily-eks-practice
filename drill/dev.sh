@@ -36,6 +36,11 @@ SCENARIO=${DRILL_SCENARIO:-03}
 rm -rf "$WORKSPACE"
 mkdir -p "$WORKSPACE" "$LOGS" "$WEBROOT"
 
+# Who you are. The image ships `pilot`; if a previous preview renamed it with
+# `callsign`, $HOME/.drill/callsign has that and this puts it back - the same thing
+# the pod's entrypoint does, so the two behave alike.
+callsign --apply 2>/dev/null || true
+
 # ONLY what the learner's repository holds, which is what scripts/git-seed.py
 # seeds cluster git with - see DRILL_PATHS there. The preview has to match, or it
 # shows a workspace nobody will ever get.
@@ -69,6 +74,7 @@ DRILL_SCENARIO="$SCENARIO" \
 DRILL_HOST=127.0.0.1 \
 DRILL_SESSION_ID=preview \
   HOME="$HOME" \
+  PATH="/usr/local/bin:$PATH" \
   node --experimental-strip-types /repo/drill/server/src/index.ts &
 SERVER=$!
 trap 'kill "$SERVER" 2>/dev/null || true' EXIT INT TERM

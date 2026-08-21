@@ -116,6 +116,23 @@ drill_ingress_group_name = "daily-eks-practice-ops"  # any name; all ops Ingress
 # Find yours with: curl -s https://checkip.amazonaws.com
 drill_allowed_cidrs = ["auto"]   # generic default: ["auto"]; NEVER ["0.0.0.0/0"]
 
+# The GUI itself. Off means no drill namespace, no PVC and - since this is the only
+# thing in the stack that creates one - no ALB.
+enable_drill_gui = true
+
+# The drill GUI image, in YOUR OWN registry. Published by `make drill-image`
+# (local) or by .github/workflows/drill-image.yml (on push to main).
+#
+# Make the GHCR package PUBLIC so the cluster needs no imagePullSecret. This repo is
+# public and the answer key is already committed to it, so the image holds nothing
+# that is not already readable, and a private package would mean a GitHub credential
+# in the cluster to create, rotate and clean up for no gain.
+drill_gui_image = "ghcr.io/<your-github-username>/daily-eks-practice-drill-gui"
+# Which build to run. Separate from the path above on purpose: the path carries your
+# username and changes never, the tag changes every time you publish. Pin a short sha
+# to debug a specific build without touching the line that identifies you.
+drill_gui_tag = "latest"
+
 # ---- tags merged onto every resource (base tags are always applied) ----
 extra_tags = {}   # e.g. { owner = "you", cost-center = "123" }; generic default: {}
 

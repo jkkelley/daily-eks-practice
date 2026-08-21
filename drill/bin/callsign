@@ -1,0 +1,120 @@
+#!/bin/sh
+# Who you are in the drill.
+#
+#   callsign            show the current one, and some suggestions
+#   callsign maverick   become maverick, and reload the shell into it
+#   callsign --apply    re-apply the saved one (run at container start)
+#
+# ---- WHY THIS EDITS /etc/passwd RATHER THAN FAKING IT ----------------------
+#
+# The cheap version of this is an alias or a script called `whoami` earlier on PATH.
+# It was not done that way on purpose. This is a tool for practising on a real
+# machine, and a `whoami` that lies is a trap waiting for the first person who runs
+# `ps -u`, `ls -l` or `stat` and gets a different answer. Rewriting the passwd entry
+# for our own uid makes every one of those agree, because the identity is genuinely
+# what the system thinks it is.
+#
+# That is possible without root because the image gives this user write permission on
+# /etc/passwd and /etc/group - the same thing OpenShift's arbitrary-uid images do. It
+# is a real relaxation and it is worth being clear about: it buys nothing an attacker
+# wants here, because the terminal it applies to is already bound to cluster-admin.
+# The interesting privilege was handed over long before this file.
+#
+# The name persists in $HOME/.drill, which is on the PVC, so it survives a pod
+# restart along with the workspace and the scrollback.
+set -eu
+
+STATE_DIR="${DRILL_STATE_DIR:-$HOME/.drill}"
+FILE="$STATE_DIR/callsign"
+DEFAULT="${DRILL_CALLSIGN:-pilot}"
+SUGGESTIONS="pilot maverick goose viper merlin jester hollywood sundown"
+
+uid="$(id -u)"
+gid="$(id -g)"
+
+current() {
+  if [ -r "$FILE" ]; then
+    cat "$FILE"
+  else
+    printf '%s' "$DEFAULT"
+  fi
+}
+
+# Unix account names, roughly: lowercase, starts with a letter, no surprises. This is
+# stricter than the system would accept, deliberately - the value is written into a
+# colon-delimited file, and a name containing ':' would corrupt it.
+valid() {
+  printf '%s' "$1" | grep -Eq '^[a-z][a-z0-9_-]{0,31}$'
+}
+
+# Rewrite one line of a colon-delimited system file in place.
+#
+# `cat > "$file"` rather than `mv tmp "$file"`, and that is the whole trick: writing
+# through an existing file needs permission on the FILE, while mv needs permission on
+# the DIRECTORY, which we do not have and should not be given.
+rewrite() {
+  file="$1" name="$2" id="$3" line="$4"
+  tmp="$(mktemp)"
+  awk -F: -v id="$id" -v name="$name" '$3 != id && $1 != name' "$file" >"$tmp" || true
+  printf '%s\n' "$line" >>"$tmp"
+  cat "$tmp" >"$file"
+  rm -f "$tmp"
+}
+
+apply() {
+  name="$1"
+  home="${HOME:-/home/$name}"
+  shell="${SHELL:-/bin/sh}"
+
+  # Not fatal. A dev container where the file is not writable should still give you a
+  # working shell - a cosmetic name is not worth refusing to start over.
+  if [ -w /etc/passwd ]; then
+    rewrite /etc/passwd "$name" "$uid" "$name:x:$uid:$gid:drill operator:$home:$shell"
+  fi
+  # So `ls -l` agrees too. Without this the workspace lists as `maverick drill`, and
+  # a mismatched pair is more confusing than a boring matched one.
+  if [ -w /etc/group ]; then
+    rewrite /etc/group "$name" "$gid" "$name:x:$gid:"
+  fi
+}
+
+save() {
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$1" >"$FILE"
+}
+
+case "${1:-}" in
+"")
+  printf 'You are %s.\n\n' "$(id -un 2>/dev/null || current)"
+  printf 'Change it:  callsign <name>\n'
+  printf 'Ideas:      %s\n' "$SUGGESTIONS"
+  ;;
+
+--apply)
+  apply "$(current)"
+  ;;
+
+-h | --help)
+  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  ;;
+
+*)
+  want="$1"
+  if ! valid "$want"; then
+    echo "callsign: '$want' is not a usable account name" >&2
+    echo "callsign: lowercase, starts with a letter, then letters/digits/_/- " >&2
+    exit 2
+  fi
+  save "$want"
+  apply "$want"
+  echo "You are $want now."
+  # Reload in place. Nothing is lost: the workspace is on disk, the editor's buffers
+  # are in the browser, and tmux keeps the pane and its scrollback - this replaces
+  # only the shell process, which is what has to change for the prompt and $USER to
+  # be the new name.
+  USER="$want"
+  LOGNAME="$want"
+  export USER LOGNAME
+  exec "${SHELL:-/bin/sh}" -l
+  ;;
+esac
