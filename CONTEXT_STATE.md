@@ -7,8 +7,8 @@
 
 | Field        | Value                                                                              |
 | ------------ | ---------------------------------------------------------------------------------- |
-| last_updated | 2026-08-21 01:10 UTC                                                               |
-| updated_by   | The two Phase 3 drill-loop follow-ups + the hydration refresh                      |
+| last_updated | 2026-08-21 02:40 UTC                                                               |
+| updated_by   | Phase 4 close-out (WO-20260819-1fea)                                               |
 | project      | daily-eks-practice                                                                 |
 | repo         | see `git remote -v` - the owner string is PII per `CLAUDE.md` and is not committed |
 
@@ -48,18 +48,19 @@
 
 ## Active Tasks
 
-| Priority | Task                                                                                                 | Status  | Next Action                                                                                                                                                                                |
-| -------- | ---------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1        | Execute `WO-20260819-1fea - Phase 4: Terraform - the ALB, the shared IngressGroup, the source-IP SG` | ready   | The natural next. Two of its three config values (`drill_ingress_group_name`, `drill_allowed_cidrs`) are already threaded to `modules/platform` by Phase 3 - Task 4.1 only consumes them   |
-| 2        | Execute `WO-20260819-ca7c - Phase 5: the mothership GUI, its container image, and the first visual`  | ready   | Also startable, and it is the **first visual**. Under-linked though - see the graph mismatch below, it cannot finish without Phase 4                                                       |
-| 3        | Port scenarios 01-02 and 04-12 to the drill format                                                   | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                                                                                   |
-| 4        | Apply the 2026-08-21 drill-loop decisions to shipped code                                            | partial | Two of four are **done** - the Argo reconciliation timeout and the Application sync policy, shipped alongside this refresh. The two remaining touch Phase 1/2 code and Phase 5 - see below |
+| Priority | Task                                                                                                | Status  | Next Action                                                                                                                                                                                |
+| -------- | --------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1        | Execute `WO-20260819-ca7c - Phase 5: the mothership GUI, its container image, and the first visual` | ready   | The natural next, and the **first visual**. Everything it consumes from Phase 4 now exists: `drill_alb_security_group_id` and `drill_ingress_group_name` are outputs of `envs/dev`         |
+| 2        | Carry AC-H3 into Phase 5's acceptance                                                               | ready   | Phase 4's AC-H3 asks for a plan showing one ALB across three Ingresses, but Phase 4 ships no Ingress on purpose. First observable at Phase 5 - do not let it lapse                         |
+| 3        | Port scenarios 01-02 and 04-12 to the drill format                                                  | pending | After the scenario 03 vertical slice is proven end to end. One at a time                                                                                                                   |
+| 4        | Apply the 2026-08-21 drill-loop decisions to shipped code                                           | partial | Two of four are **done** - the Argo reconciliation timeout and the Application sync policy, shipped alongside this refresh. The two remaining touch Phase 1/2 code and Phase 5 - see below |
 
 **The epic is cut.** `WO-20260819-f5c9 - Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill` and its eight children, one child per plan phase, in `work-orders/`.
 Phase 0 (`WO-20260819-844f`) is **done and archived**, shipped in PR #11.
 Phase 1 (`WO-20260819-11df`) is **done and archived**, shipped in PR #14, merge commit `0a5ab10`.
 Phase 2 (`WO-20260819-a56c`) is **done and archived**, shipped in PR #16, merge commit `c84a156`.
-Phase 3 (`WO-20260819-98da`) is **done**, shipped in PR #19.
+Phase 3 (`WO-20260819-98da`) is **done and archived**, shipped in PR #19.
+Phase 4 (`WO-20260819-1fea`) is **done**, shipped in the PR this file ships in.
 Run `bash .claude/skills/work-order/scripts/work-order.sh next` for what is startable and `... tree` for the shape; `work-orders/INDEX.md` is the generated router.
 The epic depends on all eight children so it never appears as startable work itself.
 
@@ -110,6 +111,17 @@ Cluster git is the drill path and gets `automated`; the GitHub fallback is the p
 "Global" in the 2026-08-21 decision meant "not per-scenario", contrasted with `selfHeal` - it was never about the pre-drill path, which is not a drill at all.
 `selfHeal` is off on both paths and is still turned on per-scenario by the session, which is follow-up 4 and is unchanged.
 
+**What Phase 4 shipped**, because Phase 5's Ingresses and Phase 7's teardown both depend on it:
+
+- `terraform/modules/platform/drill-ingress.tf` - `aws_security_group.drill_alb`, one `aws_vpc_security_group_ingress_rule` per entry in `drill_allowed_cidrs`, an egress-all rule, and `terraform_data.drill_cidr_guard`.
+  The guard has two preconditions, and **both were proven to fire, not merely written**: `0.0.0.0/0` and an empty list each fail the plan with their own message and `make` exits 1.
+- Two outputs threaded platform -> stack -> envs/dev: `drill_alb_security_group_id` and `drill_ingress_group_name`.
+  **Phase 5 consumes both.** Every ops Ingress must carry the same group name or it gets its own ALB.
+- **No Ingress ships in this phase, deliberately.** They arrive in Phase 5 with the GUI, so the ALB is never created before something needs it. This is why AC-H3 could not be fully observed - see Active Tasks row 2.
+- `scripts/drill-allow.py` + `make drill-allow` - the mid-drill lockout recovery path. It revokes stale rules before authorising the current one, and never prints an address.
+- `scripts/pre-destroy.py` + `make down` runs it first. Deletes every Ingress, every `LoadBalancer` Service and every PVC, then polls up to 300s for **this cluster's** load balancers, and exits 1 rather than destroying into a mess. `SKIP_PRE_DESTROY=1` bypasses it.
+- `tests/test_drill_allow.py` (9) and `tests/test_pre_destroy.py` (11) joined `script-tests`. Both were checked against the plan's own versions and go red on them.
+
 ## The drill loop
 
 **The north star lives in `COMPASS.md`, not here.** It is the drill loop diagram plus what it commits us to.
@@ -154,9 +166,17 @@ It is deliberately not duplicated into this file: this one is long and often rea
 | 2026-08-21 | **The learner sees the scenario and the env, nothing else**                                                   | Plumbing gotchas are solved invisibly: git identity, `safe.directory`, `origin`, and the absence of any GitHub credential in the pod are all pre-set. This is a design permission, not a shortcut - it is what lets the env behave like a real one without the learner meeting our scaffolding                                                                                                                                           |
 | 2026-08-21 | `COMPASS.md` is the north star, single copy, and `CLAUDE.md` carries the SOP                                  | A second copy of the drill loop drifts, and a drifted north star is worse than none because it is still trusted. COMPASS routes and never explains, capped at 100 lines, per the project-scaffold standard. Update rule: same PR as the change that caused it, by whoever made the change, and a change to the loop itself needs the user's approval before it is written                                                                |
 | 2026-08-21 | **The Application's sync policy follows its source**: automated on cluster git, manual on the GitHub fallback | A flat "automated is global" pre-solves `scenarios/09-gitops-argocd.md` task 5 in a committed default, which `CLAUDE.md` forbids, and makes `make check N=09` pass without the learner acting. The two paths genuinely want opposite things and the seam between them already existed, so the policy rides on it rather than on a new flag. The drill path has no Sync button to press; the pre-drill path's whole lesson is pressing it |
+| 2026-08-21 | Load balancers are counted by the `elbv2.k8s.aws/cluster` **tag**, never by name                          | `describe-load-balancers` returns the whole account, and the AWS Load Balancer Controller names everything it creates `k8s-<namespace>-<ingress>-<hash>` for every cluster it serves. A name match cannot tell this cluster's ALB from another's, so a second EKS cluster in the account makes `make down` wait out its full 300s and then refuse, every time, with nothing actually wrong. `describe-tags` is chunked at 20 ARNs because AWS rejects more |
+| 2026-08-21 | The CIDR guard is a **resource precondition**, not a variable `validation` block                          | `drill_allowed_cidrs` is threaded through three modules and is set even when the ALB controller is off. A `validation` block would reject a perfectly good config that cannot build an ALB at all. The precondition is scoped by `count` to the case where the security group will actually exist |
+| 2026-08-21 | Phase 4 ships **no Ingress**, so AC-H3 is carried into Phase 5 rather than ticked                         | Plan Task 4.1 holds the Ingresses back to Phase 5 on purpose, so the ALB is never created before something needs it. That makes "one ALB serving three Ingresses" unobservable here. The shared group name is exported and is the mechanism that produces one ALB; the count is first observable at Phase 5 and first real at Phase 7. Recorded as a ticket note and an Active Task so it cannot lapse |
 
 ## Lessons Learned
 
+- 2026-08-21: `@dataclass` under `from __future__ import annotations` **cannot be loaded through `importlib.util.module_from_spec` unless the module is registered in `sys.modules` first**. The decorator resolves annotations via `sys.modules[cls.__module__]`, gets `None`, and dies with `'NoneType' object has no attribute '__dict__'` before a single assertion runs. Plan Task 4.2 hit this exactly: its own test could not import its own script. Add `sys.modules[spec.name] = mod` before `exec_module`.
+- 2026-08-21: A helper that fetches a value and then never uses it is a bug the type checker cannot see. `remaining_load_balancers()` looked up `cluster_name` and filtered on `"k8s-" in name` instead, which reads as correct and is account-wide. The interface section said "tagged with this cluster" and the code never did it - **when a docstring and its code disagree about scope, trust neither and test the scoping directly.**
+- 2026-08-21: An acceptance criterion can be untestable at the phase that owns it. AC-H3 asks for a plan showing one ALB across three Ingresses, in a phase that deliberately ships zero Ingresses. **Say so in the evidence rather than ticking it or quietly redefining it** - `work-order.sh done` refuses on unobserved criteria, and that refusal is the gate working.
+- 2026-08-21: A test that has never been run against the broken version proves nothing about the bug it claims to catch. Both of this phase's headline assertions were checked by temporarily restoring the plan's original line - the IP-leak test goes red with "the failed-command message echoed the CIDR", the scoping test with "counted 2, expected 1". **Restore, watch it fail, restore back.**
+- 2026-08-21: `kubectl version --request-timeout=10s` **does** exit 1 against an unreachable API, verified against a throwaway kubeconfig pointing at a closed port. It was suspected of the exits-zero problem and is fine - check before "fixing" something that works.
 - 2026-08-19: Checking for carrier-grade NAT by testing whether the **externally visible** address falls in `100.64.0.0/10` does not work; that range lives on the router's WAN interface, and an external service returns the carrier's normal-looking public IP either way. Use the reverse-DNS host label instead - if it encodes the address itself, the address is directly assigned.
 - 2026-08-19: Probing tool availability with `for c in ...; do $c version --short; done` produced mangled output and was misread as "kind is not installed", nearly forcing a $0 test onto real AWS. Use `command -v` to check for a binary; never infer absence from a failed version flag.
 - 2026-08-19: An init container cloning GitHub cannot seed cluster git, because the token mechanism (`scripts/argo-repo.py`) runs _after_ apply. Do not retry credential-at-init-time designs in this repo.
@@ -193,17 +213,17 @@ Not blockers, but scheduled friction to expect:
 | `buildpack-deps:bookworm-scm` is a 337 MB pull                  | first `make up` after this | Once per node, and only the git server uses it. If it ever becomes a problem the swap is `bitnami/git`, which is smaller but publishes only a `latest` tag |
 | Tasks 5.4-5.5 and 6.1-6.5 are specified at interface level only | Phase 5 and 6              | Deliberate. Expand them after the user reviews the UI at Task 5.3, before those tickets are worked                                                         |
 | Phase 7 costs money                                             | Phase 7                    | ~$6.50 per 30-hour cycle. **Requires explicit user approval before any step runs.** Phases 0-6 are $0                                                      |
-| The ticket graph and the plan's interfaces disagree             | Phase 5                    | Found 2026-08-20 by reading both. Phase 4's half of it dissolved when Phase 3 shipped; Phase 5's is still live. See below                                  |
+| The ticket graph and the plan's interfaces disagree             | Phase 5                    | Found 2026-08-20 by reading both. **Both halves are now moot in practice** - Phases 3 and 4 have shipped, so everything Phase 5 consumes exists. See below |
 
 The graph mismatches, stated plainly so nobody rediscovers them the hard way:
 
-- **Phase 5 is under-linked, and this one is still live.** `WO-20260819-ca7c` declares `depends_on: [844f, a56c]`, but plan Task 5.5 consumes `drill_alb_security_group_id` and `drill_ingress_group_name` from Task 4.1 and `cluster_git_url` from Task 3.2.
-  This is probably deliberate, because Tasks 5.1-5.3 need nothing from Phase 4 and the ticket stops at 5.3 for the user's review anyway.
-  The consequence is that Phase 5 can **start** without Phase 4 and cannot **finish** without it, and `work-order.sh next` will not warn about that.
-  `cluster_git_url` now exists, so that third dependency is satisfied - but note it is `git://`, not the `http://` the plan's text assumes.
-- **Phase 4's declared dependency turned out to be justified after all**, and is now moot. `WO-20260819-1fea` declares `depends_on: [98da]`, and the earlier reading was that Tasks 4.1 and 4.2 consume nothing from Phase 3.
+- **Phase 5 is under-linked, but the edge no longer matters.** `WO-20260819-ca7c` declares `depends_on: [844f, a56c]`, while plan Task 5.5 consumes `drill_alb_security_group_id` and `drill_ingress_group_name` from Task 4.1 and `cluster_git_url` from Task 3.2.
+  The under-linking was probably deliberate, because Tasks 5.1-5.3 need nothing from Phase 4 and the ticket stops at 5.3 for the user's review anyway.
+  It would have bitten if Phase 5 had been started first: it can **start** without Phase 4 and cannot **finish** without it, and `work-order.sh next` does not warn about that.
+  All three values now exist on `main`, so the risk is spent. Note that `cluster_git_url` is `git://`, not the `http://` the plan's text assumes in places.
+- **Phase 4's declared dependency turned out to be justified after all**, and is now spent. `WO-20260819-1fea` declared `depends_on: [98da]`, and the earlier reading was that Tasks 4.1 and 4.2 consume nothing from Phase 3.
   That was right about the data and wrong about the work: Phase 3's Task 3.1 threads `drill_ingress_group_name` and `drill_allowed_cidrs` - **Phase 4's own two config values** - all the way to `modules/platform`, precisely so Phase 4 does not have to.
-  The edge was about the Terraform threading, exactly as suspected, and the threading has now happened. Task 4.1 consumes those variables; it does not add them.
+  Confirmed on execution: Task 4.1 consumed both variables and added neither, exactly as the edge implied.
 
 ## Hydration Prompt
 
@@ -222,36 +242,50 @@ same severity as a failing test.
 Then read CONTEXT_STATE.md in this project root.
 Use the Infrastructure and Toolchain tables as ground truth.
 
-Work WO-20260819-1fea - Phase 4: Terraform - the shared ALB, the source-IP
-security group, and non-orphaning teardown. It is `ready` and it is the natural
-next. Read the ticket first:
-work-orders/WO-20260819-f5c9/WO-20260819-1fea-phase-4-terraform-the-shared-alb-the-source-ip-s.md
+Work WO-20260819-ca7c - Phase 5: the mothership GUI, its container image, and
+the first visual. It is `ready` and it is next. Read the ticket first:
+work-orders/WO-20260819-f5c9/WO-20260819-ca7c-phase-5-the-mothership-gui-its-container-image-a.md
 
-Then read Tasks 4.1 and 4.2 of
+Then read Tasks 5.1 through 5.5 of
 docs/superpowers/plans/2026-08-19-scenario-drill-sessions.md, starting at the
-`## Phase 4: Terraform - the ALB` heading. The plan is the authority for every
+`## Phase 5: The mothership GUI` heading. The plan is the authority for every
 step; the ticket is the contract. Read the plan's `## Global Constraints`
 section too - it binds this ticket in full and is deliberately not restated in
 it.
 
-**Phase 3 already did half of Task 4.1's threading.** `drill_ingress_group_name`
-and `drill_allowed_cidrs` are declared with no defaults and threaded all the way
-from scripts/config.example.toml through envs/dev and modules/stack into
-modules/platform, and `scripts/bootstrap.py` already resolves the `"auto"`
-sentinel to your public /32 at plan time. Task 4.1 CONSUMES those - do not add
-them again, and check before you write.
+**This is the first thing the user will actually look at.** Task 5.3 is the
+React shell and the plan stops there for their review before 5.4 and 5.5 are
+expanded. Do not run past that checkpoint. Tasks 5.4-5.5 are specified at
+interface level only, on purpose.
 
-**Two of the four drill-loop follow-ups are already done** and shipped just
-before this phase: `timeout.reconciliation: 10s` in the Argo Helm values, and
-the Application sync policy, which now follows its source - automated on cluster
-git, manual on the GitHub fallback so scenarios/09-gitops-argocd.md task 5 stays
-unsolved. Read that decision row before touching either. The two that remain are
-listed under Active Tasks and both belong to later phases: the answers schema's
-`[argo]` block, and applying per-scenario `self_heal` by patching the
-Application at scenario start. Do not lose them.
+**Everything Phase 5 consumes from earlier phases now exists.** Do not rebuild
+any of it:
+- `drill_alb_security_group_id` and `drill_ingress_group_name` are outputs of
+  terraform/envs/dev, shipped by Phase 4. Every ops Ingress must carry the same
+  group name or it gets its own ALB, which is the whole point of the shared
+  group. Annotate against these, never a literal.
+- `cluster_git_url` is an output too, and it is `git://`, NOT the `http://` the
+  plan's text assumes in places. Phase 3 settled that as rung 3 - read the
+  header of terraform/modules/platform/cluster-git.tf before touching it.
+- `drill/shared/src/index.ts` is the websocket protocol, defined once by Phase 2
+  and consumed unchanged. `drill/server/src/grader/` is the grader, all pure
+  functions. `GradeContext` is its only door for facts a submission cannot
+  carry, and **Phase 5 is what supplies them** - `committed` from the workspace,
+  `accepted` from `SessionState.attempts`.
+
+**Two things Phase 5 owes that are not in its ticket yet:**
+1. AC-H3 from Phase 4 lands here. It asks for a plan showing ONE ALB serving all
+   three Ingresses through the shared group name, not three. Phase 4 shipped no
+   Ingress on purpose so it could not be observed there. It is Active Task row 2
+   and a note on WO-20260819-1fea - do not let it lapse.
+2. The workspace PVC is populated by `git clone` from cluster git, **never** by
+   copying files. A copied tree carries `.git/config` with an `origin` pointing
+   at the user's real GitHub, and scenario 03's model answer is
+   `git revert && git push`. This is the single place the "a drill push never
+   reaches the user's GitHub" guarantee can leak. It is a 2026-08-21 decision.
 
 Start with:
-bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-1fea
+bash .claude/skills/work-order/scripts/work-order.sh start --id WO-20260819-ca7c
 That creates the branch and stamps it onto the ticket. Do not create the branch
 by hand.
 
@@ -259,58 +293,69 @@ by hand.
 CONTEXT_STATE.md -> PR -> cleanup -> hydration prompt. Update CONTEXT_STATE.md
 on the work branch as part of the work, so it ships inside THIS phase's PR.
 Never open a separate PR whose only content is the state file. When you open the
-PR, record it with `work-order.sh submit --pr N` - skipping that is what cost
-Phase 3 an extra bookkeeping PR. After the merge,
+PR, record it with `work-order.sh submit --pr N`. After the merge,
 `work-order.sh close --id ...` opens its own PR for the merge SHA, the archive
 move and the INDEX regeneration - that one is generated bookkeeping and is
-expected. Leave the next hydration prompt naming the next work order by BOTH
-its id and its full title.
+expected. Leave the next hydration prompt naming the next work order by BOTH its
+id and its full title.
 
-Strict TDD, same as Phases 0-3: write the failing test, RUN it, say out loud
-what it failed with, then implement. A test that was never seen failing proves
-nothing. Every phase so far has shipped fixes to defects in its own plan text -
-two in Phase 0, three in Phase 1, five in Phase 2, six in Phase 3 - and every
-one of them was invisible on reading.
+Strict TDD, same as Phases 0-4: write the failing test, RUN it, say out loud
+what it failed with, then implement. Every phase so far has shipped fixes to
+defects in its own plan text - two in Phase 0, three in Phase 1, five in Phase 2,
+six in Phase 3, four in Phase 4 - and every one was invisible on reading. Phase
+4's sharpest was a test that could not import the script it tested. **A test
+that has never been run against the broken version proves nothing**: when you
+claim a test catches a defect, temporarily restore the defect, watch it go red,
+and restore back.
 
 Ground rules that bite on this ticket specifically:
-- **Terraform variables have NO defaults, ever.** Checkable by grep across
-terraform/modules/*/variables.tf and terraform/envs/dev/variables.tf. Run
-Terraform only through scripts/bootstrap.py / make, never bare.
+- **The GUI is an unauthenticated cluster-admin web terminal.** The source-IP
+  allow list is the ONLY control on it. Read "Source IP is the only control" at
+  the top of plan Task 4.1 before touching drill_allowed_cidrs, and never widen
+  it to 0.0.0.0/0 - a Terraform precondition now fails the plan if you do.
+- **`write:packages` is not granted yet** and Task 5.5 needs it for GHCR. The
+  fix is `gh auth refresh -h github.com -s write:packages`, which is interactive
+  and blocks on a browser - print it for the user, never attempt it, and NEVER
+  create a personal access token.
+- **npm never runs on the host.** The drill workspace is npm workspaces in
+  Podman, on `node:22-alpine` (NOT the plan's node:20 - type stripping needs
+  22.6). `node_modules` is a named Podman volume. Run `drill-typecheck` as well
+  as `drill-test`; `npm test` proves nothing about types.
+- **Terraform variables have NO defaults, ever.** Thread new values
+  config.example.toml -> envs/dev -> modules/stack -> the module. Run Terraform
+  only through scripts/bootstrap.py / make, never bare.
 - **Never run terraform apply, make up/apply/down, or otherwise touch real AWS
-without explicit user approval.** Plans and validation are fine. This phase is
-$0: ministack for the plan, kind for anything behavioural.
+  without explicit user approval.** Plans and validation are fine. Phase 5 is $0.
 - The user's `scripts/config.toml` is missing three keys Phase 3 added, so any
-real `make plan` fails until they add them. See the Blockers table. $0 work is
-unaffected: pass them as TF_VAR_enable_cluster_git,
-TF_VAR_drill_ingress_group_name and TF_VAR_drill_allowed_cidrs, which is how
-`make -f Makefile.test ministack` was run in Phase 3.
-- **The drill GUI is an unauthenticated cluster-admin web terminal.** The source
-IP allow list is the ONLY control on it. Read the "Source IP is the only control"
-argument at the top of plan Task 4.1 before touching `drill_allowed_cidrs`, and
-never widen it to 0.0.0.0/0 for convenience.
-- Cost discipline: Task 4.2 exists because an Ingress that outlives
-`terraform destroy` orphans a billing ALB. Its cleanup path is the deliverable,
-not a footnote.
+  real `make plan` fails until they add them. See the Blockers table. $0 work is
+  unaffected: pass TF_VAR_enable_cluster_git,
+  TF_VAR_drill_ingress_group_name and TF_VAR_drill_allowed_cidrs, which is how
+  ministack was run in Phases 3 and 4.
+- Ports already taken: `make argo-ui` is 8080, `make grafana-ui` is 3000. The
+  drill GUI uses **8090**.
 - Do not port scenarios other than 03. Do not pre-solve scenarios in committed
-defaults - helm/practice-app/values.yaml must stay at 1.27-alpine, and a test in
-drill/ fails if it moves.
+  defaults - helm/practice-app/values.yaml must stay at 1.27-alpine, a test in
+  drill/ fails if it moves, and scenario 09 must keep manual sync on the GitHub
+  path.
 - PRACTICE_ANSWERS.html is generated and is in .prettierignore. Never hand-edit
-it and never write it with the Write tool; run `make answers-gen`.
+  it and never write it with the Write tool; run `make answers-gen`.
 - No PII in git. No AWS account ids, profile names, real domains, CIDRs or
-repo-owner strings outside scripts/config.toml and generated files.
+  repo-owner strings outside scripts/config.toml and generated files.
 - Plain dashes, never em dashes. One full sentence per line in long Markdown.
 - Never hand-edit a ticket file. work-order.sh owns that format, and the
-markdown formatter hook will corrupt the JSON frontmatter if you do. Progress
-goes in with `work-order.sh note --id ... --text "..."`.
+  markdown formatter hook will corrupt the JSON frontmatter if you do. Progress
+  goes in with `work-order.sh note --id ... --text "..."`.
 
 When the work is done: evidence each acceptance criterion with
-`work-order.sh evidence --id WO-20260819-1fea --index N --observed "..."`.
+`work-order.sh evidence --id WO-20260819-ca7c --index N --observed "..."`.
 `done` refuses while any is unobserved, and that refusal is the gate working -
-observe the thing, never tick it.
+observe the thing, never tick it. If a criterion genuinely cannot be observed in
+this phase, say so in the evidence and carry it forward, the way Phase 4 did
+with AC-H3.
 
 Definition of done, from CLAUDE.md: `make -f Makefile.test test` passes, a
 ministack plan was attempted and its result reported, and
-`make -f Makefile.test drill-install drill-test` still passes.
+`make -f Makefile.test drill-install drill-typecheck drill-test` passes.
 `make -f Makefile.test cluster-git-test` is Phase 3's kind acceptance test and
 should still pass too - run `ministack` first, it reads that plan.
 

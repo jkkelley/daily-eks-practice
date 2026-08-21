@@ -73,3 +73,13 @@ output "cluster_git_repo_path" {
   description = "Absolute path of the bare repo inside that container."
   value       = module.stack.cluster_git_repo_path
 }
+
+output "drill_alb_security_group_id" {
+  description = "Security group id to annotate on every ops Ingress (\"\" when the ALB controller is off)."
+  value       = module.stack.drill_alb_security_group_id
+}
+
+output "drill_ingress_group_name" {
+  description = "Shared IngressGroup name; every ops Ingress must use it or it gets its own ALB."
+  value       = module.stack.drill_ingress_group_name
+}
