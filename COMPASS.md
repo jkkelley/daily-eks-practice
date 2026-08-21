@@ -52,7 +52,8 @@ Real git, real push, real Argo sync - only _whose_ repo the remote is is simulat
 | Path                                             | What it is                                      | Open it when                                     |
 | ------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------ |
 | `CLAUDE.md`                                      | agent rules, hard rules, the north star SOP     | before any change                                |
-| `CONTEXT_STATE.md`                               | session state, decisions, lessons               | starting a session; it is long, read it all      |
+| `HYDRATION.md`                                   | the prompt that starts a session, newest first  | **first**, every session; top entry only         |
+| `CONTEXT_STATE.md`                               | the background that prompt assumes              | after it; on a conflict the prompt wins          |
 | `BACKLOG.md` / `ISSUES.md`                       | parked ideas / known problems                   | logging either; never hand-edit                  |
 | `work-orders/`                                   | tickets; `INDEX.md` is the router               | picking up work                                  |
 | `work-orders/archive/`                           | closed tickets                                  | tracing why something was built                  |
@@ -62,6 +63,7 @@ Real git, real push, real Argo sync - only _whose_ repo the remote is is simulat
 | `terraform/modules/stack`                        | composition; the only place modules wire        | adding a module or threading a variable          |
 | `terraform/modules/platform/cluster-git.tf`      | the git server; rung verdict in its header      | touching the git protocol                        |
 | `terraform/modules/platform/drill-ingress.tf`    | the source-IP SG - the only control on the GUI  | anything about who can reach the drill           |
+| `terraform/modules/platform/drill-gui.tf`        | the drill pod, its PVC, cluster-admin, Ingress  | changing what runs in the cluster                |
 | `scripts/pre-destroy.py`                         | teardown that does not orphan a billing ALB     | changing `make down`                             |
 | `terraform/modules/{vpc,eks,addons,rds,storage}` | raw resources, kept transparent                 | learning how a piece works                       |
 | `scripts/config.example.toml`                    | every config value, documented                  | adding a Terraform variable                      |
@@ -70,6 +72,8 @@ Real git, real push, real Argo sync - only _whose_ repo the remote is is simulat
 | `scripts/gen-argocd-app.py`                      | generates the Argo Application                  | changing what Argo reads or its sync policy      |
 | `drill/`                                         | the GUI + server + grader (TypeScript)          | anything the user sees or that grades them       |
 | `drill/shared/src/index.ts`                      | the websocket protocol, defined once            | adding a message between web and server          |
+| `drill/Containerfile` + `.containerignore`       | the image; the allow-list keeping secrets out   | changing what ships or widening the context      |
+| `drill/server/src/committed.ts`                  | what cluster git has - the GitOps half of grading | the saved-vs-committed lesson                  |
 | `drill/server/src/grader/`                       | the grader; pure functions                      | changing how a submission is judged              |
 | `scenarios/`                                     | the curriculum cards                            | adding or editing a drill                        |
 | `scenarios/answers/*.toml`                       | single source of truth for answers              | changing an answer, a hint, or a scenario switch |
@@ -77,6 +81,7 @@ Real git, real push, real Argo sync - only _whose_ repo the remote is is simulat
 | `scenario_testing/check.sh`                      | live-cluster outcome checks                     | adding a scenario                                |
 | `tests/`                                         | $0 local validation                             | adding a guard                                   |
 | `tests/cluster-git-argo.sh`                      | proves Argo clones cluster git on kind          | changing the git server                          |
+| `tests/drill-gui-kind.sh`                        | proves the drill pod serves the console on kind | changing the image or the deployment             |
 | `Makefile`                                       | lifecycle (up, down, git-seed, scenario)        | driving the env                                  |
 | `Makefile.test`                                  | static checks, ministack, kind, drill           | validating a change                              |
-| `.claude/skills/`                                | vendored skills (work-order, container-sandbox) | ticketing or sandboxed testing                   |
+| `.claude/skills/`                                | vendored: work-order, container-sandbox, hydration-prompt | ticketing, sandboxed testing, handoff  |
