@@ -322,6 +322,27 @@ test("the editor can read the file its task names", async () => {
   assert.match(res.json().content, /1\.27-alpine/);
 });
 
+test("the explorer gets the workspace tree", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/tree" });
+  assert.equal(res.statusCode, 200);
+  const tree = res.json() as Array<{
+    name: string;
+    path: string;
+    type: string;
+  }>;
+  const walk = (nodes: Array<{ path: string; children?: unknown }>): string[] =>
+    nodes.flatMap((n) => [
+      n.path,
+      ...walk(
+        (n.children ?? []) as Array<{ path: string; children?: unknown }>,
+      ),
+    ]);
+  assert.ok(
+    walk(tree).includes("helm/practice-app/values.yaml"),
+    "the file every drill opens is not in the tree",
+  );
+});
+
 test("the editor cannot read its way out of the workspace", async () => {
   for (const path of ["../../../etc/passwd", "/etc/passwd", ".git/config"]) {
     const res = await app.inject({

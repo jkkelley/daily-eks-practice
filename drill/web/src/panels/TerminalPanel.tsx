@@ -3,14 +3,16 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { ClientMessage, ServerMessage } from "@drill/shared";
+import { terminalTheme, themeById } from "../lib/themes.ts";
 
 interface Props {
   send: (m: ClientMessage) => void;
   onMessage: (cb: (m: ServerMessage) => void) => () => void;
   connected: boolean;
+  theme: string;
 }
 
-export function TerminalPanel({ send, onMessage, connected }: Props) {
+export function TerminalPanel({ send, onMessage, connected, theme }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -29,22 +31,7 @@ export function TerminalPanel({ send, onMessage, connected }: Props) {
       cursorStyle: "bar",
       allowProposedApi: true,
       scrollback: 10_000,
-      theme: {
-        background: "#171c26",
-        foreground: "#e6e6e6",
-        cursor: "#7aa2f7",
-        cursorAccent: "#171c26",
-        selectionBackground: "#7aa2f733",
-        black: "#1c222e",
-        red: "#f7768e",
-        green: "#9ece6a",
-        yellow: "#e0af68",
-        blue: "#7aa2f7",
-        magenta: "#bb9af7",
-        cyan: "#7dcfff",
-        white: "#e6e6e6",
-        brightBlack: "#9aa5b1",
-      },
+      theme: terminalTheme(themeById(theme)),
     });
 
     const fit = new FitAddon();
@@ -104,7 +91,24 @@ export function TerminalPanel({ send, onMessage, connected }: Props) {
       termRef.current = null;
       fitRef.current = null;
     };
+    // `theme` is deliberately absent from the dependency list below. Rebuilding the
+    // terminal on a colour change would tear down the socket handler and repaint
+    // from scratch for no reason; the effect underneath repaints in place instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send, onMessage]);
+
+  /**
+   * Repaint on a theme change, in place.
+   *
+   * xterm's `options.theme` is live-settable, so this costs one assignment and the
+   * running tmux session never notices. Skipping it leaves one cold blue rectangle
+   * in the middle of a warm console, which does not read as a mixed palette - it
+   * reads as a panel that failed to load.
+   */
+  useEffect(() => {
+    const term = termRef.current;
+    if (term) term.options.theme = terminalTheme(themeById(theme));
+  }, [theme]);
 
   /**
    * Tell the server how big this terminal actually is, the moment there is a

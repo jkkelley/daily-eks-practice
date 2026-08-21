@@ -137,6 +137,23 @@ It was tried and removed. Under software rendering it creates a context, throws 
 A GPU-blocklisted browser, a VM or a remote desktop can all land there, and this is the surface the whole drill is run from.
 xterm's default DOM renderer is correct everywhere and fast enough to watch a rollout.
 
+**The IDE is Monaco plus our own workbench, not a hosted VS Code.**
+Monaco IS VS Code's editor, extracted - same highlighting, keybindings, find widget and theme format.
+What a hosted `code-server` adds on top is furniture: an activity rail, a file tree, tabs, a status bar.
+That is `ActivityRail.tsx`, `Explorer.tsx` and the tab strip in `EditorPanel.tsx`, and it costs a few hundred lines against a second product with its own UI language, several hundred MB in a public image, and a runtime base move from Alpine to Debian.
+The fallback, if it ever proves too thin, is `code-server` on its own `/ide` route through the proxy Task 5.4 installs anyway.
+
+**Themes are original, and they retheme the whole console.**
+The image is public, so bundling somebody else's theme file means reading their licence first.
+Each theme in `lib/themes.ts` carries three things: Monaco's own theme data, the CSS variables the chrome reads, and the eight ANSI colours for xterm.
+All three matter - retheming only the editor leaves one cold rectangle in a warm console, which reads as a panel that failed to load rather than as a mixed palette.
+xterm's `options.theme` is live-settable, so the terminal repaints in place and the tmux session behind it never notices.
+
+**A tab appears before its content does, and the editor waits.**
+Monaco applies `defaultValue` once, when it creates the model for a path, and ignores every later change to it.
+So `OpenFile.content` is `null` until the fetch lands and the editor does not mount until it is a string.
+Mounting against an empty placeholder pins the buffer empty for good: the file loads, the state updates, and the editor still shows nothing.
+
 **The terminal re-sends its size when the socket opens.**
 `useDrillSocket`'s `send` drops anything written to a socket that is not `OPEN`, and the `ResizeObserver` fires on mount - before the websocket has connected.
 So the one message that mattered most was the one guaranteed to be thrown away: the PTY stayed at the 120x32 it was spawned with, tmux redrew a 32-row screen into a 23-row terminal, and the prompt landed in a row nothing displayed.

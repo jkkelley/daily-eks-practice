@@ -47,3 +47,13 @@ export const submit = (taskId: string, answer: string) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ taskId, answer }),
   });
+
+/** One entry in the explorer. `path` is workspace-relative and goes straight back to /api/file. */
+export interface TreeNode {
+  name: string;
+  path: string;
+  type: "file" | "dir";
+  children?: TreeNode[];
+}
+
+export const getTree = () => json<TreeNode[]>("/api/tree");

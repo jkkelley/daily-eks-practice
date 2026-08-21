@@ -101,6 +101,13 @@ body,
 .stage {
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+  gap: var(--gap);
+}
+
+.workbench {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* --- panels ----------------------------------------------------------------- */
@@ -635,4 +642,325 @@ input.answer:focus,
 }
 .body::-webkit-scrollbar-thumb:hover {
   background: var(--dim);
+}
+
+/* --- activity rail ---------------------------------------------------------- */
+/* The cheapest thing that makes a page read as an IDE. Two icons, both live. */
+
+.rail {
+  flex: 0 0 auto;
+  width: 44px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 0;
+  gap: 2px;
+}
+
+.rail-btn {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  color: var(--dim);
+  width: 100%;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.rail-btn:hover {
+  color: var(--fg);
+}
+.rail-btn.on {
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+.rail-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -3px;
+}
+
+/* --- explorer --------------------------------------------------------------- */
+
+.tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tree-list.root {
+  padding: 4px 0 16px;
+}
+
+.tree-row {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 3px 8px 3px 6px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.tree-row:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.tree-row.dir {
+  color: var(--fg);
+}
+.tree-row.file.active {
+  background: var(--panel-2);
+  color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.tree-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chev {
+  flex: 0 0 auto;
+  color: var(--dim);
+  transition: transform 0.12s ease;
+}
+.chev.open {
+  transform: rotate(90deg);
+}
+
+.tree-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.tree-badge {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 3px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  opacity: 0.8;
+}
+
+/* --- editor tabs and breadcrumb --------------------------------------------- */
+
+.editor-panel > .tabs {
+  flex: 0 0 auto;
+  height: 30px;
+  display: flex;
+  align-items: stretch;
+  background: linear-gradient(var(--panel-2), var(--panel));
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.editor-panel > .tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab-item {
+  display: flex;
+  align-items: center;
+  border-right: 1px solid var(--border);
+  border-top: 1px solid transparent;
+  flex: 0 0 auto;
+  max-width: 200px;
+}
+.tab-item.on {
+  background: var(--panel);
+  border-top-color: var(--accent);
+}
+
+.tab-open {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 0 4px 0 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.tab-item.on .tab-open {
+  color: var(--fg);
+}
+.tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-badge {
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 3px;
+  opacity: 0.8;
+  flex: 0 0 auto;
+}
+
+.tab-close {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: var(--dim);
+  font-size: 14px;
+  line-height: 1;
+  width: 22px;
+  height: 100%;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0 11px 0 0;
+}
+.tab-close:hover {
+  color: var(--bad);
+}
+.tab-dirty {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  display: block;
+}
+
+.breadcrumb {
+  flex: 0 0 auto;
+  padding: 4px 12px 5px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.crumb-sep {
+  padding: 0 5px;
+  opacity: 0.6;
+}
+.crumb-leaf {
+  color: var(--fg);
+}
+
+/* --- the quick pick --------------------------------------------------------- */
+
+.quick-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: center;
+  padding-top: 9vh;
+}
+
+.quick {
+  width: min(560px, 92vw);
+  height: fit-content;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.7);
+  overflow: hidden;
+}
+
+.quick-input {
+  width: 100%;
+  background: var(--code-bg);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 10px 12px;
+  outline: 0;
+}
+
+.quick-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.quick-row {
+  appearance: none;
+  background: none;
+  border: 0;
+  width: 100%;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  text-align: left;
+}
+.quick-row.on {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.swatch {
+  display: inline-flex;
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.swatch i {
+  width: 9px;
+  height: 14px;
+  display: block;
+}
+
+.quick-kind {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  text-transform: lowercase;
+}
+
+.quick-none {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  color: var(--dim);
 }

@@ -41,7 +41,7 @@
 | ministack          | $0 Terraform proof | `make -f Makefile.test ministack`. Mocks AWS, **does not run pods** - cannot validate cluster behaviour                                    |
 | Prometheus/Grafana | observability      | kube-prometheus-stack, scenario 07                                                                                                         |
 | RDS                | database           | tiny instance, scenario 11                                                                                                                 |
-| gh CLI             | GitHub auth        | scopes: `gist, read:org, repo, workflow`. **`write:packages` not yet granted** (needed at Phase 5 only)                                    |
+| gh CLI             | GitHub auth        | scopes: `gist, read:org, repo, workflow, write:packages`. **Granted 2026-08-21**, verified with `gh auth status`. No PAT was ever created |
 | Node / Python      | app / glue         | Host node v20.20.2 is **never used**; the drill workspace runs in a locally built image, see below. python3 3.12.3, stdlib only, no pip deps |
 | drill workspace    | the grader / GUI   | npm workspaces at `drill/`: `drill-install`, `drill-test`, `drill-typecheck`, `drill-build`, `drill-dev`, `drill-clean`, all inside Podman |
 | drill node image   | where all of that runs | `localhost/daily-eks-practice-drill-node:22-alpine`, **built** from `drill/Containerfile.build` by `drill-node-image`, which every `drill-*` target depends on. node:22-alpine + `python3 make g++ tmux git` |
@@ -188,6 +188,8 @@ It is deliberately not duplicated into this file: this one is long and often rea
 | 2026-08-21 | **No `WebglAddon` in the terminal.** xterm's DOM renderer only | Under software rendering it creates a context, throws nothing, never fires `onContextLoss`, and draws **nothing** - a blank terminal with no error anywhere. Observed directly. A GPU-blocklisted browser, a VM or a remote desktop all land there, and this is the one surface the drill is run from. The throughput WebGL buys is for a firehose; this terminal watches a rollout |
 | 2026-08-21 | Monaco is **bundled and lazy-loaded**, imported piece by piece rather than through its barrel | `@monaco-editor/react` loads the editor from `cdn.jsdelivr.net` by default, which works on a laptop and hangs forever in a private subnet - and "the drill never depends on the internet" is already the rule everywhere else here. The barrel pulls in every grammar Monaco ships, from abap to solidity: 3.9 MB. `editor.api` + `editor.all` + the YAML contribution, in a lazily-loaded chunk, puts the entry bundle at 473 KB |
 | 2026-08-21 | The terminal **re-sends its size when the socket opens** | `send` drops anything written to a socket that is not `OPEN` and the `ResizeObserver` fires on mount, so the one message that mattered most was the one guaranteed to be thrown away. The PTY stayed at its spawn size, tmux redrew a 32-row screen into a 23-row terminal, and the prompt landed in a row nothing displayed: a blank terminal in front of a perfectly healthy session, with nothing in any log |
+| 2026-08-21 | **The IDE is Monaco plus our own workbench, not a hosted VS Code.** Approved by the user at the Task 5.3 review | Monaco IS VS Code's editor, extracted - same highlighting, keybindings, find widget and theme format. What the Lambda console adds on top is furniture: an activity rail, a file tree, tabs, a status bar. That is a few hundred lines in an app we already have. Hosting `code-server` or `openvscode-server` to obtain a tree view costs a second product with its own UI language, several hundred MB in a public image, and a runtime base move from Alpine to Debian - `node-pty` is compiled from source against musl and would have to be rebuilt against glibc. **Fallback if the workbench proves too thin:** `code-server` on its own `/ide` route, proxied through the `@fastify/http-proxy` that Task 5.4 already installs for Argo CD and Grafana. Nothing built now is wasted if that happens. Rejected outright: `monaco-vscode-api` (VS Code's workbench as a library - closest to the screenshot, by far the largest integration surface and the churniest dependencies), CodeMirror 6 (excellent, but its look is its own, so it means styling toward the thing Monaco already is), Theia, and Sandpack/WebContainers (built for browser-run npm projects; this terminal is a real shell in a real pod) |
+| 2026-08-21 | **Layout: activity rail on the far left, tasks and card stay on the right.** The user's pick from three | The rail is what makes it read as an IDE at a glance, and collapsing the explorer from it buys the editor width back on a small screen. Everything stays on one screen, so there is nothing to navigate to and no "which view am I in". **Fallback if four columns prove too dense below ~1440px:** the two-view toggle - the drill view exactly as it is now, plus a full-width IDE view - which was the runner-up and needs only a route, not a rebuild. Also considered and dropped: a plain file-tree column with no rail, which is less furniture but correspondingly less obviously an IDE |
 
 ## Lessons Learned
 
@@ -235,7 +237,7 @@ Not blockers, but scheduled friction to expect:
 
 | Item                                                            | When it bites              | Resolution                                                                                                                                                 |
 | --------------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `write:packages` scope not granted                              | Phase 5, Task 5.5          | User runs `gh auth refresh -h github.com -s write:packages`. Interactive - print it, do not attempt to run it                                              |
+| ~~`write:packages` scope not granted~~ **DONE 2026-08-21**      | ~~Phase 5, Task 5.5~~      | User ran `gh auth refresh -h github.com -s write:packages`. `gh auth status` confirms the scope. Task 5.5 authenticates to GHCR with `gh auth token`       |
 | `buildpack-deps:bookworm-scm` is a 337 MB pull                  | first `make up` after this | Once per node, and only the git server uses it. If it ever becomes a problem the swap is `bitnami/git`, which is smaller but publishes only a `latest` tag |
 | Tasks 5.4-5.5 and 6.1-6.5 are specified at interface level only | Phase 5 and 6              | Deliberate. Expand them after the user reviews the UI at Task 5.3, before those tickets are worked                                                         |
 | Phase 7 costs money                                             | Phase 7                    | ~$6.50 per 30-hour cycle. **Requires explicit user approval before any step runs.** Phases 0-6 are $0                                                      |
@@ -338,10 +340,10 @@ Ground rules that bite on the rest of this ticket:
 - **The GUI is an unauthenticated cluster-admin web terminal.** The source-IP
   allow list is the ONLY control on it. Never widen drill_allowed_cidrs to
   0.0.0.0/0 - a Terraform precondition now fails the plan if you do.
-- **`write:packages` is still not granted** and Task 5.5 needs it for GHCR:
-  `gh auth refresh -h github.com -s write:packages`. It is interactive and blocks
-  on a browser - print it for the user, never attempt it, and NEVER create a
-  personal access token.
+- **`write:packages` was granted 2026-08-21** and needs nothing further. It only
+  ever bought `make drill-image`, the push-from-the-laptop path; Task 5.5's CI
+  workflow publishes with the automatic GITHUB_TOKEN and the user's own Jenkins
+  CI/CD covers it too. NEVER create a personal access token.
 - **npm never runs on the host.** Everything goes through the built image
   `localhost/daily-eks-practice-drill-node:22-alpine`; `drill-node-image` builds
   it and every other drill target depends on it. Run `drill-typecheck` as well as

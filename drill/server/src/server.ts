@@ -17,7 +17,11 @@ import {
   type AnswerTask,
 } from "./grader/answers.ts";
 import { grade, type GradeContext } from "./grader/index.ts";
-import { readWorkspaceFile, WorkspaceError } from "./workspace.ts";
+import {
+  readWorkspaceFile,
+  listWorkspaceTree,
+  WorkspaceError,
+} from "./workspace.ts";
 import { registerTerminal } from "./ws.ts";
 import type { ServerOptions } from "./config.ts";
 
@@ -87,6 +91,12 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   }));
 
   app.get("/api/tasks", async () => answers.tasks.map(toPublic));
+
+  // The explorer. Read fresh on each request rather than cached or watched: the
+  // terminal is a real shell in the same working tree, so `git checkout` or a `helm
+  // template > out.yaml` changes the tree behind the panel's back, and a stale tree
+  // in a drill about editing files is worse than a re-walk that costs milliseconds.
+  app.get("/api/tree", async () => listWorkspaceTree(opts.workspaceDir));
 
   // The editor opens the file the current task names. It is a route rather than a
   // websocket message because Monaco asks for it once, on mount, and a request that

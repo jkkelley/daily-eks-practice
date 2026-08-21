@@ -18,8 +18,16 @@ WEBROOT=/tmp/drill-web
 SCENARIO=${DRILL_SCENARIO:-03}
 
 rm -rf "$WORKSPACE"
-mkdir -p "$WORKSPACE/helm/practice-app" "$LOGS" "$WEBROOT"
-cp /repo/helm/practice-app/values.yaml "$WORKSPACE/helm/practice-app/values.yaml"
+mkdir -p "$WORKSPACE" "$LOGS" "$WEBROOT"
+
+# A representative slice of the repo, not one file. The explorer is the point of
+# the panel and a tree with a single leaf tells you nothing about whether it works.
+# In the cluster this is a full git clone; here it is a copy of the parts a drill
+# ever touches, and deliberately NOT scripts/, which holds config.toml.
+for dir in helm scenarios; do
+  cp -r "/repo/$dir" "$WORKSPACE/$dir"
+done
+cp /repo/README.md /repo/CLAUDE.md /repo/COMPASS.md "$WORKSPACE/" 2>/dev/null || true
 
 # A real repo, so the terminal's git behaves and `git status` shows the edit the
 # editor just made. The remote is a dead end on purpose: this preview has no
