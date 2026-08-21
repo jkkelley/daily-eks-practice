@@ -41,6 +41,31 @@ test("output is teed to the log file", async () => {
   assert.match(await readFile(logPath, "utf8"), /persisted-line/);
 });
 
+test("output produced before the first subscriber is buffered, not dropped", async () => {
+  // tmux dumps its whole redraw the instant it attaches, which is before the
+  // websocket handler can possibly be registered - the route has to build the
+  // session first in order to have something to subscribe to. Losing that one
+  // burst loses the entire visible screen, and the symptom is a blank terminal on
+  // a session that is running perfectly.
+  const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
+  const term = new TerminalSession({
+    cwd: dir,
+    sessionName: "test-early",
+    logPath: join(dir, "pty.log"),
+    shell: "/bin/sh",
+  });
+  term.write("echo printed-before-anyone-listened\n");
+  await settle(800);
+
+  let seen = "";
+  term.onData((c) => {
+    seen += c;
+  });
+  await settle(200);
+  assert.match(seen, /printed-before-anyone-listened/);
+  term.dispose();
+});
+
 test("replay returns the log tail so a pod restart keeps scrollback", async () => {
   const dir = await mkdtemp(join(tmpdir(), "drill-pty-"));
   const logPath = join(dir, "pty.log");

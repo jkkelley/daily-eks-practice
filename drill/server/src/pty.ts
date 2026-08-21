@@ -12,11 +12,22 @@
  * solving only the second loses your running command. Both are cheap.
  */
 import { spawn, type IPty } from "node-pty";
+import { execFileSync } from "node:child_process";
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const REPLAY_CAP_BYTES = 256 * 1024;
+
+/** Is a tmux session with this name already running? Absence is not an error. */
+function tmuxSessionExists(name: string): boolean {
+  try {
+    execFileSync("tmux", ["has-session", "-t", name], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface TerminalOptions {
   cwd: string;
@@ -26,6 +37,8 @@ export interface TerminalOptions {
   logPath: string;
   /** Overridable for tests; production is tmux. */
   shell?: string;
+  /** Passed to `tmux -f`. Absent means tmux's own defaults. */
+  tmuxConf?: string;
 }
 
 export class TerminalSession {
@@ -34,8 +47,35 @@ export class TerminalSession {
   private readonly logPath: string;
   private disposed = false;
 
+  /**
+   * Everything the terminal emitted before anybody was listening.
+   *
+   * tmux dumps its entire redraw the instant it attaches, and that burst is gone
+   * within a millisecond or two - well before a websocket route can subscribe,
+   * because the route has to construct the session in order to have something to
+   * subscribe TO. Dropping it drops the whole visible screen: a session running
+   * perfectly, and a blank terminal in front of the user. The log tee caught those
+   * bytes and the browser did not, which is exactly how it presented.
+   */
+  private early: string[] = [];
+  private subscribed = false;
+
+
+  /**
+   * True when this handle attached to a tmux session that was already running.
+   *
+   * It is the difference between the two failures this class exists for. On a
+   * reattach tmux repaints the pane itself, so replaying the log on top of that
+   * paints stale bytes - half-finished escape sequences from an earlier redraw -
+   * which the reattach then partly overwrites, and the terminal opens on visible
+   * garbage. On a pod restart there is no tmux to repaint and the log is the only
+   * scrollback there is. Callers use this to tell which one happened.
+   */
+  readonly reattached: boolean;
+
   constructor(opts: TerminalOptions) {
     this.logPath = opts.logPath;
+    this.reattached = !opts.shell && tmuxSessionExists(opts.sessionName);
 
     // Opened synchronously, before the PTY exists. An async open here would let the
     // shell's first output - the prompt, and anything written in the same tick as
@@ -48,7 +88,16 @@ export class TerminalSession {
     // makes reconnect and first-connect the same code path.
     const [file, args] = opts.shell
       ? [opts.shell, [] as string[]]
-      : ["tmux", ["new-session", "-A", "-s", opts.sessionName]];
+      : [
+          "tmux",
+          [
+            ...(opts.tmuxConf ? ["-f", opts.tmuxConf] : []),
+            "new-session",
+            "-A",
+            "-s",
+            opts.sessionName,
+          ],
+        ];
 
     this.pty = spawn(file, args, {
       name: "xterm-256color",
@@ -59,11 +108,19 @@ export class TerminalSession {
     });
 
     this.pty.onData((chunk) => {
-      if (!this.disposed) this.log.write(chunk);
+      if (this.disposed) return;
+      this.log.write(chunk);
+      if (!this.subscribed) this.early.push(chunk);
     });
   }
 
   onData(cb: (chunk: string) => void): void {
+    if (!this.subscribed) {
+      this.subscribed = true;
+      const buffered = this.early.join("");
+      this.early = [];
+      if (buffered) cb(buffered);
+    }
     this.pty.onData(cb);
   }
 

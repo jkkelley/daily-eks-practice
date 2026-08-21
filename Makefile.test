@@ -110,6 +110,20 @@ drill-test: drill-node-image ## Unit tests for the drill workspaces (inside Podm
 drill-build: drill-node-image ## Build the drill workspaces (inside Podman)
 	$(NODE) npm run build
 
+drill-dev: drill-node-image ## Vite dev server for the drill GUI, in Podman, on a probed free port
+	@PORT=$$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1])"); \
+	 echo ""; echo "  drill GUI -> http://localhost:$$PORT"; echo "  ctrl-c to stop"; echo ""; \
+	 podman run --rm -it --userns=keep-id -p $$PORT:5173 \
+	   -v $(CURDIR):/repo:Z \
+	   -v $(NODE_MODULES):/repo/drill/node_modules:Z \
+	   -w /repo/drill \
+	   -e API_PROXY_TARGET=http://127.0.0.1:8090 \
+	   $(NODE_IMAGE) sh /repo/drill/dev.sh
+	# ^ The plan pointed API_PROXY_TARGET at host.containers.internal:8090, which
+	#   assumes the drill server is running on the laptop. It never is - npm does
+	#   not run on the host in this repo. dev.sh starts the server and Vite in this
+	#   one container, so the proxy target is loopback.
+
 drill-clean: ## Drop the node_modules volume, the empty host mountpoint and the node image
 	-podman volume rm $(NODE_MODULES)
 	-rmdir drill/node_modules

@@ -57,6 +57,20 @@ test("tasks are served without the answers", async () => {
   }
 });
 
+test("the card panel gets the scenario's own text and no tasks with it", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/scenario" });
+  assert.equal(res.statusCode, 200);
+  const meta = res.json() as Record<string, unknown>;
+  assert.equal(meta.scenario, "03");
+  assert.equal(meta.title, "Rolling update + rollback");
+  assert.ok(meta.ticket, "the card's ticket text is what the help panel shows");
+  assert.equal(meta.tasks, undefined, "tasks have their own route");
+  assert.ok(
+    !JSON.stringify(meta).includes("accept_pattern"),
+    "the answer key must not ride along on the metadata",
+  );
+});
+
 test("hints are not served up front either", async () => {
   const res = await app.inject({ method: "GET", url: "/api/tasks" });
   for (const t of res.json() as Array<Record<string, unknown>>) {

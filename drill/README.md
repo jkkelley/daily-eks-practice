@@ -9,7 +9,7 @@ One long-lived pod that serves the terminal, the editor, the answers panel and t
 | --------- | --------------------------------------------------------------------------------------------------------------------- |
 | `shared/` | The websocket protocol types. Imported by both ends, so a mismatch is a compile error rather than a runtime surprise. |
 | `server/` | Fastify. Serves the built web app, the PTY websocket, the grader, and the reverse proxy to Argo CD and Grafana.       |
-| `web/`    | React + Vite. xterm.js terminal, Monaco editor, answers and help panels. Built in Phase 5; it does not exist yet.     |
+| `web/`    | React + Vite. xterm.js terminal, Monaco editor, answers and help panels.                                              |
 
 ## Running it
 
@@ -20,8 +20,21 @@ make -f Makefile.test drill-install    # npm install, in a container
 make -f Makefile.test drill-test       # unit tests, in a container
 make -f Makefile.test drill-typecheck  # tsc --noEmit, in a container
 make -f Makefile.test drill-build      # tsc -b to dist/, in a container
-make -f Makefile.test drill-clean      # drop the node_modules volume
+make -f Makefile.test drill-dev        # the GUI, in a container, on a probed port
+make -f Makefile.test drill-clean      # drop the node_modules volume and the image
 ```
+
+`drill-dev` runs `drill/dev.sh`, which starts **both** halves in one container: the
+Fastify server on loopback:8090 and Vite on 5173, with Vite proxying `/api` and
+`/ws` to the server.
+The plan pointed `API_PROXY_TARGET` at `host.containers.internal:8090`, which
+assumes the server is running on the laptop - it never is, because npm does not
+run on the host in this repo.
+
+Its workspace is a scratch git repo under `/tmp` in the container, seeded from
+`helm/practice-app/values.yaml`.
+It is deliberately not a mount of the working tree: the editor panel autosaves,
+and nothing in a preview should be able to write to the repo.
 
 ### Where the dependencies live
 
@@ -105,6 +118,29 @@ Omit `committed` and commit state is simply not graded.
 `scripts/answers.py::_validate()` and `server/src/grader/answers.ts::validate()` enforce the same rules on the same files, because Python renders the answers and TypeScript grades them.
 `tests/fixtures/answers-invalid/` is ten files, one per rule, that both must reject and reject **for the same stated reason**.
 If you add a rule to one, add it to the other and add a fixture, in the same commit.
+
+## The GUI
+
+Four panels: editor over terminal on the left, tasks and card behind tabs on the right, a status row underneath.
+The palette is lifted verbatim from `PRACTICE_ANSWERS.html` so the drill and the answer key read as one product.
+
+Three things in `web/` are decisions rather than defaults, and undoing them breaks something that is not obvious:
+
+**Monaco is bundled, not fetched.**
+`@monaco-editor/react` loads the editor from `cdn.jsdelivr.net` by default, which works on a laptop and hangs forever in a private subnet.
+`web/src/lib/monaco.ts` points the loader at the npm package.
+It also imports `editor.api` plus one language contribution rather than the `monaco-editor` barrel - the barrel pulls in every grammar Monaco ships, from abap to solidity, and takes the bundle from about 800 KB to 3.9 MB.
+The editor panel is lazy-loaded so Monaco lands in its own chunk after the console has painted.
+
+**There is no `WebglAddon`.**
+It was tried and removed. Under software rendering it creates a context, throws nothing, never fires `onContextLoss`, and draws nothing at all - a completely blank terminal with no error anywhere.
+A GPU-blocklisted browser, a VM or a remote desktop can all land there, and this is the surface the whole drill is run from.
+xterm's default DOM renderer is correct everywhere and fast enough to watch a rollout.
+
+**The terminal re-sends its size when the socket opens.**
+`useDrillSocket`'s `send` drops anything written to a socket that is not `OPEN`, and the `ResizeObserver` fires on mount - before the websocket has connected.
+So the one message that mattered most was the one guaranteed to be thrown away: the PTY stayed at the 120x32 it was spawned with, tmux redrew a 32-row screen into a 23-row terminal, and the prompt landed in a row nothing displayed.
+The terminal looked blank while the session behind it was perfectly healthy.
 
 ## Why TypeScript on both ends
 

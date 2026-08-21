@@ -75,6 +75,17 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
 
   app.get("/api/session", async () => state);
 
+  // The card, for the help panel. Spelled out field by field rather than spread
+  // from `answers`, so a key added to the TOML tomorrow cannot quietly become a
+  // key the browser is served.
+  app.get("/api/scenario", async () => ({
+    scenario: answers.scenario,
+    title: answers.title,
+    time: answers.time,
+    needs: answers.needs,
+    ticket: answers.ticket,
+  }));
+
   app.get("/api/tasks", async () => answers.tasks.map(toPublic));
 
   // The editor opens the file the current task names. It is a route rather than a

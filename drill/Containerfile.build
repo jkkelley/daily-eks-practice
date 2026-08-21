@@ -16,9 +16,10 @@
 # runtime image is Alpine, and a .node built against glibc cannot be loaded by a
 # musl runtime.
 #
-# tmux is here because TerminalSession's production path spawns
+# git is here because the preview workspace is a real repo and the drill's own
+# subject is committing. tmux is here because TerminalSession's production path spawns
 # `tmux new-session -A`, and a test suite that only ever passes `shell: /bin/sh`
 # would leave that path unexercised until it failed in front of the user.
 FROM docker.io/node:22-alpine
 
-RUN apk add --no-cache python3 make g++ tmux
+RUN apk add --no-cache python3 make g++ tmux git

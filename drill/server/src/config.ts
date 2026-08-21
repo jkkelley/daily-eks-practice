@@ -15,6 +15,12 @@ export interface ServerOptions {
    * this process cannot see, so it is asked for rather than guessed.
    */
   logDir: string;
+  /**
+   * Passed to `tmux -f`. Optional, and absent means tmux's own defaults, which
+   * work - they are just loud. Not required the way the paths above are, because
+   * a missing theme is a cosmetic problem and a missing workspace is not.
+   */
+  tmuxConf?: string;
   scenario: string;
 }
 
@@ -52,6 +58,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerOptions {
     answersDir: required("DRILL_ANSWERS_DIR"),
     workspaceDir: required("DRILL_WORKSPACE"),
     logDir: required("DRILL_LOG_DIR"),
+    ...(env.DRILL_TMUX_CONF ? { tmuxConf: env.DRILL_TMUX_CONF } : {}),
     scenario: required("DRILL_SCENARIO"),
   };
 }

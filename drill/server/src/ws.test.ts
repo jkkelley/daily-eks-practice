@@ -184,28 +184,44 @@ test("a malformed frame is answered, not fatal", async () => {
   await app.close();
 });
 
-test("a reconnect is painted with the scrollback rather than a blank screen", async () => {
-  const { app, url, logDir } = await listening();
+test("a reconnect is repainted by tmux, not by replaying the log underneath it", async () => {
+  // Replaying the log on a reattach writes a slice of an old redraw, mid-escape
+  // sequence, which tmux then only partly overwrites - it shows up as visible
+  // junk above the prompt. The scrollback still arrives, from tmux.
+  const { app, url } = await listening();
   const first = await connect(url);
-  first.send({ type: "term:input", data: "echo printed-before-reload\n" });
+  first.send({ type: "term:input", data: "echo tmux-repaints-this\n" });
   await first.until(
-    (m) => m.type === "term:output" && m.data.includes("printed-before-reload"),
+    (m) => m.type === "term:output" && m.data.includes("tmux-repaints-this"),
     "the first connection's output",
   );
   first.close();
+  await new Promise((r) => setTimeout(r, 400));
 
   const second = await connect(url);
-  const painted = await second.until(
-    (m) => m.type === "term:output" && m.data.includes("printed-before-reload"),
-    "the replayed scrollback",
+  await second.until(
+    (m) => m.type === "term:output" && m.data.includes("tmux-repaints-this"),
+    "tmux's repaint of the pane",
   );
-  assert.ok(painted, "a page refresh opened onto a blank terminal");
   second.close();
   await app.close();
+});
 
-  // And the log really is where config said to put it, not somewhere derived.
+test("the pty log is written where config said, not somewhere derived from it", async () => {
+  const { app, url, logDir } = await listening();
+  const sock = await connect(url);
+  sock.send({ type: "term:input", data: "echo teed-to-the-volume\n" });
+  await sock.until(
+    (m) => m.type === "term:output" && m.data.includes("teed-to-the-volume"),
+    "the command's output",
+  );
+  sock.close();
+  await app.close();
+
+  // logDir is deliberately not a sibling of workspaceDir, so the plan's
+  // `workspaceDir/../pty` derivation cannot pass this by coincidence.
   assert.match(
     await readFile(join(logDir, "03.log"), "utf8"),
-    /printed-before-reload/,
+    /teed-to-the-volume/,
   );
 });

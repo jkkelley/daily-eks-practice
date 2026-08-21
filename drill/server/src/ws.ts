@@ -32,11 +32,19 @@ export async function registerTerminal(
         cwd: opts.workspaceDir,
         sessionName: `drill-${opts.scenario}`,
         logPath: join(opts.logDir, `${opts.scenario}.log`),
+        ...(opts.tmuxConf ? { tmuxConf: opts.tmuxConf } : {}),
       });
 
-      // Paint the tail first, so a reconnect never opens onto a blank screen.
-      const tail = await term.replay();
-      if (tail) send({ type: "term:output", data: tail });
+      // Paint the tail, so a restart never opens onto a blank screen - but ONLY
+      // when there was no tmux session to attach to. tmux repaints the pane on
+      // reattach, and replaying the log underneath that means writing a slice of
+      // an old redraw, mid-escape-sequence, which shows up as visible junk above
+      // the prompt. Two mechanisms for two different failures; running both for
+      // one failure is what produced the garbage.
+      if (!term.reattached) {
+        const tail = await term.replay();
+        if (tail) send({ type: "term:output", data: tail });
+      }
       send({ type: "session", state });
 
       term.onData((data) => send({ type: "term:output", data }));
