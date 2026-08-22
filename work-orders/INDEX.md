@@ -21,7 +21,7 @@ this shape is the directory layout. Nothing sits loose at the top level.
 Archived tickets drop out of it and into the table below.
 
 ```text
-WO-20260822-ec89  in-progress p1 Idle teardown: the playground stands itself down after a co...
+WO-20260822-ec89  in-review   p1 Idle teardown: the playground stands itself down after a co...
 WO-20260819-f5c9  ready       p1 Scenario drill sessions: make scenario N=03 converges an in...
 `-- WO-20260819-0562  ready       p2 Phase 7: live verification on real EKS - APPROVAL GATED, ab...
 WO-20260820-0425  draft       p2 COMPASS.md staleness check in the static suite
@@ -34,7 +34,7 @@ WO-20260820-0425  draft       p2 COMPASS.md staleness check in the static suite
 | `WO-20260819-0562` | ready | p2 | chore | WO-20260819-f5c9 | - | [Phase 7: live verification on real EKS - APPROVAL GATED, about $6.50 per 30-hour cycle](WO-20260819-f5c9/WO-20260819-0562-phase-7-live-verification-on-real-eks-approval-g.md) |
 | `WO-20260819-f5c9` | ready | p1 | feature | - | WO-20260819-0562 | [Scenario drill sessions: make scenario N=03 converges an in-cluster graded drill](WO-20260819-f5c9/WO-20260819-f5c9-scenario-drill-sessions-make-scenario-n-03-conve.md) |
 | `WO-20260820-0425` | draft | p2 | chore | - | - | [COMPASS.md staleness check in the static suite](WO-20260820-0425/WO-20260820-0425-compass-md-staleness-check-in-the-static-suite.md) |
-| `WO-20260822-ec89` | in-progress | p1 | feature | - | - | [Idle teardown: the playground stands itself down after a configurable quiet period](WO-20260822-ec89/WO-20260822-ec89-idle-teardown-the-playground-stands-itself-down-.md) |
+| `WO-20260822-ec89` | in-review | p1 | feature | - | - | [Idle teardown: the playground stands itself down after a configurable quiet period](WO-20260822-ec89/WO-20260822-ec89-idle-teardown-the-playground-stands-itself-down-.md) |
 
 ## Archived
 
