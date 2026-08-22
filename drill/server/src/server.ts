@@ -46,6 +46,7 @@ import type { ServerOptions } from "./config.ts";
 import { createStateStore, type StateStore } from "./state.ts";
 import { createSessionHub } from "./session.ts";
 import { readRequest, watchRequest } from "./request.ts";
+import { createActivityTracker, type ActivityTracker } from "./activity.ts";
 import { loadCatalogue, type CatalogueEntry } from "./catalogue.ts";
 
 /**
@@ -86,6 +87,15 @@ export interface ServerDeps extends ServerOptions {
   switchTimeoutMs?: number;
   /** Poll interval for `drill-request`. Injected so tests do not wait 2s a time. */
   requestPollMs?: number;
+  /**
+   * Stamps `lastActivityAt` when a human does something. The idle clock's only input.
+   *
+   * Optional for the same reason `writer` is: with no cluster there is nothing to
+   * mirror to and nothing on the far side reading it, and `drill-dev` has to keep
+   * working. Absent means the field is never written, which the watcher reads as
+   * "this server does not report it" and refuses to act on - see activity.ts.
+   */
+  activity?: ActivityTracker;
 }
 
 /** The task shape the browser is allowed to see. */
@@ -158,6 +168,15 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
     store,
   );
   const state = hub.state;
+
+  // Built here rather than in the entry point because it needs the hub, which
+  // only exists inside this function. Injectable so a test can drive the clock
+  // without one. Gated on `writer` because with nothing mirroring the session
+  // there is nobody on the far side to read the stamp, and stamping a field that
+  // reaches no one would be pure ceremony - `drill-dev` on a laptop is that case.
+  const activity =
+    opts.activity ?? (opts.writer ? createActivityTracker(hub) : undefined);
+  const deps: ServerDeps = { ...opts, ...(activity ? { activity } : {}) };
 
   /**
    * Point the whole server at a different scenario, in place.
@@ -254,6 +273,8 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   app.post<{ Body: { taskId: string; answer: string } }>(
     "/api/submit",
     async (req, reply) => {
+      // Submitting an answer is unambiguously a human being here.
+      activity?.mark();
       const { taskId, answer } = req.body ?? { taskId: "", answer: "" };
       const task = answers.tasks.find((t) => t.id === taskId);
       if (!task)
@@ -395,12 +416,34 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
       async (req) => {
         await converge(req.scenario, req.sessionId);
       },
-      { ...(opts.requestPollMs ? { intervalMs: opts.requestPollMs } : {}) },
+      {
+        ...(opts.requestPollMs ? { intervalMs: opts.requestPollMs } : {}),
+        // Mirrored into the session so it reaches the browser over the socket
+        // that is already open. The pod renders this countdown and never acts on
+        // it - enforcement is the laptop's, exactly as it is for SHUT IT DOWN.
+        onPolicy: async (policy) => {
+          await hub.update((s) => {
+            if (policy) s.idle = policy;
+            else delete s.idle;
+          });
+        },
+      },
     );
     app.addHook("onClose", async () => stop());
   }
 
-  await registerTerminal(app, opts, hub);
+  if (activity) {
+    // Stamp once at startup so a session that has just converged does not read as
+    // idle since the epoch, and flush on close so the last keystrokes before a
+    // restart are not lost from the clock's point of view.
+    activity.mark();
+    await activity.flush().catch(() => undefined);
+    app.addHook("onClose", async () => {
+      activity.stop();
+    });
+  }
+
+  await registerTerminal(app, deps, hub);
   await registerProxy(app, {
     ...(opts.argoUpstream ? { argo: opts.argoUpstream } : {}),
     ...(opts.grafanaUpstream ? { grafana: opts.grafanaUpstream } : {}),

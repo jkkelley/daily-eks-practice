@@ -24,6 +24,7 @@
  * family: the websocket resize sent before OPEN, and tmux's first burst dumped
  * before anything had subscribed.
  */
+import type { IdlePolicyView } from "@drill/shared";
 import type { K8sReader } from "./integrations/k8s.ts";
 
 export const REQUEST_CONFIGMAP = "drill-request";
@@ -43,6 +44,46 @@ export interface DrillRequest {
   requestedAt?: string;
   /** Informational: the bundle the laptop restored from, if it restored one. */
   restoredFrom?: string;
+  /**
+   * The idle limit the laptop is enforcing, if any. Rendered here, enforced there.
+   *
+   * These ride `drill-request` rather than being configured in the pod because the
+   * laptop is where the clock actually runs, and a second copy of a number that
+   * decides whether to destroy an environment is a number that can disagree with
+   * itself. One writer, one source.
+   */
+  idleTimeoutSeconds?: number;
+  idleAction?: "warn" | "destroy";
+  idleWarnSeconds?: number;
+}
+
+/** The idle fields, or undefined when the laptop is not enforcing a limit. */
+export function idlePolicyOf(
+  req: DrillRequest | undefined,
+): IdlePolicyView | undefined {
+  if (!req || typeof req.idleTimeoutSeconds !== "number") return undefined;
+  if (!(req.idleTimeoutSeconds > 0)) return undefined;
+  return {
+    timeoutSeconds: req.idleTimeoutSeconds,
+    action: req.idleAction === "destroy" ? "destroy" : "warn",
+    warnSeconds:
+      typeof req.idleWarnSeconds === "number" && req.idleWarnSeconds > 0
+        ? Math.min(req.idleWarnSeconds, req.idleTimeoutSeconds)
+        : Math.min(120, req.idleTimeoutSeconds),
+  };
+}
+
+/** Are two policies the same? Used to avoid a mirror write per poll tick. */
+export function samePolicy(
+  a: IdlePolicyView | undefined,
+  b: IdlePolicyView | undefined,
+): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.timeoutSeconds === b.timeoutSeconds &&
+    a.action === b.action &&
+    a.warnSeconds === b.warnSeconds
+  );
 }
 
 /**
@@ -78,6 +119,21 @@ export function parseRequest(
     ...(typeof r.restoredFrom === "string"
       ? { restoredFrom: r.restoredFrom }
       : {}),
+    // Carried through with the same "unusable is absent" rule as everything
+    // else here. A half-written idle policy must never become a real one: the
+    // absent case is "no limit", which is the safe answer, and a malformed
+    // number silently becoming a limit is how a cluster disappears.
+    ...(typeof r.idleTimeoutSeconds === "number" &&
+    Number.isFinite(r.idleTimeoutSeconds)
+      ? { idleTimeoutSeconds: r.idleTimeoutSeconds }
+      : {}),
+    ...(r.idleAction === "warn" || r.idleAction === "destroy"
+      ? { idleAction: r.idleAction }
+      : {}),
+    ...(typeof r.idleWarnSeconds === "number" &&
+    Number.isFinite(r.idleWarnSeconds)
+      ? { idleWarnSeconds: r.idleWarnSeconds }
+      : {}),
   };
 }
 
@@ -92,6 +148,17 @@ export interface RequestWatchOptions {
   intervalMs?: number;
   /** Injected so the test does not have to wait two seconds per assertion. */
   onError?: (e: unknown) => void;
+  /**
+   * Fired when the idle policy changes, independently of `onRequest`.
+   *
+   * It has to be a separate callback, because the two travel on the same object
+   * and change for completely different reasons. `onRequest` fires on a NEW
+   * SESSION and converges the whole drill; retuning the idle limit does not touch
+   * the session id, so folding it into that comparison would either miss every
+   * policy change or converge the drill every time the user restarted their
+   * watcher with a different number. Both are wrong, in opposite directions.
+   */
+  onPolicy?: (policy: IdlePolicyView | undefined) => void | Promise<void>;
 }
 
 /**
@@ -113,11 +180,27 @@ export function watchRequest(
 ): () => void {
   let last = seed;
   let stopped = false;
+  let lastPolicy: IdlePolicyView | undefined;
+  let sawPolicy = false;
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
     try {
       const req = await readRequest(reader, namespace);
+
+      // Policy first, and unconditionally on the request being readable. A
+      // session change should not be a prerequisite for the countdown being
+      // right, and the policy is also how the GUI learns the limit was CLEARED -
+      // which it must, or it counts down to a teardown nobody will perform.
+      if (opts.onPolicy) {
+        const policy = idlePolicyOf(req);
+        if (!sawPolicy || !samePolicy(policy, lastPolicy)) {
+          sawPolicy = true;
+          lastPolicy = policy;
+          await opts.onPolicy(policy);
+        }
+      }
+
       if (req && req.sessionId !== last) {
         last = req.sessionId;
         await onRequest(req);

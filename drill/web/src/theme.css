@@ -1427,3 +1427,88 @@ input.answer:focus,
   font-size: 11px;
   color: var(--dim);
 }
+
+/* ---- the idle countdown ------------------------------------------------ */
+
+/* A banner, not a modal. The correct way to dismiss it is to go back to work,
+   so it must never sit between the learner and the terminal that resets it. It
+   docks above the status bar, where the eye already goes for session facts. */
+.idlebanner {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 34px;
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: min(760px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, var(--border));
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+/* Armed is a different statement from warning, and must not read the same. This
+   is the only banner in the app whose deadline actually destroys something. */
+.idlebanner.armed {
+  border-color: color-mix(in srgb, var(--bad) 70%, var(--border));
+  box-shadow:
+    var(--shadow),
+    0 0 0 1px color-mix(in srgb, var(--bad) 25%, transparent);
+}
+
+.idlebanner-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--dim);
+  min-width: 62px;
+  text-align: center;
+}
+
+.idlebanner.armed .idlebanner-clock {
+  color: var(--bad);
+}
+
+.idlebanner-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.idlebanner-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+}
+
+.idlebanner-hint {
+  margin-left: auto;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+  color: var(--dim);
+  white-space: nowrap;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+
+/* The status bar's own compact form, present whenever a limit exists at all -
+   so the learner knows the clock is running before it starts shouting. */
+.statusbar .idleclock {
+  font-variant-numeric: tabular-nums;
+}
+
+.statusbar .idleclock.warning {
+  color: var(--bad);
+  font-weight: 600;
+}

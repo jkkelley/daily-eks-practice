@@ -38,10 +38,7 @@ import {
 import { languageFor } from "./lib/language.ts";
 import { TerminalPanel } from "./panels/TerminalPanel.tsx";
 import { Explorer } from "./panels/Explorer.tsx";
-import {
-  ActivityRail,
-  type SidebarView,
-} from "./panels/ActivityRail.tsx";
+import { ActivityRail, type SidebarView } from "./panels/ActivityRail.tsx";
 import { SourceControl } from "./panels/SourceControl.tsx";
 import { ThemePicker } from "./panels/ThemePicker.tsx";
 import { AnswersPanel } from "./panels/AnswersPanel.tsx";
@@ -50,6 +47,8 @@ import { ArgoWidget } from "./panels/ArgoWidget.tsx";
 import { StatusBar } from "./panels/StatusBar.tsx";
 import { PauseMenu } from "./panels/PauseMenu.tsx";
 import { GameOver, TransitionScreen } from "./panels/TransitionScreen.tsx";
+import { IdleBanner } from "./panels/IdleBanner.tsx";
+import { idleView, type IdleView } from "./lib/idle.ts";
 import type { OpenFile } from "./panels/EditorPanel.tsx";
 
 /** Monaco is most of the bundle. It loads after the console has painted, not before. */
@@ -68,6 +67,18 @@ export function App() {
   const [state, setState] = useState<SessionState | null>(null);
   const [deps, setDeps] = useState<DependencyStatus[]>([]);
   const [side, setSide] = useState<Side>("answers");
+
+  // The idle countdown, recomputed once a second from the SAME field the watcher
+  // reads. It is derived rather than stored: `state` only changes when the server
+  // flushes, which is every ten seconds at most, and a countdown that jumped in
+  // ten-second steps would read as broken well before it read as urgent.
+  const [idle, setIdle] = useState<IdleView | null>(null);
+  useEffect(() => {
+    const tick = () => setIdle(idleView(state));
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [state]);
 
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -162,10 +173,18 @@ export function App() {
   const sessionId = state?.sessionId;
   useEffect(() => {
     if (!sessionId) return;
-    void getScenario().then(setMeta).catch(() => setMeta(null));
-    void getTasks().then(setTasks).catch(() => setTasks([]));
-    void getTree().then(setTree).catch(() => setTree([]));
-    void getScenarios().then(setScenarios).catch(() => undefined);
+    void getScenario()
+      .then(setMeta)
+      .catch(() => setMeta(null));
+    void getTasks()
+      .then(setTasks)
+      .catch(() => setTasks([]));
+    void getTree()
+      .then(setTree)
+      .catch(() => setTree([]));
+    void getScenarios()
+      .then(setScenarios)
+      .catch(() => undefined);
     // The workspace was reset to the new scenario's tree, so every open buffer
     // is a file from the last drill. Monaco pins content per model path, so
     // leaving them open would show stale text with no way to refresh it.
@@ -424,6 +443,7 @@ export function App() {
         state={state}
         total={tasks.length}
         connected={connected}
+        idle={idle}
         themeLabel={themeById(theme).label}
         onOpenThemes={() => setPicking(true)}
         cursor={activePath ? cursor : null}
@@ -453,6 +473,14 @@ export function App() {
           onReplay={() => void restartSession().catch(() => undefined)}
           onPick={() => setPaused(true)}
         />
+      )}
+
+      {/* Rendered under the lifecycle overlays on purpose: once the drill is
+          switching or over, a countdown to a teardown is noise on top of the
+          screen that already says what happened. `idleView` returns null for any
+          non-active phase, so this is belt and braces rather than a second rule. */}
+      {idle?.warning && !paused && (
+        <IdleBanner idle={idle} scenario={state?.scenario} />
       )}
 
       {paused && phase === "active" && (
