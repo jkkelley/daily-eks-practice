@@ -1,17 +1,30 @@
 ---
 name: container-sandbox
 description: Run all dependency-heavy tasks (npm, go, pip) in isolated Podman containers. Also use when showing the user a localhost frontend that makes API calls — a real or mock backend must be running in the same compose stack.
+version: 1.0.1
 ---
 
 # Dependency Isolation Protocol
 
+> **This copy is read-only.**
+> Skills are vendored into a project as copies, and this may be one.
+> Edit this skill upstream, bump its version, then re-pull it - never edit the copy where it landed.
+> Upstream is `~/dotfiles/claude/skills/container-sandbox/`, or https://github.com/jkkelley/dotfiles/tree/main/claude/skills/container-sandbox if that checkout is not on this machine.
+> `skill-update.sh` replaces the skill's directory rather than merging into it, so a local edit is destroyed by the next update with no conflict and no warning.
+> The registry's content hash cannot catch it either, because a project's copy legitimately differs from upstream.
+
 **RULE:** Never run `npm install`, `go mod download`, or `pip install` on the host.
+
+**RULE:** All testing runs in Podman. Every command whose purpose is to verify that something works goes in a container, including a single `python3 script.py --help`. There is no threshold below which host execution is acceptable.
+
+If this file has no section covering the thing being tested, use `references/skill-testing.md` and add a section here rather than falling back to the host.
 
 ## 1. Choosing the Sandbox
 
 - **Small Tasks:** Use the **Single-Use Container** (Podman).
 - **Cluster Tasks:** Use the **Kind Sandbox** (Kind + Podman).
 - **Terraform Tasks:** Use the **Ministack Sandbox** (see section below).
+- **Testing a skill's or agent's bundled scripts:** see `references/skill-testing.md`.
 
 ## 2. Dependency Management (The "No-Clutter" Way)
 
@@ -39,6 +52,98 @@ podman run --rm --userns=keep-id -v .:/app:Z -w /app \
 ```bash
 podman run --rm -v .:/app:Z -w /app node:24-alpine sh -c "npm install && npm test"
 ```
+
+### Go
+
+**What this covers:** `go build`, `go test`, `go vet`, `gofmt`, `go mod tidy` - every Go toolchain
+invocation, including the ones that look harmless. `go` is not installed on the host and must not be.
+
+**Four things to get right.** None of them are obvious and two of them cost real time:
+
+1. **No `--userns=keep-id` needed.** Unlike the npm recipe above, Go needs no userns flag. Under
+   rootless podman the container's root already maps to the invoking host user, so `bin/` comes
+   back owned by the caller. `keep-id` also works here, it is simply machinery with nothing to do.
+2. **Put `GOCACHE` and `GOMODCACHE` on named volumes.** Left at their defaults they live inside
+   the container, so `--rm` throws them away and every run re-downloads the whole module graph.
+   Redirecting them into the bind mount instead is worse: the caches then litter the work tree.
+   Named volumes keep them warm and outside the repository.
+3. **`GOTOOLCHAIN=local` always; `CGO_ENABLED=0` on builds only.** Without the first, a bumped `go`
+   directive in `go.mod` makes the toolchain download a different compiler at build time and the
+   pinned image tag stops describing what actually built the binary. The second is what produces
+   the static binary a distroless final image needs, but setting it globally breaks the tests:
+
+   ```text
+   go: -race requires cgo; enable cgo by setting CGO_ENABLED=1
+   ```
+
+4. **Set `HOME` somewhere writable and disposable, such as `/tmp`.** The toolchain writes telemetry
+   counters under `$HOME/.config/go/telemetry`, and with the bind-mounted work tree as the working
+   directory those land in the repository:
+
+   ```text
+   ?? .config/go/telemetry/local/compile@go1.26.6-...v1.count
+   ```
+
+   Gitignoring them hides the symptom. `-e HOME=/tmp` means they are never written there at all.
+
+```bash
+# One command, all four fixes. Swap the trailing `go ...` for any toolchain call.
+podman run --rm \
+  -v "$PWD:/src:Z" -w /src \
+  -v myproject-go-build-cache:/go-build-cache \
+  -v myproject-go-mod-cache:/go-mod-cache \
+  -e GOCACHE=/go-build-cache \
+  -e GOMODCACHE=/go-mod-cache \
+  -e GOTOOLCHAIN=local \
+  -e HOME=/tmp \
+  docker.io/library/golang:1.26-bookworm \
+  go test -race -count=1 ./...
+```
+
+**Wire it into the Makefile, not into your fingers.** The project's Makefile is the single testing
+interface, so the container belongs inside the target. Detect whether a host toolchain exists and
+fall back to the container when it does not, so the same `make test` then works on a clean host and
+on a developer machine that happens to have Go installed:
+
+```make
+ifeq ($(shell command -v go 2>/dev/null),)
+GO_RUNNER := podman run $(PODMAN_GO_ARGS) $(GO_IMAGE)
+else
+GO_RUNNER :=
+endif
+GO    := $(GO_RUNNER) go
+GOFMT := $(GO_RUNNER) gofmt
+```
+
+`gatehouse-click/Makefile` is a complete worked example, including the `-p` and `-e` handling
+needed for a `make run` target that publishes the service port out of the container.
+
+**Verifying a service, not just a package.** A Go binary that compiles proves nothing about whether
+it serves. Build the real image and drive it over a real socket, on a probed high port:
+
+```bash
+make image
+PORT=$(python3 -c "
+import socket, random
+for p in random.sample(range(30000, 65001), 200):
+    try:
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', p)); print(p); break
+    except OSError: continue
+")
+podman run -d --name verify-$PORT -p "$PORT:8080" myimage:dev
+curl -s -i "http://127.0.0.1:$PORT/healthz"
+
+# Graceful shutdown is a real behaviour and deserves a real test: readiness must
+# fail first, while the socket keeps serving, and the exit code must be 0.
+podman kill --signal TERM verify-$PORT
+podman wait verify-$PORT          # expect 0
+podman logs verify-$PORT          # expect the drain sequence
+podman rm verify-$PORT
+```
+
+Use `-d --name` rather than `-d --rm` when you want the logs and the exit code: `--rm` reaps the
+container the instant it stops and takes the evidence with it.
 
 ## Terraform / Ministack Sandbox
 
@@ -156,60 +261,6 @@ If any command fails, **stop and report the exact error to the user**. Do not gu
 ```bash
 podman stop ministack_${MINISTACK_PORT} && podman rm ministack_${MINISTACK_PORT}
 ```
-
----
-
-## Kind Sandbox
-
-**RULE:** Use Kind any time behaviour depends on a real Kubernetes API - controllers, operators, admission, RBAC, probes, watch streams, or anything a manifest does once it is actually admitted.
-Ministack proves Terraform _plans_; Kind proves Kubernetes _behaves_.
-They answer different questions and neither substitutes for the other.
-
-### What belongs here
-
-| Question                                                                   | Sandbox                                             |
-| -------------------------------------------------------------------------- | --------------------------------------------------- |
-| Does this Terraform parse, validate and plan?                              | Ministack                                           |
-| Does this manifest get admitted, and does the controller do what I expect? | Kind                                                |
-| Does a readiness probe actually gate Service endpoints?                    | Kind                                                |
-| Does Argo CD clone from this repo URL?                                     | Kind                                                |
-| Does this chart render?                                                    | Podman + `alpine/helm` (no cluster needed)          |
-| Does the frontend look right?                                              | Podman single-container preview (no cluster needed) |
-
-### Harness
-
-`scripts/kind-sandbox.sh` in this repo wraps the lifecycle.
-It writes a repo-local, git-ignored kubeconfig (`.kubeconfig-kind-sandbox`) and never touches `~/.kube/config`, matching the rule the EKS kubeconfig already follows.
-
-```bash
-make -f Makefile.test kind-up          # create (idempotent)
-export KUBECONFIG="$(bash scripts/kind-sandbox.sh kubeconfig)"
-kubectl get nodes
-make -f Makefile.test kind-down        # delete cluster + kubeconfig
-```
-
-`KIND_SANDBOX_NAME` overrides the cluster name so a test can run its own cluster without stepping on the one you are working in.
-`tests/kind-sandbox.sh` uses this.
-
-Never let `KUBECONFIG` go empty when scripting against this harness.
-An empty value makes `kubectl` silently fall back to the user's `~/.kube/config`, which this repo must never read, and which will block on whatever unreachable endpoint that file happens to hold.
-
-### Why this exists in a repo about EKS
-
-The whole point of this project is a cluster you tear down nightly, so the expensive thing is not compute, it is the minutes between "I changed a manifest" and "I know whether it worked".
-Kind closes that loop in seconds against the same API server version family, for nothing.
-Bring the EKS cluster up to verify the AWS-shaped parts (IRSA, the ALB controller, EBS CSI) and nothing else.
-
-### What Kind cannot tell you
-
-Anything that is really AWS: IRSA token exchange, real IAM, the AWS Load Balancer Controller provisioning an actual ALB, EBS volumes, RDS reachability.
-A green Kind run is necessary before spending money, never sufficient.
-Say so explicitly when reporting results, rather than letting a Kind pass read as a full pass.
-
-### Teardown
-
-Kind clusters survive reboots and each one holds a container plus its images.
-Always `kind-down` when finished, and `kind get clusters` if something feels slow.
 
 ---
 
