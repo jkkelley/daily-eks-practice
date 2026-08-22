@@ -69,11 +69,18 @@ Real git, real push, real Argo sync - only _whose_ repo the remote is is simulat
 | `scripts/config.example.toml`                    | every config value, documented                  | adding a Terraform variable                      |
 | `scripts/bootstrap.py`                           | config -> tfvars -> terraform                   | anything Terraform runs through                  |
 | `scripts/git-seed.py`                            | bootstrap the cluster repo from local           | the env has no code in it                        |
+| `scripts/clustergit.py`                          | the ONE bundle push/pull - a corruption guard   | anything moving a bundle in or out               |
+| `scripts/progress.py`                            | the save files; append-only, atomic             | changing what a session records                  |
+| `scripts/drill-watch.py`                         | syncs progress; acts on QUIT and SHUT IT DOWN   | the destroy exception, or a phase                |
+| `scripts/scenario.py` + `handover.py`            | converge a session; lock the Makefile           | `make scenario` or a locked target               |
 | `scripts/gen-argocd-app.py`                      | generates the Argo Application                  | changing what Argo reads or its sync policy      |
 | `drill/`                                         | the GUI + server + grader (TypeScript)          | anything the user sees or that grades them       |
 | `drill/shared/src/index.ts`                      | the websocket protocol, defined once            | adding a message between web and server          |
 | `drill/Containerfile` + `.containerignore`       | the image; the allow-list keeping secrets out   | changing what ships or widening the context      |
 | `drill/server/src/committed.ts`                  | what cluster git has - the GitOps half of grading | the saved-vs-committed lesson                  |
+| `drill/server/src/session.ts` + `state.ts`       | the live session, and its ConfigMap mirror      | anything that changes mid-drill                  |
+| `drill/server/src/request.ts`                    | the laptop's half: which scenario to converge   | the two-ConfigMap contract                       |
+| `drill/web/src/panels/PauseMenu.tsx`             | restart, switch, quit, tear down                | changing what EXIT offers                        |
 | `drill/server/src/grader/`                       | the grader; pure functions                      | changing how a submission is judged              |
 | `scenarios/`                                     | the curriculum cards                            | adding or editing a drill                        |
 | `scenarios/answers/*.toml`                       | single source of truth for answers              | changing an answer, a hint, or a scenario switch |
@@ -82,6 +89,7 @@ Real git, real push, real Argo sync - only _whose_ repo the remote is is simulat
 | `tests/`                                         | $0 local validation                             | adding a guard                                   |
 | `tests/cluster-git-argo.sh`                      | proves Argo clones cluster git on kind          | changing the git server                          |
 | `tests/drill-gui-kind.sh`                        | proves the drill pod serves the console on kind | changing the image or the deployment             |
+| `tests/drill-resume-kind.sh`                     | AC-H4: destroy the cluster, get the session back | changing bundles, sessions or the watcher       |
 | `Makefile`                                       | lifecycle (up, down, git-seed, scenario)        | driving the env                                  |
 | `Makefile.test`                                  | static checks, ministack, kind, drill           | validating a change                              |
 | `.claude/skills/`                                | vendored: work-order, container-sandbox, hydration-prompt | ticketing, sandboxed testing, handoff  |

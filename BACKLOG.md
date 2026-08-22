@@ -3,6 +3,7 @@
 Ideas and improvements that popped up but aren't blocking.
 Pull one when you want to extend the playground.
 
+- **The scenario-switch round trip is the exit-condition test for whichever epic ports the SECOND scenario.** Phase 6 built the pause menu and the switch machinery, and proved the mechanics: converge, save, destroy the cluster, restore, resume. What it could not prove is the thing the machinery is ultimately for, because only scenario 03 is ported and there is nowhere to switch to. The test is: drill 03, switch to 06, drill 06, switch back to 03, and find 03 exactly where you left it - same tasks passed, same working tree, same commit. It is recorded here, in `WO-20260819-7840`'s notes, in `CONTEXT_STATE.md` and in the plan's self-review, in four places on purpose, because `AC-H3` of Phase 4 nearly lapsed by being written down only once.
 - Scenario idea: EKS version upgrade drill (exists as its own dedicated repo - link it here instead of duplicating).
 - Scenario idea: NetworkPolicy day - lock practice-app down namespace-to-namespace.
 - Scenario idea: Karpenter instead of the managed node group / cluster autoscaler.
@@ -15,7 +16,7 @@ Pull one when you want to extend the playground.
 - Easter eggs for people who actually read the code: undocumented commands, hidden flags, and alternate paths that only turn up if you go looking.
   The first one is an off-menu way to tear the whole drill down from the terminal, mirroring the GUI's exit-and-teardown button.
 - Explorer context menu, the way Cursor and VS Code have one: right-click a file for Copy Path, Copy Relative Path, Reveal, Rename, Delete, and Open in Integrated Terminal.
-  The path copy is the one that earns its keep - you grab a path out of the tree so you can `cd` there and run something against it, and today a right-click in the explorer gets you the *browser's* menu instead of ours, which is worse than having no menu at all.
+  The path copy is the one that earns its keep - you grab a path out of the tree so you can `cd` there and run something against it, and today a right-click in the explorer gets you the _browser's_ menu instead of ours, which is worse than having no menu at all.
   "Open in Integrated Terminal" is the interesting one here, because our terminal is a real tmux shell in the pod: it would `cd` the running session rather than spawning anything.
   Wants `preventDefault` on `contextmenu`, a small positioned menu component, and `navigator.clipboard.writeText` - which needs a secure context, so it works on the ALB over HTTPS and needs a `document.execCommand` fallback on plain http during local preview.
 - Reload an open editor buffer when the file changes underneath it.
