@@ -209,8 +209,22 @@ hp_fold() {
         rest=${rest:$(( ${#head} + 1 ))}  # and drop it from the remainder
       else
         head=$chunk                       # a token longer than the width
-        text+=("$head"); kind+=(0)        # no space: the join must not invent one
         rest=${rest:${#chunk}}
+        if [[ $rest == " "* ]]; then
+          # The cut landed one character before a space. Leaving that space at
+          # the front of the remainder starts the next line with whitespace,
+          # which reads as an indent - and an indent is the one thing this
+          # function exists to avoid. Carry the space to the end of THIS line
+          # instead. Same reassembly, flush-left continuation.
+          #
+          # Deleting the space would also silence the symptom, and would be
+          # wrong: it changes the argument, and the round-trip assertion is the
+          # property that matters more than the shape.
+          text+=("$head"); kind+=(1)
+          rest=${rest# }
+        else
+          text+=("$head"); kind+=(0)      # no space: the join must not invent one
+        fi
       fi
     done
     if (( i < nsegs )); then

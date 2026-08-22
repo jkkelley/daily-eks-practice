@@ -1,10 +1,17 @@
 ---
 name: hydration-prompt
 description: Writes the prompt that starts the next session, and hands back the exact command to launch it. Maintains HYDRATION.md as a 10-entry sliding window, newest on top. Use at close-out, after CONTEXT_STATE.md is written and before the pull request is opened, or whenever the user asks for a hydration prompt, a handoff, or how to start the next ticket.
-version: 2.0.1
+version: 2.0.2
 ---
 
 # Hydration prompt
+
+> **This copy is read-only.**
+> Skills are vendored into a project as copies, and this may be one.
+> Edit this skill upstream, bump its version, then re-pull it - never edit the copy where it landed.
+> Upstream is `~/dotfiles/claude/skills/hydration-prompt/`, or https://github.com/jkkelley/dotfiles/tree/main/claude/skills/hydration-prompt if that checkout is not on this machine.
+> `skill-update.sh` replaces the skill's directory rather than merging into it, so a local edit is destroyed by the next update with no conflict and no warning.
+> The registry's content hash cannot catch it either, because a project's copy legitimately differs from upstream.
 
 The last thing a session produces is the first thing the next one reads.
 

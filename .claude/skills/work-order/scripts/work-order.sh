@@ -868,12 +868,11 @@ DRY RUN - nothing will be executed
 
   phase 1   git fetch --prune; checkout main; merge --ff-only origin/main
             git branch -D ${branch:-<none>}; git push origin --delete ${branch:-<none>}
-  phase 2   branch close-out/$id from main, reusing one an earlier attempt left
-            backfill merge_sha + closed; archive to ${archive_dir#"$project"/}/
-            commit; push --force-with-lease
-  phase 2b  gh pr create --base main, or reuse the open one; gh pr merge --squash
-            no prompt: PR #$pr_num is already MERGED, so this is bookkeeping
-  phase 3   repeat phase 1 for close-out/$id
+  phase 2   on main: backfill merge_sha + closed; archive to ${archive_dir#"$project"/}/
+            regenerate INDEX.md; commit; push origin main
+            ONE pull request per ticket - this is bookkeeping after #$pr_num merged
+  fallback  only if that push is rejected (protected main, or origin moved):
+            peel onto close-out/$id, reset main, PR it, merge, clean up
 
   assertions passed: status=done, not archived, PR MERGED, merge commit present
 EOF
@@ -919,22 +918,18 @@ EOF
     git -C "$project" push origin --delete "$branch" >/dev/null 2>&1 || true
   fi
 
-  # phase 2
+  # phase 2 - the bookkeeping, committed straight to main.
   #
-  # Every step from here is written to be repeatable, because the first version
-  # of this phase was not: an attempt that died after the branch was cut left it
-  # behind, the next run refused to create a branch that already existed, and the
-  # ticket became permanently unclosable by the tool. A close-out that can only
-  # be finished by hand is the failure this command exists to remove, so a second
-  # run has to reach the same end state as a clean first one.
-  local cob="close-out/$id"
-  # -B, not -b: reuse and reset the branch an earlier attempt abandoned. Reset
-  # rather than continue, so the retry rebuilds from main instead of stacking on
-  # top of a half-finished attempt.
-  git -C "$project" checkout -B "$cob" >/dev/null 2>&1 \
-    || ps_die "$PS_IO" "checkout_failed" \
-      "cannot create or reset $cob from main - it is most likely checked out in another worktree. Run 'git -C $project worktree list', free the branch there, and run close again."
-
+  # This used to cut a close-out/<id> branch, open a PR for it and merge that
+  # PR. It produced a second pull request for every ticket whose entire content
+  # was a file move and a regenerated index, which doubles the review surface
+  # for one piece of work and buys nothing: close cannot run at all until the
+  # ticket's own PR is MERGED and main's copy says done, both asserted above.
+  # So the record follows the work directly onto main.
+  #
+  # The branch-and-PR route survives as a fallback for a repository that
+  # protects main. It is a fallback, not a mode: nothing chooses it, a rejected
+  # push does.
   mkdir -p "$archive_dir"
   # Assigning the same SHA and date twice is a no-op, so this needs no guard.
   # Moving a file onto itself is not, so the move does: a previous attempt may
@@ -953,61 +948,60 @@ EOF
   archive_readmes
   git -C "$project" add -A "$root" >/dev/null 2>&1
 
-  # phase 2b - the close-out PR, opened and merged without asking anybody.
-  #
-  # That is a decision, not an oversight. close has already established with
-  # `gh pr view` that this ticket's own PR is MERGED, so everything on this
-  # branch is bookkeeping that follows a merge a human already approved: a file
-  # moved into archive/, a merge SHA backfilled, a regenerated index. It never
-  # merges the work, only the record of it, and it cannot run at all until the
-  # work is in main.
   if git -C "$project" diff --cached --quiet; then
     # Nothing staged means main already carries this exact archive - an earlier
-    # attempt got the close-out merged and died afterwards. There is no commit to
-    # make and no PR to open, so the run drops through to the cleanup that is all
-    # that was ever left.
-    ps_warn "$id is already archived on main - nothing left to commit, finishing the cleanup"
+    # attempt landed it and died afterwards. Nothing to commit, nothing to push.
+    ps_warn "$id is already archived on main - nothing left to commit"
   else
     git -C "$project" commit -m "chore($id): close out and archive" >/dev/null 2>&1 \
       || ps_die "$PS_IO" "commit_failed" "nothing to commit for $id"
-    # --force-with-lease, because a previous attempt may have pushed a branch the
-    # -B above has just reset. The lease is against the ref fetched in phase 1, so
-    # it still refuses to overwrite anything that arrived after that fetch.
-    git -C "$project" push -u --force-with-lease origin "$cob" >/dev/null 2>&1 \
-      || ps_die "$PS_IO" "push_failed" \
-        "cannot push $cob - origin moved since the fetch in phase 1. Run close again."
 
-    # An earlier attempt may have opened the PR and then failed to merge it, and
-    # gh refuses a second PR for the same branch. Asking first turns that into a
-    # reuse rather than a dead end.
-    local co_pr
-    co_pr=$(gh_in_project pr list --head "$cob" --state open --json number \
-      -q '.[0].number // ""' 2>/dev/null) || co_pr=""
-    if [[ -n $co_pr ]]; then
-      ps_info "reusing close-out PR #$co_pr, left open by an earlier attempt"
+    if git -C "$project" push origin main >/dev/null 2>&1; then
+      : # done - one pull request for this ticket, which is the whole point
     else
-      gh_in_project pr create --base main --head "$cob" \
-        --title "chore($id): close out and archive" \
-        --body "Archives $id after PR #$pr_num merged as $sha. Generated by work-order.sh close." \
-        >/dev/null 2>&1 \
-        || ps_die "$PS_IO" "pr_create_failed" \
-          "could not open the close-out PR for $cob. Nothing is lost: the branch is pushed and close is safe to re-run once gh works - it reuses the branch and any PR already open on it."
-    fi
-    gh_in_project pr merge "$cob" --squash --delete-branch >/dev/null 2>&1 \
-      || ps_die "$PS_IO" "pr_merge_failed" \
-        "the close-out PR for $cob is open but would not merge. Clear whatever is blocking it - a failing check, a required review - and run close again; it will pick this PR back up rather than starting over."
-  fi
+      # Either main is protected or origin moved under us. Peel the commit onto
+      # a branch, put main back where it was, and go round through a PR.
+      ps_warn "cannot push to main directly - falling back to a close-out PR"
+      local cob="close-out/$id"
+      # -B, not -b: reuse and reset a branch an earlier attempt abandoned.
+      git -C "$project" branch -f "$cob" HEAD >/dev/null 2>&1 \
+        || ps_die "$PS_IO" "branch_failed" "cannot create $cob"
+      git -C "$project" reset --hard origin/main >/dev/null 2>&1 \
+        || ps_die "$PS_IO" "reset_failed" "cannot restore main after a rejected push"
+      git -C "$project" checkout "$cob" >/dev/null 2>&1 \
+        || ps_die "$PS_IO" "checkout_failed" "cannot check out $cob"
+      git -C "$project" push -u --force-with-lease origin "$cob" >/dev/null 2>&1 \
+        || ps_die "$PS_IO" "push_failed" \
+          "cannot push $cob - origin moved since the fetch in phase 1. Run close again."
 
-  # phase 3 - the same cleanup phase 1 did, for the close-out branch this time.
-  git -C "$project" fetch origin --prune >/dev/null 2>&1 || true
-  git -C "$project" checkout main >/dev/null 2>&1 \
-    || ps_die "$PS_IO" "checkout_failed" "cannot check out main after merging $cob"
-  git -C "$project" merge --ff-only origin/main >/dev/null 2>&1 \
-    || ps_die "$PS_VALIDATION" "main_diverged" \
-      "$cob merged, but main cannot fast-forward to origin/main - reconcile main by hand"
-  # gh --delete-branch usually takes the local copy with it; this is for when it
-  # could not, because the branch was checked out at the time.
-  git -C "$project" branch -D "$cob" >/dev/null 2>&1 || true
+      # An earlier attempt may have opened the PR and then failed to merge it,
+      # and gh refuses a second PR for the same branch. Ask first.
+      local co_pr
+      co_pr=$(gh_in_project pr list --head "$cob" --state open --json number \
+        -q '.[0].number // ""' 2>/dev/null) || co_pr=""
+      if [[ -n $co_pr ]]; then
+        ps_info "reusing close-out PR #$co_pr, left open by an earlier attempt"
+      else
+        gh_in_project pr create --base main --head "$cob" \
+          --title "chore($id): close out and archive" \
+          --body "Archives $id after PR #$pr_num merged as $sha. Generated by work-order.sh close, because a direct push to main was rejected." \
+          >/dev/null 2>&1 \
+          || ps_die "$PS_IO" "pr_create_failed" \
+            "could not open the close-out PR for $cob. Nothing is lost: the branch is pushed and close is safe to re-run."
+      fi
+      gh_in_project pr merge "$cob" --squash --delete-branch >/dev/null 2>&1 \
+        || ps_die "$PS_IO" "pr_merge_failed" \
+          "the close-out PR for $cob is open but would not merge. Clear whatever is blocking it and run close again."
+
+      git -C "$project" fetch origin --prune >/dev/null 2>&1 || true
+      git -C "$project" checkout main >/dev/null 2>&1 \
+        || ps_die "$PS_IO" "checkout_failed" "cannot check out main after merging $cob"
+      git -C "$project" merge --ff-only origin/main >/dev/null 2>&1 \
+        || ps_die "$PS_VALIDATION" "main_diverged" \
+          "$cob merged, but main cannot fast-forward - reconcile main by hand"
+      git -C "$project" branch -D "$cob" >/dev/null 2>&1 || true
+    fi
+  fi
 
   emit_ok "$id" done "$dest"
 }

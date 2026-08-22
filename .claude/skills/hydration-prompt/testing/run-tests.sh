@@ -141,16 +141,68 @@ COUNT_AFTER=$(bash "$HP" count --project "$P")
 
 # ---------------------------------------------------------------- the command
 hd "the launch command"
-CMD=$(bash "$HP" command --project "$P" --id WO-20260818-7a0b --title "CI/CD + GitOps")
-EXPECT="claude -p \"Read Hydration Prompt located at $(cd "$P" && pwd)/HYDRATION.md, Process work order WO-20260818-7a0b per its acceptance criteria after you've read it.\" \\
-  --permission-mode bypassPermissions \\
-  -n \"Session: WO-20260818-7a0b - CI/CD + GitOps\""
+CMD=$(bash "$HP" command --project "$P" --id WO-20260818-7a0b --title "CI/CD + GitOps" --oneline)
+EXPECT="claude --permission-mode bypassPermissions -n \"Session: WO-20260818-7a0b - CI/CD + GitOps\" \"Read Hydration Prompt located at $(cd "$P" && pwd)/HYDRATION.md, Process work order WO-20260818-7a0b per its acceptance criteria after you've read it.\""
 [ "$CMD" = "$EXPECT" ] && ok "matches the template byte for byte" || {
   bad "command did not match the template"
   printf '    got:      %s\n    expected: %s\n' "$CMD" "$EXPECT"
 }
-printf '%s' "$CMD" | grep -q "^claude -p \"Read Hydration Prompt located at /" \
+
+# THE REGRESSION THIS FILE EXISTS TO PREVENT.
+# The prompt used to be passed as -p, which is --print: "print response and
+# exit". The command ran the hydration prompt headless and quit, so the user
+# never landed in a session - the one thing this skill exists to arrange. It
+# looked right in every transcript, because the output was a plausible reply.
+# The prompt is a positional argument now. -p must never come back.
+printf '%s' "$CMD" | grep -qE '(^| )-p( |$)|--print' \
+  && bad "-p/--print is back: the session would run headless and exit" \
+  || ok "no -p/--print: the session is interactive"
+printf '%s' "$CMD" | grep -q 'Read Hydration Prompt located at' \
+  && ok "the prompt still ships with the command" \
+  || bad "the prompt was lost when -p was dropped"
+printf '%s' "$CMD" | grep -q 'you.ve read it\."$' \
+  && ok "the positional prompt is the last argument" \
+  || bad "the prompt is not last - a flag would have to step over it"
+
+# WHY IT IS FOLDED BY US RATHER THAN BY WHATEVER RENDERS IT.
+# A one-line command is not safe: every surface it travels through soft-wraps at
+# its own width, and a copy out of that surface can carry the break with it,
+# landing in the middle of a quoted string. The first fragment is then usually a
+# syntactically VALID command that does the wrong thing, so the shell runs it.
+# Folding it ourselves at a narrow width, with a real backslash at each break,
+# means the line the user sees is the line we wrote.
+FOLDED=$(bash "$HP" command --project "$P" --id WO-20260818-7a0b --title "CI/CD + GitOps")
+[ "$(printf '%s\n' "$FOLDED" | wc -l)" -ge 3 ] \
+  && ok "one line per argument: 3 arguments, at least 3 lines" \
+  || bad "arguments are sharing lines"
+printf '%s\n' "$FOLDED" | grep -q '" -' \
+  && bad "an argument ends and another begins on the same line" \
+  || ok "no argument ends and another begins on the same line"
+[ "$(printf '%s\n' "$FOLDED" | awk 'length($0) > 68 {c++} END{print c+0}')" = "0" ] \
+  && ok "no line exceeds the 68-column default" || bad "a line is wider than 68"
+[ "$(printf '%s\n' "$FOLDED" | awk 'NR>1 && /^[[:space:]]/ {c++} END{print c+0}')" = "0" ] \
+  && ok "continuations are flush left" || bad "a continuation line is indented"
+[ "$(printf '%s\n' "$FOLDED" | sed '$d' | grep -vc '\\$')" = "0" ] \
+  && ok "every folded line but the last ends in a backslash" \
+  || bad "a folded line is missing its continuation backslash"
+printf '%s\n' "$FOLDED" | tail -n1 | grep -q '\\$' \
+  && bad "the last line ends in a stray backslash" || ok "the last line has no backslash"
+
+# --oneline is the unfolded form, for scripting
+[ "$CMD" = "$(bash "$HP" command --project "$P" --id WO-20260818-7a0b --title "CI/CD + GitOps" --oneline)" ] \
+  && ok "--oneline gives the unfolded command" || bad "--oneline shape wrong"
+
+# --width is honoured
+NARROW=$(bash "$HP" command --project "$P" --width 40 --id W --title T)
+[ "$(printf '%s\n' "$NARROW" | awk 'length($0) > 40 {c++} END{print c+0}')" = "0" ] \
+  && ok "--width 40 is respected" || bad "--width 40 was exceeded"
+bash "$HP" command --project "$P" --width abc >/dev/null 2>&1
+[ $? -eq 2 ] && ok "a non-numeric --width exits 2 (usage)" || bad "bad --width was accepted"
+printf '%s' "$CMD" | grep -q '"Read Hydration Prompt located at /' \
   && ok "path is absolute" || bad "path is not absolute"
+printf '%s' "$CMD" | grep -q "^claude --permission-mode bypassPermissions " \
+  && ok "claude and the first flag share the opening line" \
+  || bad "the command does not open as expected"
 
 bash "$HP" command --project "$WORK/nope" --id X --title Y >/dev/null 2>&1
 [ $? -eq 4 ] && ok "refuses to emit a command for a missing file" || bad "emitted a command for a missing file"
@@ -169,13 +221,19 @@ T=$(bash "$HP" latest --project "$Q" --title-only)
 [ "$T" = "Spike: can Lightsail hold an IAM role" ] \
   && ok "the title survives intact" || bad "title was '$T'"
 
-ACMD=$(bash "$HP" command --project "$Q")
-AEXPECT="claude -p \"Read Hydration Prompt located at $(cd "$Q" && pwd)/HYDRATION.md\" \\
-  -n \"Session: \""
+ACMD=$(bash "$HP" command --project "$Q" --oneline)
+AEXPECT="claude -n \"Session: \""
 [ "$ACMD" = "$AEXPECT" ] && ok "emits the no-work-order command shape" || {
   bad "no-work-order command did not match"
   printf '    got:      %s\n    expected: %s\n' "$ACMD" "$AEXPECT"
 }
+# A ticketless session carries NO prompt - not a shortened one, not the bare
+# located-at clause. Work outside a ticket has no instruction until the person
+# starting it writes one, and a guessed prompt aims a session at the wrong
+# thing with full confidence.
+printf '%s' "$ACMD" | grep -q "Read Hydration Prompt" \
+  && bad "a prompt leaked into a ticketless command" \
+  || ok "no prompt at all when there is no ticket"
 printf '%s' "$ACMD" | grep -q "Process work order" \
   && bad "the acceptance-criteria clause leaked into a ticketless command" \
   || ok "no acceptance-criteria clause when there is no ticket"
@@ -184,7 +242,7 @@ printf '%s' "$ACMD" | grep -q "permission-mode" \
   || ok "no bypassPermissions when there is no ticket"
 # The empty slot is the feature, not an oversight: the person pasting decides
 # what this session is called, because ad-hoc work has no name until then.
-[ "$(printf '%s' "$ACMD" | tail -n1)" = '  -n "Session: "' ] \
+[ "$(printf '%s' "$ACMD" | grep -c '\-n "Session: "$')" = "1" ] \
   && ok "the session name is left empty to be typed at paste time" \
   || bad "the session name slot was filled in"
 printf '%s' "$ACMD" | grep -q "Spike: can Lightsail" \
@@ -201,14 +259,19 @@ DT=$(bash "$HP" latest --project "$Q" --title-only)
   && ok "and its id still parses" || bad "id lost on a dashed title"
 
 # derived form must agree with the explicit form
-D1=$(bash "$HP" command --project "$Q")
-D2=$(bash "$HP" command --project "$Q" --id WO-DASH-1 --title "Infra: Route53 - DNS-01 - passthrough")
+D1=$(bash "$HP" command --project "$Q" --oneline)
+D2=$(bash "$HP" command --project "$Q" --id WO-DASH-1 --title "Infra: Route53 - DNS-01 - passthrough" --oneline)
 [ "$D1" = "$D2" ] && ok "derived command matches the explicit one" || bad "derived and explicit commands differ"
 
 # ---------------------------------------------------------------- whole file
 hd "check on the file itself"
 bash "$HP" check --project "$P" >/dev/null 2>&1 \
   && ok "the maintained file passes its own check" || bad "the maintained file fails check"
+
+hd "Round-trip through a real shell"
+bash "$HERE/wrap-roundtrip.sh" >/dev/null 2>&1 \
+  && ok "folded and unfolded forms deliver identical argv at every width" \
+  || { bad "wrap-roundtrip failed - run testing/wrap-roundtrip.sh to see it"; }
 
 hd "Result"
 printf '  %s passed, %s failed\n' "$PASS" "$FAIL"
