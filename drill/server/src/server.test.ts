@@ -28,6 +28,7 @@ before(async () => {
     scenario: "03",
     argoNamespace: "argocd",
     argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
   });
 });
 
@@ -146,6 +147,7 @@ test("session state starts at the first task with nothing passed", async () => {
     scenario: "03",
     argoNamespace: "argocd",
     argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
   });
   const state = (
     await fresh.inject({ method: "GET", url: "/api/session" })
@@ -189,6 +191,7 @@ test("only-imperative fires on the first kubectl rollback and stops once the git
     scenario: "03",
     argoNamespace: "argocd",
     argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
   });
   const submit = (answer: string) =>
     s
@@ -237,6 +240,7 @@ test("a file task grades the workspace on disk, not what was typed", async () =>
     scenario: "03",
     argoNamespace: "argocd",
     argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
   });
   const verdict = (
     await s.inject({
@@ -278,6 +282,7 @@ test("a right-but-uncommitted file is graded against cluster git, not the worksp
     scenario: "03",
     argoNamespace: "argocd",
     argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
     // Cluster git is still on the old tag, which is what Argo CD would sync.
     readCommitted: async () => "frontend:\n  image:\n    tag: 1.27-alpine\n",
   });
@@ -310,6 +315,7 @@ test("no reader means commit state is not graded at all, never graded as false",
     scenario: "03",
     argoNamespace: "argocd",
     argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
     readCommitted: async () => undefined,
   });
   const verdict = (
@@ -411,4 +417,139 @@ test("the answers directory is not reachable through the static route", async ()
   // assertions cannot pass merely because the path was wrong.
   const real = await readFile(join(ANSWERS_DIR, "03.toml"), "utf8");
   assert.match(real, /accept_pattern/);
+});
+
+// ---------------------------------------------------------------------------
+// The pause menu's lifecycle routes.
+//
+// These are the only routes in this server that mutate. That is not a new
+// exposure - the terminal beside them is a cluster-admin shell - but it IS a
+// change in the shape of the API, and one of them can end in `terraform
+// destroy`, so the assertions here are about the boundary rather than the happy
+// path.
+// ---------------------------------------------------------------------------
+
+test("the menu lists the whole curriculum, marking what is ported and where you are", async () => {
+  const res = await app.inject({ method: "GET", url: "/api/scenarios" });
+  assert.equal(res.statusCode, 200);
+  const rows = res.json() as {
+    id: string;
+    title: string;
+    ported: boolean;
+    current: boolean;
+  }[];
+
+  assert.ok(rows.length >= 12, "all twelve, not just the ported one");
+  assert.equal(rows.filter((r) => r.current).length, 1, "exactly one is current");
+  assert.ok(rows.find((r) => r.id === "03")?.current);
+  assert.ok(rows.find((r) => r.id === "07") && !rows.find((r) => r.id === "07")!.ported);
+});
+
+test("the menu never carries anything from inside an answers file", async () => {
+  // Same rule as /api/tasks, and it needs its own guard because this route reads
+  // a file that lives in the same directory as the answer key.
+  const body = (await app.inject({ method: "GET", url: "/api/scenarios" })).body;
+  for (const leak of ["accept", "answer", "hint", "expect", "verb"]) {
+    assert.ok(!body.includes(`"${leak}"`), `/api/scenarios leaked ${leak}`);
+  }
+});
+
+test("restart starts a new session on the same scenario", async () => {
+  const before = (await app.inject({ method: "GET", url: "/api/session" })).json() as {
+    sessionId: string;
+  };
+
+  const res = await app.inject({ method: "POST", url: "/api/session/restart" });
+  assert.equal(res.statusCode, 200);
+
+  const after = (await app.inject({ method: "GET", url: "/api/session" })).json() as {
+    scenario: string;
+    sessionId: string;
+    passed: string[];
+    phase: string;
+  };
+  assert.equal(after.scenario, "03", "same scenario");
+  assert.notEqual(after.sessionId, before.sessionId, "different session");
+  assert.deepEqual(after.passed, [], "and a clean slate");
+  assert.equal(after.phase, "active");
+});
+
+test("a session id is a legal directory name on Windows", async () => {
+  // The laptop turns this straight into a directory under drill-progress/, and
+  // Windows 11 is a supported target there. A colon here creates a save
+  // directory that cannot be created on half this project's audience's machines.
+  const { sessionId } = (
+    await app.inject({ method: "POST", url: "/api/session/restart" })
+  ).json() as { sessionId: string };
+
+  assert.ok(!/[<>:"/\\|?*]/.test(sessionId), `illegal character in ${sessionId}`);
+  assert.match(sessionId, /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$/);
+});
+
+test("switching to a scenario that is not ported is refused, by name", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/session/switch",
+    payload: { target: "07" },
+  });
+  assert.equal(res.statusCode, 409);
+  const { error } = res.json() as { error: string };
+  assert.match(error, /07/, "the refusal names the scenario");
+  assert.match(error, /Observability/, "...and its title, so it is actionable");
+  assert.match(error, /not ported/);
+});
+
+test("switching to a scenario that does not exist is a 400, not a hang", async () => {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/session/switch",
+    payload: { target: "99" },
+  });
+  assert.equal(res.statusCode, 400);
+});
+
+test("quitting ends the session without pretending to have torn anything down", async () => {
+  const res = await app.inject({ method: "POST", url: "/api/session/quit" });
+  assert.equal(res.statusCode, 200);
+
+  const state = (await app.inject({ method: "GET", url: "/api/session" })).json() as {
+    phase: string;
+    endedAt?: string;
+  };
+  assert.equal(state.phase, "ended");
+  assert.ok(state.endedAt, "stamped when");
+});
+
+test("tearing down demands the exact word, and the SERVER is what checks it", async () => {
+  // The browser asks for it too, and that is the friendly copy. This route is
+  // the boundary, and it is the one route in this repo that can end in
+  // `terraform destroy` - see CLAUDE.md hard rule 1 and the exception in it.
+  for (const payload of [{}, { confirm: "" }, { confirm: "destroy" }, { confirm: "DESTROY " }, { confirm: "yes" }]) {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/session/destroy",
+      payload,
+    });
+    assert.equal(
+      res.statusCode,
+      400,
+      `confirm=${JSON.stringify(payload)} must not arm a teardown`,
+    );
+  }
+
+  const ok = await app.inject({
+    method: "POST",
+    url: "/api/session/destroy",
+    payload: { confirm: "DESTROY" },
+  });
+  assert.equal(ok.statusCode, 200);
+
+  const state = (await app.inject({ method: "GET", url: "/api/session" })).json() as {
+    phase: string;
+  };
+  assert.equal(
+    state.phase,
+    "destroy-requested",
+    "the pod records an INTENT - it never destroys anything itself",
+  );
 });

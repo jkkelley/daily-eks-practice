@@ -5501,6 +5501,94 @@ If the classic-PAT escape hatch was used, say so in the commit message along wit
 
 Progress that survives a teardown, a watcher that keeps it current, and the Makefile handover.
 
+**Expanded from interface level on 2026-08-21**, when `WO-20260819-7840` was started, exactly as this plan's self-review said it would be.
+What the expansion changed is recorded at the end of the phase under "What the expansion changed".
+The interface-level text below each task's heading is preserved; the steps are new.
+
+### The one design decision the expansion had to make first
+
+The interface-level plan had a single `POST /api/teardown` behind one `EXIT` button.
+That was wrong, and it was wrong in a way only visible once the GUI existed: **`EXIT` is not one action.**
+
+A learner who is done with scenario 03 wants one of several different things, and the button cannot tell which:
+they want to restart it because they made a mess, or move to 06 because 03 clicked, or go back to 02 because it did not, or stop for the day, or stop for the day _and_ stop the bill.
+Collapsing those into one destructive verb makes the common cases - restart, next - reachable only by tearing the whole environment down and building it again, which costs six minutes and the control plane charge for all of it.
+
+**So `EXIT` opens a pause menu.** Every entry except the last two is a scenario transition, and a transition is the converge path Task 6.3 already builds, pointed at a different `N`.
+That is the whole reason this is affordable: switching scenarios is not a new subsystem, it is `scenario.py` with a different argument and a loading screen in front of it.
+
+```text
+  ┌─ PAUSED ──────────── scenario 03 ─┐
+  │  4/6 tasks passed                 │
+  │                                   │
+  │  ▸ RESUME                         │
+  │  ▸ RESTART       fresh session    │
+  │  ▸ NEXT          04 · not ported  │  (dim)
+  │  ▸ PREVIOUS      02 · not ported  │  (dim)
+  │  ▸ SELECT...                      │
+  │  ▸ QUIT          end the run      │
+  │  ▸ SHUT IT DOWN  destroy it all   │
+  └───────────────────────────────────┘
+   SELECT ->  01 ░ 02 ░ [03] 04 ░ 05 ░ 06 ░
+              07 ░ 08 ░ 09 ░ 10 ░ 11 ░ 12 ░
+              ░ = not ported yet
+```
+
+**All twelve scenarios are on the menu, and the eleven unported ones render disabled with the reason.**
+Approved by the user at the Phase 6 kickoff.
+The alternative - list only what works - was rejected because it hides the shape of the curriculum and changes the menu's geometry under the learner every time a scenario is ported.
+This is the same call Phase 5 made when it shipped the `EXIT` button disabled and honest rather than absent.
+
+**`SHUT IT DOWN` is a sanctioned exception to `CLAUDE.md` hard rule 1**, granted explicitly by the user at the Phase 6 kickoff, and hard rule 1 is amended in the same commit to say so.
+An unwritten exception does not narrow a rule, it voids it - the next reader finds code that destroys AWS resources and a rule saying that never happens, and concludes the rule is decorative.
+The exception is narrow and every clause of it is load-bearing:
+
+- The browser requires the literal string `DESTROY` to be typed, and **the server re-checks it** rather than trusting the UI. A confirmation enforced only in the client is a suggestion.
+- The pod does not destroy anything. It writes an intent into a ConfigMap. The destroy is executed by `scripts/drill-watch.py`, **a process the user started themselves, on their own laptop, in their own checkout**, against the Terraform state that lives there.
+- The watcher prints a ten-second countdown that `ctrl-c` aborts, so the last gate is in the terminal the user is sitting at.
+- It runs `make down`, which runs `scripts/pre-destroy.py` first. Ingresses, `LoadBalancer` Services and PVCs go before the cluster, and it exits 1 rather than destroying into a mess. The safe teardown path is not bypassed; it is the one being invoked.
+
+**`QUIT` is not that.** It ends the run, syncs progress, deletes what the _scenario_ created, and leaves the drill pod, its PVC and the ALB up so the browser lands on a game-over screen with the menu still reachable.
+Nothing the GUI does may strand the user outside the browser, because the browser is the only interface - that is the north star, and a `QUIT` that killed the pod would be a change to the loop rather than a feature in it.
+
+### The state machine, and who owns which ConfigMap
+
+Two ConfigMaps in `practice-drill`, and **each has exactly one writer**.
+This is the whole contract, and it exists because a single object with two authors races on `resourceVersion` and loses a write at the moment progress matters most.
+
+| Object          | Written by                                       | Read by          | Carries                                                   |
+| --------------- | ------------------------------------------------ | ---------------- | --------------------------------------------------------- |
+| `drill-state`   | the drill server, only                           | `drill-watch.py` | the live `SessionState`, including its `phase`            |
+| `drill-request` | `scripts/scenario.py` and `drill-watch.py`, only | the drill server | which scenario to converge, and which saved session it is |
+
+`SessionState` gains a `phase`, and the phase is what the two sides communicate through:
+
+```text
+   active ──────────────► switching ──────────► active
+     │                    (target: "06")        (scenario 06)
+     │
+     ├──► ended               QUIT
+     └──► destroy-requested   SHUT IT DOWN
+```
+
+The server polls `drill-request` every two seconds rather than watching it.
+The laptop watcher watches `drill-state` with `kubectl --watch` rather than polling it.
+**That asymmetry is deliberate and is not an inconsistency.**
+The watcher is on the far side of a network from the API server, where a watch is genuinely better and is also the primitive every controller is built from - keeping the tool that teaches Kubernetes built out of Kubernetes is worth something on its own.
+The server is _inside_ the cluster, microseconds from the API, where a poll of one small object costs nothing and a watch adds reconnects, bookmarks and `410 Gone` handling.
+A watch that silently stops delivering is exactly the failure that makes a scenario switch hang forever with nothing in any log, and this project has already been bitten twice by silent-drop bugs of that family - the dropped websocket resize and the un-subscribed tmux burst.
+
+### What cannot be tested in this phase, stated up front
+
+**Only scenario 03 is ported.** The switch machinery can be proven - against a test fixture scenario, with a real converge, a real bundle round trip and a real session swap - but the thing it is ultimately for cannot be:
+
+> drill 03, switch to 06, drill 06, switch back to 03, and find 03 exactly where you left it.
+
+That round trip is **the exit-condition test for whichever epic ports the second scenario**, and it is recorded as such in `BACKLOG.md`, in this ticket's notes, and as a row in `CONTEXT_STATE.md`.
+It is not a gap being hidden. It is a test whose fixture does not exist yet, said out loud in four places so it cannot lapse the way `AC-H3` nearly did in Phase 4.
+
+---
+
 ### Task 6.1: drill-progress on the laptop
 
 **Files:**
@@ -5518,10 +5606,14 @@ Progress that survives a teardown, a watcher that keeps it current, and the Make
     ```
     drill-progress/
       curriculum.json                    # running totals across all scenarios
+      baseline.bundle                    # cluster git as git-seed left it
+      current.json                       # which scenario is live, if any
+      .watcher.pid
+      .gui-owns-the-wheel
       03/
         index.json                       # results table + current-session pointer
         sessions/
-          2026-08-19T14-03-11/
+          2026-08-19T14-03-11Z/
             state.json
             workspace.bundle
     ```
@@ -5530,6 +5622,9 @@ Progress that survives a teardown, a watcher that keeps it current, and the Make
   - Every write is atomic: temp file then rename. Losing one task is annoying; a half-written save file is losing everything.
 
 - [ ] **Step 1: Add the git-ignore entry before anything can create the directory**
+
+This is `AC-H1` and it is Step 1 for a reason.
+The directory holds a `git bundle` of the learner's working tree; if it can exist before `.gitignore` mentions it, it is one `git add -A` from being committed, and the first person to do that publishes their own practice history to a public repo.
 
 ```
 # ---- your personal drill history (never commit; nobody wants to fork it) ----
@@ -5540,9 +5635,19 @@ drill-progress/
 
 `tests/test_progress.py` asserts: timestamps contain no `:` and no character illegal on Windows; a second session for the same scenario creates a new directory rather than replacing the first; `index.json` accumulates a results row per session and never loses one; `write_atomic` leaves the previous file intact when the write raises partway; `current_session` returns the newest.
 
+Three of those need saying more precisely than the interface sketch did, because each is a real trap:
+
+1. **The illegal-character set is `<>:"/\|?*`, plus the ASCII control range, plus a trailing dot or space.** A timestamp only trips the colon, but the assertion is written against the whole set so that a later change to the id format - adding the scenario, adding a counter - cannot introduce a name that works on Linux and makes the directory uncreatable on Windows. The failure mode there is `make scenario` dying inside `mkdir` on somebody else's machine, which is not a thing to discover in a bug report.
+2. **"A second session creates a new directory" is really a same-second collision test.** Drive it with a fixed clock, because that is the only way to make the collision deterministic - and the collision is genuine: restart a drill twice inside one second and both sessions want `2026-08-19T14-03-11Z`. `new_session` disambiguates with a `-2`, `-3` suffix, and the test pins that the first directory still holds its original contents afterwards.
+3. **`write_atomic` is tested by making the write fail partway**, with a data object whose serialisation raises after some bytes are already out. Assert the original file is byte-identical and no `.tmp` is left behind. Testing it by writing successfully proves nothing - every implementation passes that, including the one that truncates first.
+
 - [ ] **Step 3: Implement, run the test, and document it in the README**
 
-The README section must say what `drill-progress/` is and why it is ignored: it is your practice record, it is personal, and nobody forking this project wants to inherit someone else's attempt log. It survives because it is on your laptop, not because it is committed.
+`write_atomic` writes a sibling temp file in the **same directory** and `os.replace`s it.
+Not `tempfile.mkstemp` in the system temp dir: `os.replace` is only atomic within a filesystem, and on Linux `/tmp` is frequently a different one, which turns the atomic rename back into a copy that can be interrupted.
+
+The README section must say what `drill-progress/` is and why it is ignored: it is your practice record, it is personal, and nobody forking this project wants to inherit someone else's attempt log.
+It survives because it is on your laptop, not because it is committed.
 
 - [ ] **Step 4: Commit**
 
@@ -5557,9 +5662,10 @@ git commit -m "feat: append-only drill-progress on the laptop"
 
 **Files:**
 
-- Create: `scripts/drill-watch.py`
-- Modify: `drill/server/src/server.ts` (mirror `SessionState` into the ConfigMap)
-- Test: `tests/test_drill_watch.py`, plus a kind run
+- Create: `scripts/clustergit.py`, `scripts/drill-watch.py`
+- Create: `drill/server/src/state.ts`
+- Modify: `drill/shared/src/index.ts` (`SessionState.phase`), `drill/server/src/server.ts`, `drill/server/src/integrations/k8s.ts`, `scripts/git-seed.py`
+- Test: `tests/test_drill_watch.py`, `drill/server/src/state.test.ts`, plus a kind run
 
 **Interfaces:**
 
@@ -5567,30 +5673,136 @@ git commit -m "feat: append-only drill-progress on the laptop"
 - Produces:
   - ConfigMap `drill-state` in `practice-drill`, written by the server on every state change. It survives pod restarts, which is the failure that matters, and dies with the cluster, which is correct because the drill dies with the cluster anyway.
   - `scripts/drill-watch.py` - watches with `kubectl get cm drill-state -n practice-drill --watch`, not polling. The API server pushes changes, so there is no interval to tune and no lag on a task pass, and it is the primitive every controller is built on, which keeps the tool that teaches Kubernetes built out of Kubernetes.
-  - On every change it writes `state.json` and re-bundles:
-    ```bash
-    kubectl exec -n git deploy/git-server -- git -C /srv/repo.git bundle create - --all \
-      > drill-progress/03/sessions/<id>/workspace.bundle
-    ```
-    streamed in one shot, so no port-forward is held open for the length of a drill.
   - PID file at `drill-progress/.watcher.pid`. Re-running is a no-op if the PID is live; a dead watcher is restarted by converge exactly like a dead pod; it syncs immediately on start to catch up on anything missed while it was down.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Factor the cluster-git plumbing out of `git-seed.py` before anything else needs it**
+
+`scripts/clustergit.py` takes `tf_outputs()`, `settings()`, `pod_name()`, `stream_command()` and `unbundle_script()` out of `git-seed.py` verbatim, and adds the two directions as named functions: `push_bundle()` and `pull_bundle()`.
+`git-seed.py` becomes a caller and keeps its module docstring, its `DRILL_PATHS` filter and its `drill_tree()` builder, which are its own concerns and nobody else's.
+
+This is not tidying.
+Task 6.2 pulls a bundle out of the git server and Task 6.3 pushes one back in, and both are the same `kubectl exec` streaming primitive that `git-seed.py` already got right after a measured data-corruption bug.
+Re-implementing either from memory is how `/bin/sh -c 'cat > file'` comes back, silently truncates a **save file** this time, and surfaces days later as `fatal: early EOF` when somebody tries to resume.
+One implementation, one place, with the reason written on it.
+
+`tests/test_git_seed.py` already puts `scripts/` on `sys.path` before loading the module, so the new import resolves under test with no change to the harness.
+Keep every assertion in that file green - it pins the `tee` shape and the marker-last ordering, and both must survive the move unchanged.
+
+- [ ] **Step 2: Give `SessionState` a phase, in `@drill/shared`**
+
+```ts
+export type SessionPhase =
+  "active" | "switching" | "ended" | "destroy-requested";
+```
+
+`SessionState` gains `phase: SessionPhase`, an optional `target` (set only while `switching`) and an optional `endedAt`.
+No new `ServerMessage` variant: the existing `session` message already carries the whole state, so the phase reaches the browser through a channel that is already tested.
+Adding a message the web half does not handle is a compile error in this workspace, which is the property that makes the shared package worth having - do not weaken it by widening the union when the payload already fits.
+
+- [ ] **Step 3: Add the writer seam to `k8s.ts`, and keep `K8sReader` read-only**
+
+`k8s.ts` remains the only file in the repo importing `@kubernetes/client-node`.
+It gains a **second, separate** interface rather than three more methods on `K8sReader`:
+
+```ts
+export interface K8sStateWriter {
+  writeConfigMap(
+    name: string,
+    ns: string,
+    data: Record<string, string>,
+  ): Promise<void>;
+}
+```
+
+The separation is the point.
+`K8sReader`'s header says nothing the GUI does on the user's behalf mutates, and that rule is what stops a widget from passing a task the learner never performed - the same rule that keeps stage and commit buttons off the source control view.
+The server writing **its own** session state is not an action on the user's behalf, it is the process's own bookkeeping, and a distinct type is what makes that distinction checkable instead of a comment somebody has to believe.
+A route that takes a `K8sStateWriter` cannot be handed a reader, and a panel that takes a `K8sReader` cannot be handed a writer.
+
+`writeConfigMap` reads, then replaces, and creates on 404.
+A blind create fails on the second write; a blind replace fails on the first.
+
+- [ ] **Step 4: `state.ts` - mirror the state, and guard the size**
+
+`saveState(writer, state, opts)` serialises `SessionState` to one `state.json` key and writes it to `drill-state`.
+
+**A ConfigMap is capped at 1 MiB and the API server rejects the whole object over it.**
+`attempts` is append-only and unbounded by design, so the cap is reachable - not by a learner working through six tasks, but by a submit loop, a stuck client retrying, or the twentieth scenario in a long session.
+The failure without a guard is the worst shape available: every write from that moment on fails, the ConfigMap silently stops advancing, the watcher keeps writing the last good state, and the learner's progress stops being saved with no symptom until they try to resume.
+
+So `saveState` measures the encoded size, and above a threshold drops the **oldest** attempts until it fits, recording `attemptsDropped: n` in the payload.
+Dropping the oldest is right: the recent ones are what a resume needs and what the `only-imperative` nudge reads. The count is recorded rather than the drop being silent, because a save file that quietly is not the whole story is the thing this repo has now been burned by three times - a vacuous `AC-H5` pass, a truncated git bundle, and `undefined` collapsing into "not committed".
+
+`state.test.ts` covers it with a fake writer: a normal state round-trips whole; an oversized one fits, keeps the newest attempts, and reports the count; a writer that throws does not take the submit down with it.
+
+- [ ] **Step 5: Wire it into the server, and make the ConfigMap the owner of `DRILL_SCENARIO`**
+
+Every mutation of `state` calls `saveState`. That is `POST /api/submit` and the lifecycle routes from Task 6.5.
+Submits are human-paced, so there is nothing to debounce and a debounce would only add a window in which a pass is not yet saved.
+
+**A save failure must never fail a submit.** The learner answered correctly; whether we managed to mirror it is our problem, not theirs. Log it and return the verdict.
+
+At startup the server reads `drill-request`. If it names a scenario, that wins and the env var is ignored; if there is none, `DRILL_SCENARIO` is the fallback and the server writes its initial `drill-state`.
+This is what discharges the placeholder `terraform/modules/platform/drill-gui.tf` has carried since Task 5.5 - its `DRILL_SCENARIO = "03"` comment says in as many words that Phase 6's ConfigMap takes ownership, and this is the step that takes it.
+The env var stays as the fallback rather than being deleted, because it is what makes `make -f Makefile.test drill-dev` work with no cluster anywhere.
+
+- [ ] **Step 6: Write the failing test for the watcher's pure parts**
 
 `tests/test_drill_watch.py` covers the pure parts: PID liveness detection, the bundle path construction, and that a sync writes to a temp file and renames rather than truncating the live one.
 
-- [ ] **Step 2: Implement and verify on kind**
+Two additions the interface sketch did not anticipate, both found by writing the thing:
 
-Change the ConfigMap by hand and confirm the watcher reacts within a second and the bundle on disk changes. Then `git clone` that bundle into a scratch directory and confirm the chart is there at the expected revision - a bundle that cannot be cloned back out is not a save file.
+1. **`kubectl get --watch -o json` emits a stream of concatenated JSON objects, not a JSON array and not one per line.** Nothing in the stdlib parses that directly. The reader is an incremental `json.JSONDecoder().raw_decode` over an accumulating buffer, and it is a pure function of a byte stream, so it is unit-tested: split an object across chunk boundaries, mid-string and mid-escape, and assert the same objects come out. A parser that works only when a chunk happens to end on an object boundary passes every naive test and fails intermittently in production.
+2. **PID liveness cannot be `os.kill(pid, 0)`.** That is POSIX-only and Windows 11 is a supported target here. Worse, a bare PID is ambiguous on every platform - PIDs are reused, and a stale file naming a recycled PID reports a live watcher that is actually somebody's text editor, so converge never restarts the real one. The file records the PID **and** the process start time, and liveness requires both to match.
 
-- [ ] **Step 3: Record the caveat in the code**
+- [ ] **Step 7: Implement, and verify on kind**
 
-The bundle captures everything that lives in git and nothing that does not. Scenario 03 is entirely chart-driven so the bundle is complete for this slice, but a scenario that creates state imperatively (scenario 02's HPA via `kubectl autoscale`) lives only in the cluster and will need a declared `resume` block per task in the answers TOML. That is the per-scenario variation this design already expects; note it where the next person will read it.
-
-- [ ] **Step 4: Commit**
+On every change it writes `state.json` and re-bundles:
 
 ```bash
-git add scripts/drill-watch.py tests/test_drill_watch.py drill/server/src/server.ts
+kubectl exec -n git deploy/git-server -- git -C /repos/repo.git bundle create - --all \
+  > drill-progress/03/sessions/<id>/workspace.bundle
+```
+
+streamed in one shot, so no port-forward is held open for the length of a drill.
+The repo path comes from the `cluster_git_repo_path` terraform output through `clustergit.py`, never from the literal above - the interface sketch wrote `/srv/repo.git`, which is what the path **was** before Task 3.2 moved it, because `bitnami/git` ships `/srv` as a symlink to `/var/srv` and a volume mounted there lands somewhere other than where every manifest says.
+
+The bundle is written to a temp file, **verified with `git bundle verify`, and only then renamed** over the live one.
+A bundle that cannot be cloned back out is not a save file, it is a file, and the moment to find that out is now rather than at the resume that needed it.
+
+Change the ConfigMap by hand and confirm the watcher reacts within a second and the bundle on disk changes.
+Then `git clone` that bundle into a scratch directory and confirm the chart is there at the expected revision.
+
+- [ ] **Step 8: Handle the terminal phases**
+
+The watcher is where `QUIT` and `SHUT IT DOWN` actually land, because the pod can write an intent but cannot reach a process on somebody's laptop:
+
+| phase               | the watcher does                                                                                                |
+| ------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `active`            | sync `state.json`, re-bundle                                                                                    |
+| `switching`         | sync and bundle **first**, then restore the target's newest bundle into cluster git, then write `drill-request` |
+| `ended`             | final sync, `record_result`, clear the current-session pointer and the handover flag, exit 0                    |
+| `destroy-requested` | everything `ended` does, then the countdown, then `make down`                                                   |
+
+Sync-before-switch is the ordering that must not be got wrong.
+The switch is the one moment the previous scenario's work is about to be overwritten in cluster git, so a bundle taken afterwards saves the _next_ scenario's baseline under the _previous_ scenario's session id - which looks like it worked and loses the drill.
+
+The countdown is ten seconds, prints what it is about to destroy, and `ctrl-c` aborts it.
+`DRILL_ALLOW_DESTROY=0` disables the branch entirely for anyone who wants the pause menu without the last entry armed.
+
+- [ ] **Step 9: Record the caveat in the code**
+
+The bundle captures everything that lives in git and nothing that does not.
+Scenario 03 is entirely chart-driven so the bundle is complete for this slice, but a scenario that creates state imperatively (scenario 02's HPA via `kubectl autoscale`) lives only in the cluster and will need a declared `resume` block per task in the answers TOML.
+That is the per-scenario variation this design already expects; note it where the next person will read it.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add scripts/clustergit.py scripts/drill-watch.py tests/test_drill_watch.py \
+        drill/server/src/state.ts drill/server/src/state.test.ts \
+        drill/server/src/integrations/k8s.ts drill/shared/src/index.ts \
+        drill/server/src/server.ts scripts/git-seed.py
 git commit -m "feat: watch-based sync from the drill ConfigMap to local drill-progress"
 ```
 
@@ -5612,11 +5824,51 @@ git commit -m "feat: watch-based sync from the drill ConfigMap to local drill-pr
   - `make scenario-clean N=03` ends the session, stops the watcher, and removes what the drill created - without destroying the cluster, which is the gap the spec opens with.
   - Starting scenario 05 while 03 is open **refuses**, because scenarios mutate the same app and concurrent drills make cluster state unattributable.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Decide what happens to the eleven unported scenarios, because today this target is all they have**
+
+`make scenario N=07` prints a card today, and that is the only way to read one outside the GUI.
+Converting the target wholesale to "converge a drill session" is a silent regression for eleven twelfths of the curriculum, which is not a trade this phase is entitled to make.
+
+So the target **branches on whether the scenario is ported**, meaning whether `scenarios/answers/NN.toml` exists:
+
+| `N`                       | behaviour                                                                    |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| ported (`03` today)       | converge a drill session, print the GUI URL                                  |
+| not ported                | today's behaviour exactly: prereq check, then print the card                 |
+| ported, but no cluster up | refuse by name, point at `make up`, and print how to read the card meanwhile |
+
+The third row matters more than it looks.
+"Converge" with no cluster has nothing to converge against and no GUI URL to print, so the honest answer is a refusal - but a refusal that leaves the learner with no way to read the card is a worse target than the one being replaced, so it names `cat scenarios/03-*.md` on its way out.
+
+- [ ] **Step 2: Write the failing test**
 
 `tests/test_scenario.py` asserts idempotency (converging twice produces one session), the concurrent-scenario refusal names the open scenario, and `scenario-clean` is safe to run when nothing is open.
 
-- [ ] **Step 2: Implement, verify on kind, commit**
+Sharpen each of the three, because as sketched they can all be passed by an implementation that is wrong:
+
+1. **Idempotency is asserted on the filesystem, not on the exit code.** Converge twice and assert `drill-progress/03/sessions/` holds exactly one directory and `index.json` exactly one row. An implementation that creates a second session and exits 0 passes an exit-code test and fails `AC-H2`.
+2. **The refusal must name the open scenario _and_ its title.** Assert the message contains both `03` and the title read from the card, not merely that the exit code is 1. "Another scenario is running" is a refusal the learner cannot act on; "scenario 03 - Rolling update and rollback is open, finish or `make scenario-clean N=03`" is.
+3. **`scenario-clean` with nothing open exits 0 and changes nothing.** Assert the tree before and after are identical. A cleanup that errors when there is nothing to clean is a cleanup nobody runs twice, and this one is in the teardown path.
+
+- [ ] **Step 3: Implement converge**
+
+The order is fixed by what each step depends on:
+
+1. Refuse if a **different** scenario is live, reading `drill-progress/current.json`. The same scenario is not a conflict, it is the idempotent case, and conflating them breaks `AC-H2` with `AC-H3`.
+2. Refuse if the cluster is unreachable. `kubectl version --request-timeout=10s` does exit 1 against a dead endpoint - this was verified rather than assumed, after it was wrongly suspected of the exits-zero problem.
+3. Capture `drill-progress/baseline.bundle` if it does not exist yet. This is cluster git as `make git-seed` left it, and it is what a fresh start of any scenario restores from. Without it, the second scenario a learner starts inherits the first one's finished working tree as its starting state.
+4. Reuse the open session for `N` if there is one, restoring its newest bundle; otherwise create a session and restore the baseline.
+5. Write `drill-request`.
+6. Start the watcher if the PID file says it is not live.
+7. Write `drill-progress/.gui-owns-the-wheel` for Task 6.4.
+8. Print the GUI URL, from the Ingress address when there is one and as a `kubectl port-forward` line when there is not - which is always, on kind.
+
+- [ ] **Step 4: Implement `scenario-clean`, and verify on kind**
+
+Stop the watcher, close the session, delete the Argo `Application` and the `practice-app` namespace, clear the handover flag.
+It does **not** destroy the cluster and it does **not** touch `drill-progress/`: the save files are the point of the phase, and a "clean" that deleted them would be the single most destructive command in the repo wearing the friendliest name.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add scripts/scenario.py tests/test_scenario.py Makefile
@@ -5644,11 +5896,37 @@ The Makefile is **demoted, never archived**. If the GUI is the only way to drive
   - A refusal **names the consequence**, not just the rule: "this would re-apply the Argo Application and fight the drill", not only "the GUI owns this now". That costs one line per target and fits a project whose whole job is teaching why things break.
   - `FORCE=1 make app-deploy` overrides. This exists for the same reason the Makefile was demoted rather than archived: if the GUI wedges and the handover flag goes stale, the only alternative is destroying a cluster you are mid-drill on. Removing the escape hatch removes the recovery path.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Resolve the conflict between locking `scenario` and `AC-H2`**
+
+The list above locks `scenario`, and `AC-H2` requires `make scenario N=03` to be runnable twice with the second run "not an error".
+The first run sets the handover flag, so a flat lock makes the target refuse itself on the second run and the acceptance criterion unsatisfiable.
+
+The lock on `scenario` is therefore **scoped to the argument**, not applied to the target:
+
+- `make scenario N=<the live scenario>` is always allowed. It is the converge path and converging is idempotent.
+- `make scenario N=<a different one>` is refused, and the refusal points at the GUI's pause menu, which is now where switching scenarios belongs.
+- `make scenario N=<not ported>` is allowed, because printing a card does not touch the cluster.
+
+This is a deviation from the interface-level list and it is a correction of it: the flat version was written before the pause menu existed, when the laptop was the only way to change scenario.
+
+- [ ] **Step 2: Write the failing test**
 
 `tests/test_handover.py` asserts: every locked target refuses when the flag is set; every unlocked target still runs; `FORCE=1` overrides every lock; each refusal message mentions a consequence, not only the lock; and the never-locked list is exactly the four bootstrap and teardown targets plus `Makefile.test`, so a future edit cannot quietly lock the recovery path.
 
-- [ ] **Step 2: Implement and commit**
+Add one more, and it is the one that will actually catch something:
+
+**The test parses the `Makefile` itself** and asserts that every target in `LOCKED` carries the guard prerequisite and no target in `NEVER_LOCKED` does.
+A test that only exercises `handover.py` proves the policy object is correct while the Makefile forgets to consult it, which is precisely the edit a future change will make - somebody adds a target, copies the recipe above it, and does not notice the guard is what they left out.
+The consequence in the other direction is worse: a guard accidentally added to `down` locks the user out of stopping the bill.
+
+- [ ] **Step 3: Implement, wire the Makefile, and commit**
+
+The guard is a pattern rule, `check-handover-%`, listed as the **first** prerequisite of each locked target.
+`app-deploy` is why it must be a prerequisite rather than the first recipe line: it depends on `git-seed`, and a recipe-line check runs after prerequisites, so the seed would already have happened before the refusal.
+
+Add `.NOTPARALLEL:` to the `Makefile` in the same edit.
+GNU make does not guarantee left-to-right prerequisite order under `-j`, and the guard is only a guard if it runs first.
+Nothing in this Makefile benefits from parallelism - it is a lifecycle driver where every target is a network round trip that must happen in order.
 
 ```bash
 git add scripts/handover.py tests/test_handover.py Makefile
@@ -5661,21 +5939,94 @@ git commit -m "feat: Makefile handover - one steering wheel at a time, with FORC
 
 **Files:**
 
-- Modify: `drill/server/src/server.ts` (add `POST /api/teardown`)
-- Modify: `drill/web/src/panels/StatusBar.tsx`
+- Modify: `drill/server/src/server.ts` (the lifecycle routes)
+- Create: `drill/web/src/panels/PauseMenu.tsx`, `drill/web/src/panels/TransitionScreen.tsx`
+- Modify: `drill/web/src/panels/StatusBar.tsx`, `drill/web/src/App.tsx`, `drill/web/src/lib/api.ts`, `drill/web/src/theme.css`
+- Test: `drill/server/src/server.test.ts`
 
 **Interfaces:**
 
 - Produces: a teardown path from inside the GUI, available at pass, at fail, or whenever the user wants, that ends the session, stops the watcher, syncs progress one last time, and removes what the drill created. The off-menu terminal equivalent is already tracked as an easter egg in `BACKLOG.md` and is not built here.
 
-- [ ] **Step 1: Implement, verify on kind, commit**
+- [ ] **Step 1: The routes**
 
-The last sync before teardown is the part that must not be skipped. Tearing down without it loses the session the user just finished, which is the one moment their progress matters most.
+Five, and the shapes matter more than the count:
+
+| route                       | body                     | does                                                           |
+| --------------------------- | ------------------------ | -------------------------------------------------------------- |
+| `GET /api/scenarios`        | -                        | the twelve menu slots: id, title, `ported`, and why not if not |
+| `POST /api/session/restart` | -                        | same scenario, new session                                     |
+| `POST /api/session/switch`  | `{ target }`             | phase `switching`, hand off to the watcher                     |
+| `POST /api/session/quit`    | -                        | phase `ended`, delete the scenario's cluster resources         |
+| `POST /api/session/destroy` | `{ confirm: "DESTROY" }` | phase `destroy-requested`                                      |
+
+`GET /api/scenarios` reads titles from the cards and `ported` from the presence of an answers TOML.
+It must not read the TOML's contents - the menu needs a title and a boolean, and a route that loads the answer file to decide whether it exists is one refactor away from serving it.
+
+`POST /api/session/destroy` rejects anything but the exact literal `DESTROY`, server-side.
+The browser also asks for it, and that is the friendly copy; this is the boundary.
+
+These routes mutate, which every other route in this server deliberately does not.
+That is not a new exposure - the terminal next to them is a `cluster-admin` shell, so anyone who can reach these can already do strictly more - but it is a change in the shape of the API and it gets said in the file rather than discovered.
+
+- [ ] **Step 2: The switch handshake, and its timeout**
+
+`switch` writes `phase: "switching", target: N` and returns immediately. The work happens elsewhere:
+the watcher bundles the current session, restores `N`'s newest bundle (or the baseline) into cluster git, and writes `drill-request`.
+The server, polling `drill-request` every two seconds, sees the new session id and converges: new answers, new state, phase back to `active`.
+
+**If no watcher is running, that handshake never completes**, and a menu entry that hangs forever is worse than one that refuses.
+After 60 seconds with no `drill-request`, the server converges by itself to a **fresh** session of `N` and says so in as many words: started fresh, no saved progress restored, no laptop watcher was listening.
+It does not pretend to have resumed, and it does not sit there.
+
+- [ ] **Step 3: The pause menu**
+
+`Esc` opens and closes it, and so does the status bar's `exit` button, which has been sitting there disabled since Phase 5 waiting for this.
+The overlay is styled from the theme variables that shipped at 5.3 - there are five themes and a menu with its own hardcoded green looks broken in four of them.
+
+All twelve scenarios are listed. The eleven without an answers TOML are disabled and say `not ported yet` rather than being hidden.
+`NEXT` and `PREVIOUS` are `SELECT` with the arithmetic done for you, and both are disabled when the neighbour is not ported, showing which one it would have been.
+
+- [ ] **Step 4: The transition screen**
+
+Full-screen while `phase === "switching"`, and it is **not a spinner**.
+`/api/deps` already models the startup chain as `DependencyStatus[]` with `ready`/`starting`/`waiting`/`absent` per link, which is exactly the list of things being waited on - so the loading screen is that chain, rendered large, with the real state of each link.
+
+This is the cheapest honest thing available and it is better than a spinner on both counts.
+It entertains, because something is visibly happening and it is the truth.
+And when a switch is slow, the screen already says which link is slow, so "the drill is stuck" arrives with its own diagnosis attached instead of as a bug report.
+
+The client polls `/api/deps` every second while transitioning, rather than leaning on the websocket's ten-second push. Ten seconds is right for a status line and far too slow for a progress screen.
+
+- [ ] **Step 5: The game-over screen**
+
+Shown while `phase === "ended"`. Scenario, tasks passed, elapsed time, where it was saved, and the way back in: pick another scenario, or replay this one.
+Plus the cost reminder, because the cluster is still up and still billing, and this is the screen the learner is looking at when they decide whether they are done for the day.
+
+- [ ] **Step 6: Verify on kind, and commit**
+
+The last sync before teardown is the part that must not be skipped.
+Tearing down without it loses the session the user just finished, which is the one moment their progress matters most.
 
 ```bash
-git add drill/server/src/server.ts drill/web/src/panels/StatusBar.tsx
-git commit -m "feat: exit and tear down a drill from the GUI"
+git add drill/server/src/server.ts drill/web/src/panels/
+git commit -m "feat: pause menu - restart, switch, quit and tear down a drill from the GUI"
 ```
+
+---
+
+### What the expansion changed
+
+Recorded so a later reader can tell which parts of Phase 6 were written before the GUI existed and which after.
+
+- **`EXIT` became a pause menu**, and `POST /api/teardown` became five lifecycle routes. The single-button version could not express restart or switch at all.
+- **`SHUT IT DOWN` exists**, and `CLAUDE.md` hard rule 1 was amended in the same commit to carry the exception rather than be contradicted by it.
+- **Two ConfigMaps, one writer each**, instead of the sketch's single `drill-state`. A switch needs the laptop to talk back, and a second author on one object loses writes.
+- **The lock on `scenario` became argument-scoped**, because the flat version made `AC-H2` unsatisfiable.
+- **`make scenario N=<unported>` still prints a card.** The sketch would have regressed eleven of the twelve scenarios.
+- **`clustergit.py` was factored out of `git-seed.py`** so the bundle push and pull are one implementation, not three.
+- **A baseline bundle is captured at first converge.** Without it the second scenario a learner starts inherits the first one's finished working tree.
+- **The transition screen is the dependency chain**, not a spinner - reusing `DependencyStatus` from Task 5.4 rather than inventing a progress model.
 
 ---
 
@@ -5737,11 +6088,11 @@ Run against the spec, `docs/superpowers/specs/2026-08-19-scenario-drill-sessions
 
 **Spec coverage.** Every section maps to a task. Vocabulary and the autosave/commit/push split -> Tasks 5.3 and 6.2. Startup dependency chain -> Task 5.4's `checkDependencies`. Makefile handover -> Task 6.4. Q1 (one Argo source) -> Tasks 3.2 and 3.3. Q2 (save file, not diary) -> Task 6.1. Q2a (the watcher) -> Task 6.2. Q3 (ALB with three conditions) -> Tasks 4.1 and 4.2; the shared IngressGroup lands in Task 5.5 with the Ingress that needs it. Q4 (contextual integrations) -> Task 5.4. Q5 (one long-lived pod, append-only sessions) -> Tasks 5.5 and 6.1. Q6 (TypeScript both ends) -> Task 2.1. Q7 (refusal and port 8090) -> Tasks 6.4 and 5.1. Build-time items: `drill-progress/` in `.gitignore` -> Task 6.1 Step 1, before the directory can exist; three config values -> Task 3.1; port 8090 -> `config.ts`. Answers TOML as source of truth generating the HTML -> Phase 1. Semantic grading with the alias table -> Phase 2. `cluster-admin` -> Task 5.5. Concurrent-scenario refusal -> Task 6.3. Exit and tear down from the GUI -> Task 6.5. Testing section -> grader unit tests (Phase 2), byte-identical generator test (Task 1.2), `make -f Makefile.test test` kept passing throughout, the Argo acceptance test on kind (Task 3.2 Step 7), and live drilling (Phase 7 Step 4).
 
-**Two known gaps, both deliberate.** Phases 6.1 through 6.5 and Tasks 5.4 and 5.5 were specified at interface-and-intent level rather than with full TDD code blocks, because they depend on choices Phase 5's first visual will change - panel layout, what the session state actually needs to carry, and what the user says when they see it. Expanding them earlier would have been writing code against a UI nobody had looked at. **Tasks 5.4 and 5.5 were expanded on 2026-08-21**, after the Task 5.3 review, and each now carries a "what the review changed" note so the ordering is auditable. Phase 6 is still interface-level and is expanded when its ticket is cut. The second gap: Task 5.4's proxy is designed and stubbed but only exercised when scenario 07 is ported, exactly as the spec says.
+**Two known gaps, both deliberate.** Phases 6.1 through 6.5 and Tasks 5.4 and 5.5 were specified at interface-and-intent level rather than with full TDD code blocks, because they depend on choices Phase 5's first visual will change - panel layout, what the session state actually needs to carry, and what the user says when they see it. Expanding them earlier would have been writing code against a UI nobody had looked at. **Tasks 5.4 and 5.5 were expanded on 2026-08-21**, after the Task 5.3 review, and each now carries a "what the review changed" note so the ordering is auditable. **Tasks 6.1 through 6.5 were expanded on 2026-08-21**, when `WO-20260819-7840` was started, and Phase 6 carries a "what the expansion changed" note for the same reason. That note is worth reading: holding Phase 6 back was the right call, because the expansion changed the design rather than merely detailing it - the single `EXIT` button became a pause menu, and that is a thing nobody could have known before there was a GUI to sit in. The second gap: Task 5.4's proxy is designed and stubbed but only exercised when scenario 07 is ported, exactly as the spec says.
 
 **Type consistency.** `Verdict`, `SessionState`, `Attempt` and `DependencyStatus` are defined once in `@drill/shared` (Task 2.1) and used unchanged in Tasks 2.4, 5.1, 5.2, 5.3 and 5.4. `AnswerTask` and `AcceptRule` are defined in Task 2.4's `answers.ts` and consumed in 2.4 and 5.1. `ParsedCommand` is defined in Task 2.3 and consumed only in 2.4. The `grader` discriminator has the same three values in `scripts/answers.py`, `drill/server/src/grader/answers.ts` and `GraderKind`.
 
-**Placeholder scan.** Clean through Task 5.5. Phase 6 carries the interface-level treatment noted above, which is flagged rather than hidden.
+**Placeholder scan.** Clean through Task 6.5. Nothing in this plan is now specified at interface level. One thing is deliberately deferred and is flagged rather than hidden: Phase 6's scenario-switch path can be proven mechanically but its real exit-condition test - drill 03, switch to 06, drill 06, switch back, find 03 where you left it - needs a second ported scenario to exist. It belongs to whichever epic ports one, and it is recorded in `BACKLOG.md`, in `WO-20260819-7840`'s notes and in `CONTEXT_STATE.md` so it cannot lapse.
 
 ---
 

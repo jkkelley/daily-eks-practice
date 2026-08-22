@@ -195,8 +195,18 @@ resource "kubectl_manifest" "drill_deployment" {
               # trainer's own log files never show up in the learner's `git status`.
               { name = "DRILL_LOG_DIR", value = local.drill_logs },
               { name = "HOME", value = local.drill_home },
-              # Phase 6's drill-state ConfigMap takes ownership of which scenario is
-              # running. Until then it is pinned to the one that is ported.
+              # Where the two lifecycle ConfigMaps live. Threaded from the local
+              # rather than left to the server's default so the two cannot drift:
+              # a server looking in the wrong namespace finds no `drill-request`,
+              # silently keeps the fallback scenario below, and nothing anywhere
+              # says why the pause menu's switch did nothing.
+              { name = "DRILL_NAMESPACE", value = local.drill_ns },
+              # THE FALLBACK, not the source of truth. `drill-request` - written by
+              # `make scenario N=NN` and by the laptop watcher - is what decides
+              # which scenario runs, and the server reads it at startup and polls
+              # it after. This is what a pod that has never been told anything
+              # comes up in, and it is what keeps `drill-dev` working with no
+              # cluster at all.
               { name = "DRILL_SCENARIO", value = "03" },
               { name = "DRILL_CLUSTER_GIT_URL", value = local.cluster_git_url },
               { name = "DRILL_SERVICE_ACCOUNT", value = local.drill_sa },

@@ -42,9 +42,28 @@ KUBECONFIG_FILE := $(CURDIR)/.kubeconfig-daily-eks-practice
 export KUBECONFIG := $(KUBECONFIG_FILE)
 
 .DEFAULT_GOAL := help
+
+# GNU make does not guarantee left-to-right prerequisite order under -j, and the
+# handover guard below is only a guard if it runs FIRST. Nothing here benefits
+# from parallelism anyway: every target is a network round trip that has to
+# happen in order.
+.NOTPARALLEL:
+
 .PHONY: help config init plan apply up down output kubeconfig kubeconfig-env git-seed app-deploy \
-        app-status argo-repo argo-sync argo-ui argo-password drill-allow drill-image grafana-ui scenario check serve-answers \
-        answers-gen fmt clean guard-env
+        app-status argo-repo argo-sync argo-ui argo-password drill-allow drill-image grafana-ui scenario scenario-clean check serve-answers \
+        answers-gen fmt clean guard-env check-handover-%
+
+# ---- The handover guard -----------------------------------------------------
+# While the drill GUI is up it owns the cluster, and these targets stand down.
+# scripts/handover.py holds the list and, more importantly, holds WHY each one is
+# locked - a refusal that names the consequence rather than the rule.
+#
+# A PREREQUISITE, not a first recipe line: `app-deploy` depends on `git-seed`,
+# and a recipe-line check runs after prerequisites, so the seed would already
+# have happened before the refusal. FORCE=1 overrides every one of them - see the
+# header of handover.py for why that escape hatch is not optional.
+check-handover-%:
+	@$(PYTHON) scripts/handover.py --check $* $(if $(filter command line,$(origin N)),$(N),)
 
 help: ## Show this help
 	@echo "Daily EKS Practice ($(DETECTED_OS)) - ENV=$(ENV), profile=$(AWS_PROFILE), region=$(AWS_REGION)"
@@ -93,19 +112,19 @@ kubeconfig: guard-env ## Write a REPO-LOCAL kubeconfig (.kubeconfig-daily-eks-pr
 kubeconfig-env: ## Print the export line for your shell (eval "$$(make kubeconfig-env)")
 	@echo "export KUBECONFIG=$(KUBECONFIG_FILE)"
 
-argo-repo: ## Give Argo CD read access to this private repo (token from your gh CLI login)
+argo-repo: check-handover-argo-repo ## Give Argo CD read access to this private repo (token from your gh CLI login)
 	$(PYTHON) scripts/argo-repo.py
 
 git-seed: ## Publish this repo into the in-cluster git server (Argo CD's only source)
 	$(PYTHON) scripts/git-seed.py
 
-app-deploy: git-seed ## Register the practice app with Argo CD (reads from cluster git)
+app-deploy: check-handover-app-deploy git-seed ## Register the practice app with Argo CD (reads from cluster git)
 	$(PYTHON) scripts/gen-argocd-app.py
 	kubectl apply -f argocd/generated/practice-app.yaml
 	@echo ""
 	@echo "Argo CD now owns the app, reading from cluster git. Run 'make argo-sync'."
 
-argo-sync: ## Manually Sync the practice app in Argo CD, then wait until it is Healthy
+argo-sync: check-handover-argo-sync ## Manually Sync the practice app in Argo CD, then wait until it is Healthy
 	@kubectl -n argocd patch application practice-app --type merge \
 	  -p '{"operation":{"initiatedBy":{"username":"make argo-sync"},"sync":{"syncStrategy":{"hook":{}}}}}'
 	@echo "Sync triggered - waiting for practice-app to become Healthy (up to 180s)..."
@@ -113,13 +132,13 @@ argo-sync: ## Manually Sync the practice app in Argo CD, then wait until it is H
 	  application/practice-app --timeout=180s
 	@kubectl -n practice-app get deploy
 
-app-status: ## Quick look at the practice app
+app-status: check-handover-app-status ## Quick look at the practice app
 	kubectl -n practice-app get deploy,pod,svc,ingress,pvc
 
-argo-password: ## Print the Argo CD initial admin password
+argo-password: check-handover-argo-password ## Print the Argo CD initial admin password
 	@kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d && echo ""
 
-argo-ui: ## Port-forward the Argo CD UI to https://localhost:8080 (user: admin)
+argo-ui: check-handover-argo-ui ## Port-forward the Argo CD UI to https://localhost:8080 (user: admin)
 	@echo "Argo CD -> http://localhost:8080  (user: admin, password below)"
 	@$(MAKE) --no-print-directory argo-password
 	kubectl -n argocd port-forward svc/argocd-server 8080:80
@@ -130,19 +149,20 @@ drill-allow: ## Re-point the drill ALB security group at your CURRENT public IP
 drill-image: ## Build and push the drill GUI image to your own registry
 	@$(PYTHON) scripts/drill-image.py
 
-grafana-ui: ## Port-forward Grafana to http://localhost:3000 (user: admin)
+grafana-ui: check-handover-grafana-ui ## Port-forward Grafana to http://localhost:3000 (user: admin)
 	@echo "Grafana -> http://localhost:3000  (user: admin, password: make output -> grafana_admin_password)"
 	kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
 
-scenario: ## Print a scenario card (checks its prereqs first), e.g. make scenario N=03
-	@ls scenarios/$(N)-*.md >/dev/null 2>&1 || { echo "no scenario $(N) (see scenarios/)"; exit 1; }
-	@$(PYTHON) scripts/scenario-prereqs.py $(N)
-	@cat scenarios/$(N)-*.md
+scenario: check-handover-scenario ## Converge a drill session (ported cards) or print the card, e.g. make scenario N=03
+	@$(PYTHON) scripts/scenario.py $(N)
 
-check: ## Verify a scenario's end state, e.g. make check N=03
+scenario-clean: ## End the drill session and remove what it created - does NOT destroy the cluster
+	@$(PYTHON) scripts/scenario.py $(N) --clean
+
+check: check-handover-check ## Verify a scenario's end state, e.g. make check N=03
 	bash scenario_testing/check.sh $(N)
 
-serve-answers: ## Serve the sealed answer key locally; scope to one card with N=NN (e.g. make serve-answers N=02)
+serve-answers: check-handover-serve-answers ## Serve the sealed answer key locally; scope to one card with N=NN (e.g. make serve-answers N=02)
 	$(SERVE_ANSWERS) $(if $(filter command line,$(origin N)),$(N),)
 
 answers-gen: ## Regenerate PRACTICE_ANSWERS.html from scenarios/answers/*.toml

@@ -25,6 +25,7 @@ function fake(world: {
     readEndpoints: async (name, namespace) =>
       world.endpoints?.[`${namespace}/${name}`],
     readCustomObject: async () => world.application,
+    readConfigMap: async () => undefined,
   };
 }
 

@@ -12,23 +12,34 @@ This exists instead of an init container that clones GitHub because that would n
 a PAT inside the cluster and would fail outright for a private repo on first apply.
 Seeding from the laptop needs no credentials and no egress.
 
-Where the values come from: the namespace, deployment, container and repo path are
-all terraform outputs, so this script and terraform/modules/platform/cluster-git.tf
-cannot drift apart. The CLUSTER_GIT_* env vars override them, which is what the kind
-acceptance test uses - there is no terraform state in that sandbox.
+**The transfer itself lives in `scripts/clustergit.py`**, along with where the git
+server is and the measured corruption bug the streaming shape guards against.
+Three callers move bundles in and out of that pod - this one, `drill-watch.py` and
+`scenario.py` - and re-implementing the transfer per caller is how the truncating
+version comes back. What stays here is what is genuinely this script's own: WHICH
+paths the learner gets, and how the baseline commit is built.
 """
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from clustergit import (  # noqa: F401  - re-exported; tests/test_git_seed.py pins both
+    BUNDLE_DEST,
+    ClusterGitError,
+    bundle_from_repo,
+    pod_name,
+    push_bundle,
+    settings,
+    stream_command,
+    tf_outputs,
+    unbundle_script,
+)
+
 REPO = Path(__file__).resolve().parent.parent
-BUNDLE_DEST = "/tmp/seed.bundle"
 
 # ---------------------------------------------------------------------------
 # WHAT THE LEARNER'S REPOSITORY CONTAINS, AND WHY IT IS NOT ALL OF THIS ONE.
@@ -56,28 +67,6 @@ BUNDLE_DEST = "/tmp/seed.bundle"
 # is about terraform, so porting it will mean adding terraform/ - and that is the
 # moment to decide, not now.
 DRILL_PATHS = ["helm"]
-
-
-def unbundle_script(repo_path: str) -> str:
-    """The shell run inside the pod. Order matters: the marker is written LAST.
-
-    If .seeded appeared before the fetch, the readiness probe would pass while the
-    refs were still incomplete, and Argo would clone a half-served repo and sync a
-    broken state that looks like it worked.
-
-    There is deliberately no `git update-server-info` here. That publishes the flat
-    files the DUMB http transport reads, and this server is `git daemon` speaking the
-    smart protocol - see the rung-3 note at the top of cluster-git.tf. It would be
-    dead code, not insurance.
-    """
-    return f"""
-set -e
-git -C {repo_path} fetch --force {BUNDLE_DEST} 'refs/heads/*:refs/heads/*'
-git -C {repo_path} symbolic-ref HEAD refs/heads/main
-rm -f {BUNDLE_DEST}
-date -u +%Y-%m-%dT%H:%M:%SZ > {repo_path}/.seeded
-echo "git-seed: refs published"
-"""
 
 
 def drill_tree(paths: list[str], into: Path) -> Path:
@@ -125,84 +114,26 @@ def drill_tree(paths: list[str], into: Path) -> Path:
     return into
 
 
-def stream_command(ns: str, pod: str, container: str, dest: str) -> list[str]:
-    """The kubectl argv that receives the bundle on stdin.
-
-    `tee` is exec'd DIRECTLY, with no shell in between. This is not a style choice.
-    Wrapping the receiver as `/bin/sh -c 'cat > file'` - the obvious way to write it,
-    and what the plan originally specified - silently truncates the stream: measured
-    443833 bytes sent and 98662 landed, with kubectl still exiting 0. The corruption
-    only shows up later as "fatal: early EOF" from git. Do not reintroduce the shell.
-    """
-    return ["kubectl", "-n", ns, "exec", "-i", pod, "-c", container, "--", "tee", dest]
-
-
-def tf_outputs() -> dict:
-    """Every terraform output at once.
-
-    One subprocess rather than one per value: each call re-runs bootstrap.py, which
-    re-reads the config and rewrites the tfvars, so asking four times is four times
-    the work for one answer.
-    """
-    out = subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "bootstrap.py"), "dev", "output", "-json"],
-        capture_output=True,
-        text=True,
-    )
-    if out.returncode != 0:
-        sys.exit(
-            "git-seed: could not read the terraform outputs - is the cluster up?\n"
-            f"{out.stderr}"
-        )
-    try:
-        return {k: v.get("value") for k, v in json.loads(out.stdout).items()}
-    except (ValueError, AttributeError):
-        sys.exit("git-seed: terraform output -json did not return an object")
-
-
-def settings() -> dict:
-    """Where the git server is, from terraform unless the env overrides it."""
-    env_keys = {
-        "ns": "CLUSTER_GIT_NS",
-        "deploy": "CLUSTER_GIT_DEPLOY",
-        "container": "CLUSTER_GIT_CONTAINER",
-        "repo_path": "CLUSTER_GIT_REPO_PATH",
-    }
-    found = {k: os.environ.get(v, "") for k, v in env_keys.items()}
-    if all(found.values()):
-        return found
-
-    tf = tf_outputs()
-    return {
-        "ns": found["ns"] or tf.get("cluster_git_namespace") or "",
-        "deploy": found["deploy"] or tf.get("cluster_git_deployment") or "",
-        "container": found["container"] or tf.get("cluster_git_container") or "",
-        "repo_path": found["repo_path"] or tf.get("cluster_git_repo_path") or "",
-        "url": tf.get("cluster_git_url") or "",
-    }
-
-
 def main() -> int:
-    cfg = settings()
+    try:
+        cfg = settings()
+    except ClusterGitError as e:
+        sys.exit(f"git-seed: {e}")
+
     if not cfg["ns"] or not cfg["deploy"]:
         sys.exit(
             "git-seed: cluster git is disabled "
             "(enable_cluster_git = false in scripts/config.toml)"
         )
 
-    print(f"git-seed: waiting for {cfg['deploy']} in namespace {cfg['ns']} to have a running pod...", flush=True)
-    subprocess.run(
-        ["kubectl", "-n", cfg["ns"], "wait", "--for=condition=Initialized", "pod",
-         "-l", f"app={cfg['deploy']}", "--timeout=180s"],
-        check=True,
+    print(
+        f"git-seed: waiting for {cfg['deploy']} in namespace {cfg['ns']} to have a running pod...",
+        flush=True,
     )
-    pod = subprocess.check_output(
-        ["kubectl", "-n", cfg["ns"], "get", "pod", "-l", f"app={cfg['deploy']}",
-         "-o", "jsonpath={.items[0].metadata.name}"],
-        text=True,
-    ).strip()
-    if not pod:
-        sys.exit(f"git-seed: no pod matching app={cfg['deploy']} in namespace {cfg['ns']}")
+    try:
+        pod = pod_name(cfg)
+    except (ClusterGitError, subprocess.CalledProcessError) as e:
+        sys.exit(f"git-seed: {e}")
 
     staging = Path(tempfile.mkdtemp(prefix="drill-seed-"))
     try:
@@ -211,53 +142,13 @@ def main() -> int:
             f"git-seed: streaming a bundle of {', '.join(DRILL_PATHS)} into {pod}",
             flush=True,
         )
-        return stream(cfg, pod, source)
+        try:
+            sent = push_bundle(cfg, pod, bundle_from_repo(source))
+        except ClusterGitError as e:
+            sys.exit(f"git-seed: {e}")
+        print(f"git-seed: {sent} bytes arrived intact", flush=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-
-
-def stream(cfg: dict, pod: str, source: Path) -> int:
-    bundle = subprocess.Popen(
-        ["git", "-C", str(source), "bundle", "create", "-", "--all"],
-        stdout=subprocess.PIPE,
-    )
-    copy = subprocess.Popen(
-        stream_command(cfg["ns"], pod, cfg["container"], BUNDLE_DEST),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-    )
-    # Pumped by hand rather than wired stdout-to-stdin so the bytes can be counted.
-    # A truncated transfer is silent at this layer - it only fails three steps later
-    # inside git - so the count is the only cheap way to catch it where it happened.
-    sent = 0
-    assert bundle.stdout is not None and copy.stdin is not None
-    while chunk := bundle.stdout.read(64 * 1024):
-        copy.stdin.write(chunk)
-        sent += len(chunk)
-    copy.stdin.close()
-    bundle.stdout.close()
-    if bundle.wait() != 0 or copy.wait() != 0:
-        sys.exit("git-seed: streaming the bundle failed")
-
-    landed = subprocess.run(
-        ["kubectl", "-n", cfg["ns"], "exec", pod, "-c", cfg["container"], "--",
-         "stat", "-c%s", BUNDLE_DEST],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if landed != str(sent):
-        sys.exit(
-            f"git-seed: the bundle was truncated in transit - sent {sent} bytes, "
-            f"{landed or 0} landed. Refusing to unbundle a partial repo."
-        )
-    print(f"git-seed: {sent} bytes arrived intact", flush=True)
-
-    unbundle = subprocess.run(
-        ["kubectl", "-n", cfg["ns"], "exec", pod, "-c", cfg["container"], "--",
-         "/bin/sh", "-c", unbundle_script(cfg["repo_path"])],
-    )
-    if unbundle.returncode != 0:
-        sys.exit("git-seed: unbundling inside the pod failed")
 
     print("git-seed: waiting for the readiness probe to pass...", flush=True)
     subprocess.run(

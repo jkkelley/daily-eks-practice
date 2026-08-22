@@ -10,16 +10,17 @@
 import type { FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { join } from "node:path";
-import type { ClientMessage, ServerMessage, SessionState } from "@drill/shared";
+import type { ClientMessage, ServerMessage } from "@drill/shared";
 import { TerminalSession } from "./pty.ts";
 import { writeWorkspaceFile, WorkspaceError } from "./workspace.ts";
 import { resolveDependencies } from "./integrations/deps.ts";
 import type { ServerDeps } from "./server.ts";
+import type { SessionHub } from "./session.ts";
 
 export async function registerTerminal(
   app: FastifyInstance,
   opts: ServerDeps,
-  state: SessionState,
+  hub: SessionHub,
 ): Promise<void> {
   await app.register(fastifyWebsocket);
 
@@ -29,10 +30,17 @@ export async function registerTerminal(
 
       // Named for the scenario, not for the connection: reattaching to the drill
       // you were already running is the entire point of putting tmux underneath.
+      //
+      // Read from the hub rather than from `opts`, because the scenario can now
+      // change under a running server. Off `opts` it would be frozen at whatever
+      // the pod booted with, so switching to 06 would silently reattach you to
+      // 03's shell and 03's scrollback - a terminal holding the previous drill,
+      // in a UI insisting you are in the new one.
+      const scenario = hub.state.scenario;
       const term = new TerminalSession({
         cwd: opts.workspaceDir,
-        sessionName: `drill-${opts.scenario}`,
-        logPath: join(opts.logDir, `${opts.scenario}.log`),
+        sessionName: `drill-${scenario}`,
+        logPath: join(opts.logDir, `${scenario}.log`),
         ...(opts.tmuxConf ? { tmuxConf: opts.tmuxConf } : {}),
       });
 
@@ -46,7 +54,17 @@ export async function registerTerminal(
         const tail = await term.replay();
         if (tail) send({ type: "term:output", data: tail });
       }
-      send({ type: "session", state });
+      send({ type: "session", state: hub.state });
+
+      // ...and again on every change, which is what makes the pause menu work at
+      // all. A phase only the server knows about is a transition screen that
+      // never appears and a game-over screen that never arrives. Pushed rather
+      // than polled because these are single, discrete events - a switch, a quit
+      // - and an interval would put a random fraction of a second of "nothing is
+      // happening" in front of every one of them.
+      const unsubscribe = hub.onChange((state) =>
+        send({ type: "session", state }),
+      );
 
       term.onData((data) => send({ type: "term:output", data }));
 
@@ -100,6 +118,9 @@ export async function registerTerminal(
       // hits the API server every ten seconds for a session nobody is watching.
       socket.on("close", () => {
         clearInterval(depsTimer);
+        // Left subscribed, the hub holds a closure over a closed socket for the
+        // life of the process, and every later phase change calls send() on it.
+        unsubscribe();
         term.dispose();
       });
     });

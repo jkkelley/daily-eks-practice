@@ -12,6 +12,7 @@ function reader(answer: unknown | (() => never)): K8sReader {
     },
     readDeployment: async () => undefined,
     readEndpoints: async () => undefined,
+    readConfigMap: async () => undefined,
   };
 }
 
@@ -171,6 +172,7 @@ test("the Application is looked up by the name and namespace it was asked for", 
     },
     readDeployment: async () => undefined,
     readEndpoints: async () => undefined,
+    readConfigMap: async () => undefined,
   };
 
   await getApplication(spy, "practice-app", "argocd");

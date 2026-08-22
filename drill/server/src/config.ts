@@ -35,6 +35,15 @@ export interface ServerOptions {
   argoNamespace: string;
   argoAppName: string;
   /**
+   * Where the two lifecycle ConfigMaps live - `drill-state` and `drill-request`.
+   *
+   * The pod's own namespace, and it carries a default for the same reason the two
+   * Argo names above do: it names an object this module's Terraform creates, and
+   * getting it wrong is visible immediately as a session that never saves rather
+   * than as a log file written somewhere nobody looks.
+   */
+  drillNamespace: string;
+  /**
    * Upstreams for the reverse proxy, absent unless configured.
    *
    * Absent means the route is not registered at all. A proxy mounted on an upstream
@@ -83,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ServerOptions {
     scenario: required("DRILL_SCENARIO"),
     argoNamespace: env.DRILL_ARGO_NAMESPACE ?? "argocd",
     argoAppName: env.DRILL_ARGO_APP ?? "practice-app",
+    drillNamespace: env.DRILL_NAMESPACE ?? "practice-drill",
     ...(env.DRILL_ARGO_UPSTREAM
       ? { argoUpstream: env.DRILL_ARGO_UPSTREAM }
       : {}),

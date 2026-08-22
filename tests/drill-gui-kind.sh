@@ -118,6 +118,25 @@ extract ".drill_" | python3 -c "
 import sys
 docs = sys.stdin.read().split('\n---\n')
 keep = [d for d in docs if '\"kind\": \"Ingress\"' not in d and 'kind: Ingress' not in d]
+
+# ORDER THEM. The plan lists resource_changes alphabetically by address, so
+# drill_deployment comes out BEFORE drill_namespace - and \`kubectl apply -f\` with
+# many documents applies them in file order, does not stop at the first error, and
+# reports a non-zero exit that this harness was discarding. The result was the
+# Deployment failing with 'namespaces \"practice-drill\" not found' while every
+# other object was created, so the namespace existed, the pod did not, and a
+# re-run on the same cluster then passed - which is exactly why this survived.
+# terraform's own depends_on gets this right at apply time; extracting the bodies
+# throws that ordering away, so it has to be put back here.
+RANK = {'Namespace': 0, 'ServiceAccount': 1, 'ClusterRole': 1, 'ClusterRoleBinding': 2,
+        'PersistentVolumeClaim': 2, 'ConfigMap': 2, 'Secret': 2, 'Service': 3, 'Deployment': 4}
+def kind(doc):
+    for line in doc.splitlines():
+        t = line.strip().strip('-').strip()
+        if t.startswith('\"kind\"') or t.startswith('kind:'):
+            return t.split(':', 1)[1].strip().strip('\"')
+    return ''
+keep.sort(key=lambda d: RANK.get(kind(d), 9))
 print('\n---\n'.join(keep))
 " >"$MANIFESTS" || {
   echo "ERROR: could not extract drill manifests from $PLAN"
@@ -173,7 +192,8 @@ rm -f /tmp/drill-gui.tar
 
 # The plan names the image from config.toml, which points at a GHCR repository that
 # the kind node cannot pull and does not need to: the image is already loaded.
-kube apply -f "$MANIFESTS" >/dev/null 2>&1
+APPLY_OUT="$(kube apply -f "$MANIFESTS" 2>&1)"
+check "every drill manifest applied" $? "$(echo "$APPLY_OUT" | grep -i error | head -2)"
 kube -n "$NS" set image deploy/drill-gui "drill-gui=$IMAGE" >/dev/null 2>&1
 kube -n "$NS" patch deploy drill-gui --type=json \
   -p '[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]' >/dev/null 2>&1

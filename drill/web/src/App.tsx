@@ -16,7 +16,14 @@ import {
   getTree,
   getGitStatus,
   getArgo,
+  getScenarios,
+  getDeps,
+  restartSession,
+  switchScenario,
+  quitSession,
+  destroyEnvironment,
   type ArgoApplication,
+  type ScenarioSlot,
   type GitStatus,
   type PublicTask,
   type ScenarioMeta,
@@ -41,6 +48,8 @@ import { AnswersPanel } from "./panels/AnswersPanel.tsx";
 import { HelpPanel } from "./panels/HelpPanel.tsx";
 import { ArgoWidget } from "./panels/ArgoWidget.tsx";
 import { StatusBar } from "./panels/StatusBar.tsx";
+import { PauseMenu } from "./panels/PauseMenu.tsx";
+import { GameOver, TransitionScreen } from "./panels/TransitionScreen.tsx";
 import type { OpenFile } from "./panels/EditorPanel.tsx";
 
 /** Monaco is most of the bundle. It loads after the console has painted, not before. */
@@ -73,6 +82,9 @@ export function App() {
   const [picking, setPicking] = useState(false);
   const [theme, setTheme] = useState(loadSavedTheme);
 
+  const [paused, setPaused] = useState(false);
+  const [scenarios, setScenarios] = useState<ScenarioSlot[]>([]);
+
   useEffect(() => {
     void getScenario()
       .then(setMeta)
@@ -83,6 +95,9 @@ export function App() {
     void getTree()
       .then(setTree)
       .catch(() => setTree([]));
+    void getScenarios()
+      .then(setScenarios)
+      .catch(() => setScenarios([]));
   }, []);
 
   /**
@@ -134,6 +149,54 @@ export function App() {
   useEffect(() => {
     applyChrome(themeById(theme));
   }, [theme]);
+
+  /**
+   * A scenario switch changes everything the right-hand side is showing.
+   *
+   * Keyed on the session id rather than on the scenario, because RESTART keeps
+   * the scenario and still needs the panels reset - and because that is the same
+   * distinction the server makes when it decides a request is new. Without this
+   * the pause menu appears to work and then leaves you looking at the previous
+   * scenario's task list, which is worse than not switching at all.
+   */
+  const sessionId = state?.sessionId;
+  useEffect(() => {
+    if (!sessionId) return;
+    void getScenario().then(setMeta).catch(() => setMeta(null));
+    void getTasks().then(setTasks).catch(() => setTasks([]));
+    void getTree().then(setTree).catch(() => setTree([]));
+    void getScenarios().then(setScenarios).catch(() => undefined);
+    // The workspace was reset to the new scenario's tree, so every open buffer
+    // is a file from the last drill. Monaco pins content per model path, so
+    // leaving them open would show stale text with no way to refresh it.
+    setOpenFiles([]);
+    setActivePath(null);
+    setDirty(new Set());
+    setSeeded(false);
+  }, [sessionId]);
+
+  /**
+   * While a switch is in flight, poll the dependency chain fast.
+   *
+   * The socket pushes deps every ten seconds, which is right for a status line
+   * and far too slow for a progress screen - it would put up to ten seconds of
+   * "nothing is happening" in front of every step.
+   */
+  const phase = state?.phase ?? "active";
+  useEffect(() => {
+    if (phase !== "switching") return;
+    let alive = true;
+    const read = () =>
+      void getDeps()
+        .then((d) => alive && setDeps(d))
+        .catch(() => undefined);
+    read();
+    const timer = window.setInterval(read, 1000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [phase]);
 
   const openFile = useCallback((path: string) => {
     setActivePath(path);
@@ -213,6 +276,20 @@ export function App() {
       .then(setState)
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Only when the menu is closed: while it is open it owns Escape, because
+      // Escape inside the destroy confirmation has to step back rather than
+      // dismiss the whole thing.
+      if (e.key === "Escape" && !paused && phase === "active") {
+        e.preventDefault();
+        setPaused(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paused, phase]);
 
   const markDirty = useCallback((path: string) => {
     setDirty((prev) => (prev.has(path) ? prev : new Set(prev).add(path)));
@@ -351,7 +428,59 @@ export function App() {
         onOpenThemes={() => setPicking(true)}
         cursor={activePath ? cursor : null}
         language={activePath ? languageFor(activePath) : null}
+        onExit={() => setPaused(true)}
       />
+
+      {/* The three lifecycle surfaces, in the order they can occur. A switch or an
+          ending outranks the menu: once the server has moved on, a menu offering
+          to move it again is offering something that no longer applies. */}
+      {phase === "switching" && state && (
+        <TransitionScreen
+          state={state}
+          deps={deps}
+          {...(() => {
+            const t = scenarios.find((x) => x.id === state.target);
+            return t ? { targetTitle: `${t.id} - ${t.title}` } : {};
+          })()}
+        />
+      )}
+
+      {(phase === "ended" || phase === "destroy-requested") && state && (
+        <GameOver
+          state={state}
+          passed={state.passed.length}
+          total={tasks.length}
+          onReplay={() => void restartSession().catch(() => undefined)}
+          onPick={() => setPaused(true)}
+        />
+      )}
+
+      {paused && phase === "active" && (
+        <PauseMenu
+          state={state}
+          scenarios={scenarios}
+          passed={state?.passed.length ?? 0}
+          total={tasks.length}
+          git={git}
+          onResume={() => setPaused(false)}
+          onRestart={() => {
+            setPaused(false);
+            void restartSession().catch(() => undefined);
+          }}
+          onSwitch={(target) => {
+            setPaused(false);
+            void switchScenario(target).catch(() => undefined);
+          }}
+          onQuit={() => {
+            setPaused(false);
+            void quitSession().catch(() => undefined);
+          }}
+          onDestroy={() => {
+            setPaused(false);
+            void destroyEnvironment().catch(() => undefined);
+          }}
+        />
+      )}
 
       {picking && (
         <ThemePicker

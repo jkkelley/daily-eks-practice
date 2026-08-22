@@ -101,6 +101,16 @@ close-out
 ## Hard rules
 
 1. **Never run `terraform apply`, `make up/apply/down`, or otherwise touch real AWS without explicit user approval.** The user drives all applies and destroys. Plans and validation are fine.
+
+   **The one sanctioned exception, granted by the user on 2026-08-21 and narrow on purpose: the drill GUI's `SHUT IT DOWN` entry.** It is written here rather than left implicit, because an unwritten exception does not narrow a rule, it voids it - the next reader finds code that destroys AWS resources, finds a rule saying that never happens, and concludes the rule is decorative. Every clause below is load-bearing and none of them may be dropped without asking again.
+
+   - The learner types the literal string `DESTROY` in the browser, and **the server re-checks it**. A confirmation enforced only in the client is a suggestion.
+   - **The pod destroys nothing.** It writes `phase: "destroy-requested"` into a ConfigMap. The destroy is carried out by `scripts/drill-watch.py`, a process the user started themselves, on their own laptop, in their own checkout, against the Terraform state that lives there.
+   - The watcher prints a ten-second countdown naming what is about to go, and `ctrl-c` aborts it, so the last gate is in the terminal the user is sitting at. `DRILL_ALLOW_DESTROY=0` disarms the branch entirely.
+   - It runs `make down`, so `scripts/pre-destroy.py` runs first and exits 1 rather than destroying into a mess. The safe teardown path is not bypassed - it is the thing being invoked.
+
+   This exception does **not** generalise. An agent may still never run a destroy on its own initiative, and nothing else in this repo may acquire a "the user pre-approved it" path without the user approving that path specifically.
+
 2. **Config-driven - no defaults, no hardcoding.** Every Terraform variable has NO default; all values live in `scripts/config.toml` (`[common]` + `[dev]`). To add a value: put it in `scripts/config.example.toml` (documented) AND declare the default-less variable threaded through env -> `modules/stack` -> the module. Never write a `default =`. Run Terraform through `scripts/bootstrap.py` / `make`, never bare.
 3. **No PII / personal values in git.** No AWS account ids, profile names, real domains, or repo-owner strings outside `scripts/config.toml` (git-ignored) and generated files. The Argo CD Application is generated from the user's git remote (`scripts/gen-argocd-app.py`), never committed.
 4. **Test through the sandbox.** Terraform changes: `make -f Makefile.test test` and a ministack plan (`make -f Makefile.test ministack`) via the vendored `container-sandbox` skill (`.claude/skills/container-sandbox/SKILL.md`). Helm chart changes: `make -f Makefile.test helm-lint helm-template` - helm runs INSIDE Podman, do not assume a local helm binary. No real AWS.

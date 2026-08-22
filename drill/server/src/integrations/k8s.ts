@@ -51,6 +51,41 @@ export interface K8sReader {
   ): Promise<DeploymentSnapshot | undefined>;
   /** How many ready addresses the Service's Endpoints carries. */
   readEndpoints(name: string, namespace: string): Promise<number | undefined>;
+  /**
+   * A ConfigMap's `data`, for the laptop's half of the two-object contract.
+   *
+   * Reading `drill-request` is how the server learns that `make scenario N=06`
+   * happened, or that the watcher finished restoring a saved session. It is a
+   * read, so it belongs on the reader - the WRITE side is `K8sStateWriter`, and
+   * the two are separate types on purpose.
+   */
+  readConfigMap(
+    name: string,
+    namespace: string,
+  ): Promise<Record<string, string> | undefined>;
+}
+
+/**
+ * Writing the server's OWN state back. A separate interface, on purpose.
+ *
+ * `K8sReader` above says nothing the GUI does on the user's behalf mutates, and
+ * that rule is what stops a widget from passing a task the learner never
+ * performed - the same rule that keeps stage and commit buttons off the source
+ * control view. The server mirroring its own session into a ConfigMap is not an
+ * action on the user's behalf; it is the process's own bookkeeping.
+ *
+ * A distinct type is what makes that distinction checkable rather than a comment
+ * somebody has to believe. A panel that takes a `K8sReader` cannot be handed a
+ * writer, and a lifecycle route that takes a `K8sStateWriter` cannot be handed a
+ * reader. If these were methods on one interface, "read-only" would be a
+ * convention, and conventions are what this file exists to stop relying on.
+ */
+export interface K8sStateWriter {
+  writeConfigMap(
+    name: string,
+    namespace: string,
+    data: Record<string, string>,
+  ): Promise<void>;
 }
 
 /**
@@ -133,7 +168,76 @@ export function clusterReader(serviceAccount = "drill"): K8sReader {
           0,
         );
       }),
+
+    readConfigMap: (name, namespace) =>
+      read(`configmap ${namespace}/${name}`, serviceAccount, async () => {
+        const cm = await core.readNamespacedConfigMap({ name, namespace });
+        // `data` is absent rather than `{}` on a ConfigMap with no keys, and an
+        // empty ConfigMap is a real state here - the laptop creates it before it
+        // has anything to put in it. `{}` and "not there" must stay different.
+        return cm.data ?? {};
+      }),
   };
+}
+
+/**
+ * A ConfigMap writer backed by the pod's own ServiceAccount.
+ *
+ * Read, then replace, and create on 404. A blind create fails on the second write
+ * and a blind replace fails on the first, and both failures look like "the cluster
+ * is broken" rather than like the ordinary lifecycle they actually are.
+ *
+ * Only `data` is replaced - labels and anything else on the object survive, so a
+ * ConfigMap that Terraform or a future controller also annotates does not get its
+ * metadata stripped every ten seconds.
+ */
+export function clusterWriter(serviceAccount = "drill"): K8sStateWriter {
+  const kc = new KubeConfig();
+  kc.loadFromCluster();
+  const core = kc.makeApiClient(CoreV1Api);
+
+  return {
+    async writeConfigMap(name, namespace, data) {
+      const existing = await read(
+        `configmap ${namespace}/${name}`,
+        serviceAccount,
+        () => core.readNamespacedConfigMap({ name, namespace }),
+      );
+
+      if (existing === undefined) {
+        await core.createNamespacedConfigMap({
+          namespace,
+          body: { metadata: { name, namespace }, data },
+        });
+        return;
+      }
+
+      await core.replaceNamespacedConfigMap({
+        name,
+        namespace,
+        body: { ...existing, data },
+      });
+    },
+  };
+}
+
+/**
+ * A writer if we are in a cluster, and `undefined` if we are not.
+ *
+ * Same shape and same reason as `createReader`: on a laptop there is no cluster,
+ * `make -f Makefile.test drill-dev` still has to work, and a server that refused
+ * to start without somewhere to mirror its state would trade a working local
+ * development path for a feature nobody can use locally anyway.
+ */
+export function createWriter(
+  env: NodeJS.ProcessEnv = process.env,
+): K8sStateWriter | undefined {
+  if (!env.KUBERNETES_SERVICE_HOST) return undefined;
+  try {
+    return clusterWriter(env.DRILL_SERVICE_ACCOUNT ?? "drill");
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -56,6 +56,22 @@ export interface DependencyStatus {
   detail: string;
 }
 
+/**
+ * Where a session is in its lifecycle.
+ *
+ * This is the channel the pod and the laptop talk through. The server writes it
+ * into the `drill-state` ConfigMap; `scripts/drill-watch.py` reads it and is what
+ * actually acts on the two terminal phases, because a pod can write an intent but
+ * cannot reach a process on somebody's laptop.
+ *
+ * `destroy-requested` is the drill GUI's `SHUT IT DOWN`, and it is the one
+ * sanctioned exception to this repo's rule that a destroy is always driven by
+ * hand. Read the exception in CLAUDE.md hard rule 1 before touching anything that
+ * produces this value - every clause of it is load-bearing.
+ */
+export type SessionPhase =
+  "active" | "switching" | "ended" | "destroy-requested";
+
 /** Live drill state. Mirrored into the drill-state ConfigMap. */
 export interface SessionState {
   scenario: string;
@@ -64,6 +80,26 @@ export interface SessionState {
   currentTaskId: string;
   passed: string[];
   attempts: Attempt[];
+  phase: SessionPhase;
+  /**
+   * The scenario being converged to. Set only while `phase` is `switching`.
+   *
+   * Deliberately separate from `scenario`, which keeps naming the scenario the
+   * learner is actually in until the switch completes. Overwriting `scenario` on
+   * intent rather than on arrival would make a failed or slow switch look like it
+   * had already happened, and the save file would be written under the wrong id.
+   */
+  target?: string;
+  /** Set when the phase became terminal. */
+  endedAt?: string;
+  /**
+   * How many of the oldest attempts were dropped to fit the ConfigMap's 1 MiB cap.
+   *
+   * Present and non-zero means this mirror is not the whole history. Recorded
+   * rather than dropped silently: a save file that quietly is not the whole story
+   * is the failure this project has now been bitten by three times.
+   */
+  attemptsDropped?: number;
 }
 
 /** One submission. Append-only: nothing here is ever rewritten or deleted. */
