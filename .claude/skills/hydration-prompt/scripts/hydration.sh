@@ -55,10 +55,13 @@ hydration.sh <command> [options]
   latest   --project DIR [--id-only | --title-only | --path]
            Print the newest entry. This is what an incoming agent reads.
 
-  command  --project DIR [--id WO-ID] [--title TITLE]
-           Print the claude -p block that starts the next session. With neither
-           flag, both are read out of the newest entry, which is the form to
-           prefer - it cannot disagree with the file it points at.
+  command  --project DIR [--id WO-ID] [--title TITLE] [--width N] [--oneline]
+           Print the claude command that starts the next session, folded at
+           N columns (default 68) with a real backslash at every break and
+           continuations flush left, so no renderer gets to choose where it
+           wraps. With neither id nor title, both are read out of the newest
+           entry - the form to prefer, since it cannot disagree with the file
+           it points at. --oneline emits it unfolded, for scripting.
 
   check    --project DIR [--body-file FILE]
            Validate structure. With --body-file, validate that file instead of
@@ -150,6 +153,84 @@ hp_check_body() {
 }
 
 # ---------------------------------------------------------------------------
+# hp_fold - lay a command out one argument per line, folding anything still too
+# long, so that no renderer ever gets to choose where it breaks.
+#
+# WHY IT IS FOLDED AT ALL.
+# A one-line command is not safe. Every surface it travels through - a chat
+# transcript, a terminal, a markdown pane - soft-wraps it at ITS width, and a
+# copy taken out of that surface can carry the break with it. The break lands
+# wherever that renderer decided, usually the middle of a quoted string, and the
+# first fragment is normally a syntactically VALID command that does the wrong
+# thing, so the shell runs it rather than complaining.
+#
+# WHY ONE ARGUMENT PER LINE, RATHER THAN A GREEDY FILL.
+# A greedy fill is correct but unreadable, and it is fragile in a way that only
+# shows up later: it once produced
+#
+#     you've read it." --permission-mode bypassPermissions -n "Session: \
+#
+# where an argument ends mid-line and two more begin behind it. Add a flag and it
+# lands wherever the fill happens to put it. Argument-per-line means a new flag
+# is a new line and nothing else moves. Newlines are free; a command nobody can
+# read is not.
+#
+# WHY THE JOIN IS EXACT.
+# A backslash-newline is removed by the shell inside double quotes as well as
+# outside. Between arguments the line ends "text \" so the space survives and the
+# arguments stay separate. Inside an argument a break at a space keeps that space
+# before the backslash; a token longer than the width breaks mid-token and
+# rejoins with no space invented, which is why a long path may split anywhere.
+#
+# CONTINUATIONS START AT COLUMN 0.
+# An indent wastes width, and a copy that loses the indent is indistinguishable
+# from one that did not. Flush left has nothing to lose.
+#
+# Never single-quote anything passed through here: inside single quotes a
+# backslash is literal and the continuation would become part of the string.
+hp_fold() {
+  local width=$1; shift
+  (( width > 24 )) || width=24
+  # Every emitted body is kept to width-2 so the trailing " \\" still fits.
+  local limit=$(( width - 2 ))
+
+  local -a text=() kind=()      # kind: 0 mid-token, 1 space then backslash, 2 final
+  local seg rest chunk head
+  local nsegs=$# i=0
+
+  for seg in "$@"; do
+    i=$(( i + 1 ))
+    rest=$seg
+    while (( ${#rest} > limit )); do
+      chunk=${rest:0:limit}
+      if [[ $chunk == *" "* && ${chunk% *} != "" ]]; then
+        head=${chunk% *}                  # up to, not including, the last space
+        text+=("$head"); kind+=(1)        # keep that space before the backslash
+        rest=${rest:$(( ${#head} + 1 ))}  # and drop it from the remainder
+      else
+        head=$chunk                       # a token longer than the width
+        text+=("$head"); kind+=(0)        # no space: the join must not invent one
+        rest=${rest:${#chunk}}
+      fi
+    done
+    if (( i < nsegs )); then
+      text+=("$rest"); kind+=(1)          # a space, because another argument follows
+    else
+      text+=("$rest"); kind+=(2)          # the end: no backslash at all
+    fi
+  done
+
+  local n=${#text[@]} k
+  for (( k = 0; k < n; k++ )); do
+    case ${kind[k]} in
+      2) printf '%s\n'     "${text[k]}" ;;
+      1) printf '%s \\\n' "${text[k]}" ;;
+      0) printf '%s\\\n'  "${text[k]}" ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
 # commands
 
 cmd_init() {
@@ -222,7 +303,7 @@ cmd_latest() {
 # derived here rather than typed, so the command that comes back is always
 # runnable and always points at a file that exists.
 cmd_command() {
-  local project=$1 id=$2 title=$3 full
+  local project=$1 id=$2 title=$3 oneline=$4 width=$5 full
   full="$(cd "$project" 2>/dev/null && pwd)/HYDRATION.md" \
     || die "$EX_IO" "no such directory: $project"
   [[ -f $full ]] || die "$EX_IO" "no HYDRATION.md at $full"
@@ -234,27 +315,59 @@ cmd_command() {
     id=${id:-$(cmd_latest "$project" id-only)}
     title=${title:-$(cmd_latest "$project" title-only)}
   }
+
+  # One element per argument. A new flag is a new element and therefore a new
+  # line; nothing else moves.
+  #
+  # THE PROMPT IS POSITIONAL, NOT -p. This used to be `claude -p "<prompt>"`,
+  # which was wrong in the way that looks right: -p is --print, "print response
+  # and exit", so the command ran the hydration prompt headless and quit. The
+  # user never landed in a session, which is the one thing this skill exists to
+  # arrange. `claude [options] [prompt]` takes the prompt as a positional and
+  # starts an interactive session with it already delivered - no paste step, and
+  # the session is actually a session.
+  #
+  # The prompt goes LAST. Options first, then the positional, so adding a flag
+  # never has to step over it.
+  local -a seg
   if [[ -n $id ]]; then
-    cat <<EOF
-claude -p "Read Hydration Prompt located at $full, Process work order $id per its acceptance criteria after you've read it." \\
-  --permission-mode bypassPermissions \\
-  -n "Session: $id - $title"
-EOF
+    seg=(
+      "claude --permission-mode bypassPermissions"
+      "-n \"Session: $id - $title\""
+      "\"Read Hydration Prompt located at $full, Process work order $id per its acceptance criteria after you've read it.\""
+    )
   else
-    # No work order. Two deliberate differences from the shape above, and
-    # neither is an oversight.
+    # No work order, and the command collapses to almost nothing. Every
+    # difference here is deliberate.
     #
-    # The acceptance-criteria clause is dropped, because there are none to
-    # process and pointing it at nothing is worse than leaving it out.
+    # There is no prompt at all. Not a shortened one, not the bare
+    # located-at clause - none. Work outside a ticket has no instruction until
+    # the person starting it writes one, and guessing at it produces a session
+    # confidently pointed at the wrong thing.
     #
-    # The session name is left EMPTY on purpose. Work outside a ticket has no
-    # name until the person starting it decides what this session is - a design
-    # pass, a spike, an investigation - so the slot is left open to be typed at
-    # the moment of pasting. Do not "helpfully" fill it from the entry title.
-    cat <<EOF
-claude -p "Read Hydration Prompt located at $full" \\
-  -n "Session: "
-EOF
+    # bypassPermissions is not carried over: a ticket has a reviewed scope
+    # behind it, an ad-hoc session has none, so it answers for itself.
+    #
+    # The session name is left EMPTY on purpose, for the same reason. Ad-hoc
+    # work has no name until the person starting it decides what this session
+    # is - a design pass, a spike, an investigation - so the slot stays open to
+    # be typed at the moment of pasting. Do not "helpfully" fill it from the
+    # entry title.
+    #
+    # What is left is one argument on one line: a named, empty session the
+    # human then drives. That is the correct amount of scaffolding for work
+    # nobody has scoped yet.
+    seg=(
+      "claude -n \"Session: \""
+    )
+  fi
+
+  if (( oneline )); then
+    local flat="" x
+    for x in "${seg[@]}"; do flat="${flat:+$flat }$x"; done
+    printf '%s\n' "$flat"
+  else
+    hp_fold "$width" "${seg[@]}"
   fi
 }
 
@@ -283,13 +396,15 @@ main() {
   case $cmd in -h|--help|help) usage; exit "$EX_OK" ;; esac
   shift
 
-  local project="" id="" title="" body="" mode="full"
+  local project="" id="" title="" body="" mode="full" oneline=0 width=68
   while (( $# )); do
     case $1 in
       --project)    project=${2:-}; shift 2 ;;
       --id)         id=${2:-}; shift 2 ;;
       --title)      title=${2:-}; shift 2 ;;
       --body-file)  body=${2:-}; shift 2 ;;
+      --oneline)    oneline=1; shift ;;
+      --width)      width=${2:-}; shift 2 ;;
       --id-only)    mode="id-only"; shift ;;
       --title-only) mode="title-only"; shift ;;
       --path)       mode="path"; shift ;;
@@ -305,7 +420,8 @@ main() {
                || die "$EX_USAGE" "add needs --title and --body-file (--id is optional: omit it for work outside a ticket)"
              cmd_add "$project" "$id" "$title" "$body" ;;
     latest)  cmd_latest "$project" "$mode" ;;
-    command) cmd_command "$project" "$id" "$title" ;;
+    command) [[ $width =~ ^[0-9]+$ ]] || die "$EX_USAGE" "--width takes a number"
+             cmd_command "$project" "$id" "$title" "$oneline" "$width" ;;
     check)   cmd_check "$project" "$body" ;;
     count)   cmd_count "$project" ;;
     *)       die "$EX_USAGE" "unknown command: $cmd" ;;

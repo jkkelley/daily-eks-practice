@@ -1,6 +1,7 @@
 ---
 name: hydration-prompt
 description: Writes the prompt that starts the next session, and hands back the exact command to launch it. Maintains HYDRATION.md as a 10-entry sliding window, newest on top. Use at close-out, after CONTEXT_STATE.md is written and before the pull request is opened, or whenever the user asks for a hydration prompt, a handoff, or how to start the next ticket.
+version: 2.0.1
 ---
 
 # Hydration prompt
@@ -137,24 +138,94 @@ hits the same heading a second time cannot tell which copy is current.
 
 ## The launch command
 
-`command` emits this and only this, with every variable derived rather than
-typed:
+`command` emits this, with every variable derived rather than typed, laid out
+**one argument per line** and folded at 68 columns:
 
 ```sh
-claude -p "Read Hydration Prompt located at $FULL_PATH_TO_FILE, Process work order $WO_ID per its acceptance criteria after you've read it." \
-  --permission-mode bypassPermissions \
-  -n "Session: $WO_ID - $WO_TITLE"
+claude --permission-mode bypassPermissions \
+-n "Session: WO-20260819-ca7c - Phase 5: the mothership GUI, its \
+container image, and the first visual" \
+"Read Hydration Prompt located at \
+/home/luna/projects/example/HYDRATION.md, Process work order \
+WO-20260819-ca7c per its acceptance criteria after you've read it."
 ```
 
-`$FULL_PATH_TO_FILE` is always the absolute path to the project's `HYDRATION.md`,
-and the script refuses to print a command pointing at a file that is not there.
+### The prompt is positional. It must never go back to `-p`
 
-Prefer `command --project .` with no other flags. Both values are then read out
-of the newest entry, so the command cannot disagree with the entry it points at.
-Typing them again is a chance to type them differently.
+This used to be `claude -p "<prompt>"`, which was wrong in the way that looks
+right.
 
-Hand back the prompt **and** the command together. The command alone is not
-enough - the user should be able to read what they are about to start.
+`-p` is `--print`: _"print response and exit."_ The command ran the hydration
+prompt headless, printed a reply, and quit. Nobody ever landed in a session,
+which is the one thing this whole skill exists to arrange. It survived as long as
+it did because the failure produces plausible output rather than an error - you
+get a sensible-looking answer in your terminal and no session.
+
+`claude [options] [prompt]` takes the prompt as a **positional argument**, and
+without `-p` that starts an interactive session with the prompt already
+delivered. One command, no paste step, and the session is actually a session.
+
+The prompt goes **last**, after the options, so adding a flag never has to step
+over it. There is a test asserting `-p` and `--print` appear nowhere.
+
+### Why it is folded at all
+
+**A single line is not safe.** Every surface this command travels through - a
+chat transcript, a terminal, a markdown pane - soft-wraps it at _its own_ width,
+and a copy taken out of that surface can carry the break with it. The break lands
+wherever that renderer decided, usually the middle of a quoted string.
+
+The failure mode is the bad kind: the first fragment is normally a syntactically
+**valid** command that does something other than intended, so the shell runs it
+rather than complaining, and the user finds out afterwards.
+
+So the breaks are ours, folded narrow enough that nothing else wants to re-wrap.
+
+### Why one argument per line, rather than a greedy fill
+
+A greedy fill is correct and unreadable, and it is fragile in a way that only
+shows up later. It produced this:
+
+````text
+you've read it." --permission-mode bypassPermissions -n "Session: ```
+
+An argument ends mid-line and two more begin behind it. Add a flag and it lands
+wherever the fill happens to put it.
+
+One argument per line means **a new flag is a new line and nothing else moves**.
+The layout is also the same at every width, because the fold is structural rather
+than width-driven - a two-argument command is two lines even at a width that
+would fit it on one. Newlines are free; a command nobody can read is not.
+
+### Why the join is exact
+
+A backslash-newline is removed by the shell **inside double quotes as well as
+outside**.
+
+Between arguments the line ends `text \` so the space survives and the arguments
+stay separate. Inside an argument, a break at a space keeps that space *before*
+the backslash; a token longer than the width breaks mid-token and rejoins with no
+space invented, which is why a long path may split anywhere.
+
+**Continuations start at column 0.** An indent wastes width, and a copy that
+loses the indent is indistinguishable from one that did not.
+
+Never single-quote anything that goes through the folder. Inside single quotes a
+backslash is literal and the continuation would become part of the string.
+
+`--width N` changes the column, `--oneline` disables folding for scripting.
+
+### Verified against the shell, not against itself
+
+Checking the folder with its own inverse would only prove the two agree with each
+other. `testing/wrap-roundtrip.sh` puts a stub `claude` on `PATH` that prints its
+argv, runs **both** the folded and the unfolded form through a real bash at six
+widths across three command shapes, and compares what each actually delivered.
+
+**128 checks.** They cover argv equality, that no line exceeds the width, that
+every line but the last carries a real continuation and the last does not, that
+continuations are flush left, that no argument ends and another begins on one
+line, and the apostrophe in `you've`, which is where a mis-placed fold surfaces.
 
 ### When there is no work order
 
@@ -162,14 +233,16 @@ Not every session is a ticket. A spike, an investigation, a piece of maintenance
 `--id` is optional, and both the entry and the command adapt:
 
 ```sh
-claude -p "Read Hydration Prompt located at $FULL_PATH_TO_FILE" \
-  -n "Session: "
-```
+claude -n "Session: "
+````
 
-Three deliberate differences from the shape above, none of them an oversight.
+One argument on one line. Three deliberate differences from the shape above,
+none of them an oversight.
 
-The **acceptance-criteria clause is dropped**, because there are none to process
-and pointing it at nothing is worse than leaving it out.
+**There is no prompt at all.** Not a shortened one, not the bare located-at
+clause - none. Work outside a ticket has no instruction until the person starting
+it writes one, and a guessed prompt aims a session at the wrong thing with full
+confidence. A test asserts no prompt leaks onto this path.
 
 **`--permission-mode bypassPermissions` is not carried over.** A ticket has a
 reviewed scope and acceptance criteria behind it; an ad-hoc session has neither,
