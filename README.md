@@ -109,6 +109,32 @@ For hands-on kubectl during drills, export it into your shell first: `eval "$(ma
 
 ---
 
+## Your practice record: `drill-progress/`
+
+Once a scenario is ported to the drill format, `make scenario N=NN` opens a **session** and your progress is saved to `drill-progress/` on this machine.
+
+```
+drill-progress/
+  curriculum.json          running totals across every scenario you've drilled
+  baseline.bundle          cluster git as `make git-seed` left it
+  current.json             which scenario is open right now, if any
+  03/
+    index.json             one results row per session, oldest first
+    sessions/2026-08-19T14-03-11Z/
+      state.json           where the drill got to
+      workspace.bundle     your working tree, as a git bundle
+```
+
+**It is git-ignored, and that is deliberate.** This is your practice record - your attempts, your wrong answers, the shape of how long each card took you. It is personal, and nobody forking this project wants to inherit somebody else's attempt log. It survives because it is on your laptop, not because it is committed.
+
+**It is a state snapshot, not a diary.** It records where the drill got to, not a replay of everything you typed. That is why resuming works at all: `make scenario N=03` converges the environment back to the state in the save file, so it either restores completely or it tells you it could not. There is no half-restored session to debug.
+
+**`workspace.bundle` is a real `git bundle`.** If you ever want your work out of here without the drill, `git clone drill-progress/03/sessions/<id>/workspace.bundle somewhere/` is all it takes.
+
+Nothing in here is ever overwritten or deleted. `make scenario-clean N=03` ends a session and stops the watcher; it does not touch the save files.
+
+---
+
 ## Two ways to deploy
 
 ### A) Locally with Terraform

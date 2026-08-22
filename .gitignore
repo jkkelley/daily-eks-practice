@@ -53,6 +53,13 @@ argocd/generated/
 # ---- kind sandbox kubeconfig (make -f Makefile.test kind-up) ----
 .kubeconfig-kind-sandbox
 
+# ---- your personal drill history (never commit; nobody wants to fork it) ----
+# Holds a git bundle of your own working tree per session. It is your practice
+# record, it is personal, and it survives because it is on your laptop - not
+# because it is committed. This entry exists BEFORE anything can create the
+# directory, so a save file is never one `git add -A` away from being published.
+drill-progress/
+
 # ---- drill GUI (node) ----
 drill/**/node_modules/
 drill/**/dist/
