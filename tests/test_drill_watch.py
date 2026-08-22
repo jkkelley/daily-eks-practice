@@ -288,6 +288,28 @@ def test_unset_means_off_and_nothing_else_does():
         ok("a nonsense action is refused rather than treated as one of the two")
 
 
+def test_the_warn_window_is_a_third_of_the_limit_capped_at_two_minutes():
+    """The only shape that behaves at both ends of the range.
+
+    A flat two minutes is two thirds of a three-minute limit - most of the window
+    spent shouting, which teaches the learner to ignore the one thing they must
+    not ignore. A flat third is twenty minutes of an hour, which is worse the
+    other way. A third, capped, reads sensibly everywhere."""
+    for timeout, expected in [(60, 20), (180, 60), (300, 100), (900, 120), (3600, 120)]:
+        got = dw.default_warn(timeout)
+        check(
+            f"a {dw.human_duration(timeout)} limit warns for {dw.human_duration(expected)}",
+            got == expected,
+        )
+
+    check("even an absurdly short limit still warns", dw.default_warn(2) >= 1)
+
+    p = dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "3m"})
+    check("a 3m limit is 2m quiet then 1m of countdown", p.warn == 60)
+    check("and the user can still override it", 
+          dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "3m", "DRILL_IDLE_WARN": "30s"}).warn == 30)
+
+
 def test_the_warn_window_can_never_exceed_the_timeout():
     """Otherwise the banner is on screen from the first second of every drill,
     which teaches the learner to ignore the one thing they must not ignore."""

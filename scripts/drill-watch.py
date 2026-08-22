@@ -110,9 +110,16 @@ DESTROY_COUNTDOWN = 10
 #: and this one has to be caught by somebody walking back to it.
 IDLE_GRACE_DEFAULT = 60
 
-#: How long before the deadline the learner starts being told. Also how long the
-#: countdown is visible in the GUI.
-IDLE_WARN_DEFAULT = 120
+#: The longest the warning is ever on screen before the deadline. Also how long
+#: the countdown is visible in the GUI.
+#:
+#: The default is `min(IDLE_WARN_CAP, timeout // 3)`, which is the only shape that
+#: behaves at both ends. A flat two minutes is most of a three-minute limit - two
+#: thirds of the window spent shouting, which teaches the learner to ignore the one
+#: thing they must not ignore. A flat third is twenty minutes of an hour, which is
+#: worse in the other direction. A third, capped, gives a minute at 3m, a hundred
+#: seconds at 5m and two minutes at an hour.
+IDLE_WARN_CAP = 120
 
 #: A state older than this is not evidence of anything. If the last successful
 #: read of `drill-state` is staler than the idle timeout plus this margin, the
@@ -200,6 +207,15 @@ class IdlePolicy:
         }
 
 
+def default_warn(timeout: int) -> int:
+    """How long the banner is up, when the user has not said.
+
+    A third of the limit, capped at two minutes, floored at one second so a very
+    short timeout still warns rather than firing with no notice at all.
+    """
+    return max(1, min(IDLE_WARN_CAP, timeout // 3))
+
+
 def idle_policy_from_env(env: dict | None = None) -> IdlePolicy | None:
     """Read DRILL_IDLE_*, or None when the feature is off.
 
@@ -220,9 +236,15 @@ def idle_policy_from_env(env: dict | None = None) -> IdlePolicy | None:
         )
 
     grace = parse_duration(e["DRILL_IDLE_GRACE"]) if e.get("DRILL_IDLE_GRACE") else IDLE_GRACE_DEFAULT
-    warn = parse_duration(e["DRILL_IDLE_WARN"]) if e.get("DRILL_IDLE_WARN") else IDLE_WARN_DEFAULT
-    # A warn window longer than the timeout would put the banner on screen from
-    # the first second of every drill, which trains the learner to ignore it.
+    warn = (
+        parse_duration(e["DRILL_IDLE_WARN"])
+        if e.get("DRILL_IDLE_WARN")
+        else default_warn(timeout)
+    )
+    # An explicit warn window longer than the timeout would put the banner on
+    # screen from the first second of every drill, which trains the learner to
+    # ignore it. The computed default cannot exceed the timeout, but a hand-set
+    # one can, so the clamp stays.
     warn = min(warn, timeout)
 
     return IdlePolicy(timeout=timeout, action=action, grace=grace, warn=warn)

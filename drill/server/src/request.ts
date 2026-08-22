@@ -66,10 +66,15 @@ export function idlePolicyOf(
   return {
     timeoutSeconds: req.idleTimeoutSeconds,
     action: req.idleAction === "destroy" ? "destroy" : "warn",
+    // The fallback mirrors drill-watch.py's `default_warn`: a third of the limit,
+    // capped at two minutes. The watcher always publishes an explicit value, so
+    // this only fires against a hand-written request - but two different answers
+    // to "how long is the banner up" is exactly the kind of quiet disagreement
+    // that makes a countdown untrustworthy.
     warnSeconds:
       typeof req.idleWarnSeconds === "number" && req.idleWarnSeconds > 0
         ? Math.min(req.idleWarnSeconds, req.idleTimeoutSeconds)
-        : Math.min(120, req.idleTimeoutSeconds),
+        : Math.max(1, Math.min(120, Math.floor(req.idleTimeoutSeconds / 3))),
   };
 }
 
