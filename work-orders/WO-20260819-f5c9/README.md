@@ -8,6 +8,5 @@ One level down only. A child of a child is listed in its own directory, not here
 
 | ID | status | pri | waiting on | title |
 |---|---|---|---|---|
-| `WO-20260819-ca7c` | done | p1 | - | [Phase 5: the mothership GUI, its container image, and the first visual](WO-20260819-ca7c-phase-5-the-mothership-gui-its-container-image-a.md) |
 | `WO-20260819-7840` | ready | p1 | - | [Phase 6: session lifecycle, the sync watcher, and the Makefile handover](WO-20260819-7840-phase-6-session-lifecycle-the-sync-watcher-and-t.md) |
 | `WO-20260819-0562` | ready | p2 | WO-20260819-7840 | [Phase 7: live verification on real EKS - APPROVAL GATED, about $6.50 per 30-hour cycle](WO-20260819-0562-phase-7-live-verification-on-real-eks-approval-g.md) |

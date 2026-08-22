@@ -12,8 +12,8 @@
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-5-the-mothership-gui-its-container-image-a",
   "pr": 27,
-  "merge_sha": null,
-  "closed": null,
+  "merge_sha": "62c7d3ce919d4e9d1a6aea50395cc4998176277a",
+  "closed": "2026-08-21",
   "approval": {
     "via": "lavish",
     "at": "2026-08-19"
