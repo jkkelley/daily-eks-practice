@@ -1,9 +1,17 @@
 ---
 name: work-order
 description: Deterministic ticketing for agent handoff. Creates and drives work-orders through a validated lifecycle, organises them as epics with children and a dependency graph, records progress notes, and binds acceptance criteria to Figma wireframe evidence when it exists. Use when the user asks for a ticket, a work-order, an epic, "cut me a ticket", "write this up as work", "what should I work on next", when handing a task to another agent, when adding a note or a dependency to existing work, or says "work-order with a side of figma" (run figma-wireframe first, then feed its output in). Not for prioritising a backlog - that is project-scaffold's BACKLOG.md.
+version: 1.0.1
 ---
 
 # Work Order
+
+> **This copy is read-only.**
+> Skills are vendored into a project as copies, and this may be one.
+> Edit this skill upstream, bump its version, then re-pull it - never edit the copy where it landed.
+> Upstream is `~/dotfiles/claude/skills/work-order/`, or https://github.com/jkkelley/dotfiles/tree/main/claude/skills/work-order if that checkout is not on this machine.
+> `skill-update.sh` replaces the skill's directory rather than merging into it, so a local edit is destroyed by the next update with no conflict and no warning.
+> The registry's content hash cannot catch it either, because a project's copy legitimately differs from upstream.
 
 Tickets an agent can act on without asking a follow-up question. The determinism
 comes from one rule: **the script writes the ticket, never the model.**
@@ -345,13 +353,35 @@ accepts is `--id`. Everything else it discovers:
 `MERGED`, and refuses a `MERGED` with no merge commit. After checking out `main`
 it re-reads the ticket, because the checkout swaps the file for main's copy.
 
-Three phases, each completing before the next: cleanup → close-out PR → cleanup.
-The close-out PR is opened and merged with no prompt, because the ticket's own PR
-is already `MERGED` and what is left is bookkeeping behind a merge a human
-approved. You end on `main` when it succeeds, and back on the branch you started
-on when anything fails - and a failed run is always safe to re-run, which is the
-only repair that should ever be needed. `--dry-run` prints the whole plan and
-every assertion result and executes nothing.
+**One pull request per ticket.** Cleanup, then the archive committed straight to
+`main` and pushed. `close` used to open a second PR whose entire content was a
+file move and a regenerated index; that doubled the review surface for one piece
+of work and bought nothing, because `close` cannot run at all until the ticket's
+own PR is `MERGED` and main's copy says `done`. The record follows the work.
+
+The branch-and-PR route survives as a **fallback**, for a repository that
+protects `main`. Nothing selects it - a rejected push does. It peels the commit
+onto `close-out/<id>`, puts `main` back, opens a PR and merges it. Every step of
+that path is repeatable, because the dead end it was written for is still
+reachable there: an attempt that dies after the branch is cut must never leave a
+ticket only a human can close.
+
+You end on `main` when it succeeds, and back on the branch you started on when
+anything fails - and a failed run is always safe to re-run, which is the only
+repair that should ever be needed. `--dry-run` prints the whole plan and every
+assertion result and executes nothing.
+
+### Where the hydration prompt fits
+
+`close` is step 6 of the one flow, not the end of it:
+
+```text
+CONTEXT_STATE.md -> hydration prompt -> ONE pull request -> merge -> close -> hand back the command
+```
+
+`context-compaction` and `hydration-prompt` both write on the feature branch,
+alongside `done`, so all three ride the ticket's single PR. See the
+`hydration-prompt` skill for the entry format and the launch command.
 
 ## Testing
 
