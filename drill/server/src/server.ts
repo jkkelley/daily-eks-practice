@@ -5,6 +5,20 @@
  * The client sends what the user did; the server decides whether it was right and
  * sends back a verdict and, on failure, a hint. Ship the accept rules to the client
  * and the drill becomes a reading exercise.
+ *
+ * ---- WHAT THIS PROCESS IS ALLOWED TO CHANGE IN THE CLUSTER ----------------
+ *
+ * Exactly one thing: the `drill-state` ConfigMap, which is its own bookkeeping.
+ * It reads plenty and it writes that. It does NOT delete the Argo Application on
+ * QUIT, it does not scale anything, and it certainly does not destroy AWS.
+ *
+ * Every lifecycle action the pause menu offers is expressed as a PHASE written
+ * into that ConfigMap, and `scripts/drill-watch.py` - a process the user started
+ * on their own laptop, in their own checkout - is what acts on it. That is not
+ * indirection for its own sake. It keeps the blast radius of an unauthenticated
+ * cluster-admin web terminal to "it can write its own status", and it is what
+ * makes the SHUT IT DOWN entry a sanctioned exception to CLAUDE.md hard rule 1
+ * rather than a breach of it.
  */
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
@@ -23,12 +37,16 @@ import {
   WorkspaceError,
 } from "./workspace.ts";
 import { registerTerminal } from "./ws.ts";
-import { gitStatus } from "./git.ts";
-import type { K8sReader } from "./integrations/k8s.ts";
+import { gitStatus, resetToRemote } from "./git.ts";
+import type { K8sReader, K8sStateWriter } from "./integrations/k8s.ts";
 import { absentApplication, getApplication } from "./integrations/argo.ts";
 import { resolveDependencies } from "./integrations/deps.ts";
 import { registerProxy } from "./proxy.ts";
 import type { ServerOptions } from "./config.ts";
+import { createStateStore, type StateStore } from "./state.ts";
+import { createSessionHub } from "./session.ts";
+import { readRequest, watchRequest } from "./request.ts";
+import { loadCatalogue, type CatalogueEntry } from "./catalogue.ts";
 
 /**
  * What the server needs beyond its configuration.
@@ -56,6 +74,18 @@ export interface ServerDeps extends ServerOptions {
    * same reason.
    */
   reader?: K8sReader;
+  /**
+   * Write access to the server's OWN state ConfigMap, and nothing else.
+   *
+   * Absent means the session is not mirrored, which is exactly right on a laptop
+   * with no cluster: the drill still runs, it just is not being saved anywhere.
+   * Deliberately a different type from `reader` - see the header of k8s.ts.
+   */
+  writer?: K8sStateWriter;
+  /** How long to wait for the laptop before converging a switch unaided. */
+  switchTimeoutMs?: number;
+  /** Poll interval for `drill-request`. Injected so tests do not wait 2s a time. */
+  requestPollMs?: number;
 }
 
 /** The task shape the browser is allowed to see. */
@@ -77,18 +107,79 @@ function toPublic(task: AnswerTask): PublicTask {
   return out;
 }
 
+/**
+ * A session id in the same format `scripts/progress.py` uses for its directories.
+ *
+ * No colons: the laptop turns this straight into a directory name and Windows 11
+ * is a supported target there. The two formats are not merely similar, they must
+ * be identical - the watcher adopts whatever id arrives, so a mismatch here
+ * creates a save directory the laptop can never find again.
+ */
+export function newSessionId(now: Date = new Date()): string {
+  return now
+    .toISOString()
+    .replace(/\.\d+Z$/, "Z")
+    .replace(/:/g, "-");
+}
+
 export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
-  const answers: AnswerSet = await loadAnswers(opts.scenario, opts.answersDir);
 
-  const state: SessionState = {
-    scenario: opts.scenario,
-    sessionId: process.env.DRILL_SESSION_ID ?? "local",
-    startedAt: new Date().toISOString(),
-    currentTaskId: answers.tasks[0]?.id ?? "",
-    passed: [],
-    attempts: [],
-  };
+  const stateNs = opts.drillNamespace;
+  const store: StateStore | undefined = opts.writer
+    ? createStateStore(opts.writer, stateNs)
+    : undefined;
+
+  const catalogue: CatalogueEntry[] = await loadCatalogue(opts.answersDir);
+
+  // What the laptop asked for wins over the environment. The Deployment sets
+  // DRILL_SCENARIO as a placeholder and says in its own comment that Phase 6's
+  // ConfigMap takes ownership of it - this is where that happens. The env var
+  // stays as the fallback, because it is what makes drill-dev work with no
+  // cluster anywhere.
+  const requested = opts.reader
+    ? await readRequest(opts.reader, stateNs).catch(() => undefined)
+    : undefined;
+
+  let scenario = requested?.scenario ?? opts.scenario;
+  let answers: AnswerSet = await loadAnswers(scenario, opts.answersDir);
+
+  const hub = createSessionHub(
+    {
+      scenario,
+      sessionId:
+        requested?.sessionId ?? process.env.DRILL_SESSION_ID ?? "local",
+      startedAt: new Date().toISOString(),
+      currentTaskId: answers.tasks[0]?.id ?? "",
+      passed: [],
+      attempts: [],
+      phase: "active",
+    } satisfies SessionState,
+    store,
+  );
+  const state = hub.state;
+
+  /**
+   * Point the whole server at a different scenario, in place.
+   *
+   * `answers` is reassigned and `state` is mutated, never replaced - the websocket
+   * and every route closure captured that object at startup, and swapping it would
+   * leave them pushing a session that quietly stopped being the real one.
+   */
+  async function converge(to: string, sessionId: string): Promise<void> {
+    answers = await loadAnswers(to, opts.answersDir);
+    scenario = to;
+    // The PVC outlives the switch - the init container clones once and leaves an
+    // existing workspace alone on purpose - so the working tree has to be pulled
+    // forward to whatever cluster git now holds. Without this the learner lands
+    // in the new scenario looking at the old one's finished tree.
+    await resetToRemote(opts.workspaceDir);
+    await hub.converge({
+      scenario: to,
+      sessionId,
+      firstTaskId: answers.tasks[0]?.id ?? "",
+    });
+  }
 
   app.get("/healthz", async () => ({ ok: true }));
 
@@ -104,6 +195,13 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
     needs: answers.needs,
     ticket: answers.ticket,
   }));
+
+  // The pause menu's contents: every scenario the curriculum has, and whether it
+  // can be drilled yet. Id, title and a boolean - it must never grow a field that
+  // comes from inside an answers file.
+  app.get("/api/scenarios", async () =>
+    catalogue.map((e) => ({ ...e, current: e.id === state.scenario })),
+  );
 
   app.get("/api/tasks", async () => answers.tasks.map(toPublic));
 
@@ -129,7 +227,7 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
   );
 
   // The startup chain, so "why is nothing happening" has an answer that is not
-  // "the drill is broken".
+  // "the drill is broken". Also the transition screen's whole content.
   app.get("/api/deps", async () => resolveDependencies(opts));
 
   // The editor opens the file the current task names. It is a route rather than a
@@ -161,7 +259,7 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
       if (!task)
         return reply
           .code(404)
-          .send({ error: `no task ${taskId} in scenario ${opts.scenario}` });
+          .send({ error: `no task ${taskId} in scenario ${state.scenario}` });
 
       const ctx: GradeContext = {
         // Everything this session already got right for THIS task, oldest first.
@@ -199,21 +297,110 @@ export async function createServer(opts: ServerDeps): Promise<FastifyInstance> {
         passed: verdict.passed,
         message: verdict.message,
       };
-      // Append-only. A failed attempt is the record of how you got there, and
-      // deleting it would turn the log into a report card.
-      state.attempts.push(attempt);
 
-      if (verdict.passed && !state.passed.includes(taskId)) {
-        state.passed.push(taskId);
-        const next = answers.tasks.find((t) => !state.passed.includes(t.id));
-        state.currentTaskId = next?.id ?? "";
-      }
+      // Append-only, and mirrored. A save failure is logged and does NOT fail the
+      // submit: the learner answered correctly, and whether we managed to write a
+      // ConfigMap is our problem, not theirs.
+      await hub.update((s) => {
+        s.attempts.push(attempt);
+        if (verdict.passed && !s.passed.includes(taskId)) {
+          s.passed.push(taskId);
+          const next = answers.tasks.find((t) => !s.passed.includes(t.id));
+          s.currentTaskId = next?.id ?? "";
+        }
+      });
 
       return verdict;
     },
   );
 
-  await registerTerminal(app, opts, state);
+  // -------------------------------------------------------------------------
+  // The pause menu's lifecycle routes.
+  //
+  // These MUTATE, which no other route in this server does. That is not a new
+  // exposure - the terminal beside them is a cluster-admin shell, so anyone who
+  // can reach these can already do strictly more - but it is a change in the
+  // shape of the API, and it is said here rather than discovered.
+  // -------------------------------------------------------------------------
+
+  app.post("/api/session/restart", async () => {
+    await converge(state.scenario, newSessionId());
+    return { ok: true, scenario: state.scenario, sessionId: state.sessionId };
+  });
+
+  app.post<{ Body: { target?: string } }>(
+    "/api/session/switch",
+    async (req, reply) => {
+      const target = req.body?.target;
+      const entry = catalogue.find((e) => e.id === target);
+      if (!target || !entry)
+        return reply
+          .code(400)
+          .send({ error: `no scenario ${target ?? "(none given)"}` });
+      if (!entry.ported)
+        return reply.code(409).send({
+          error: `scenario ${target} - ${entry.title} is not ported to the drill format yet, so there is nothing to grade`,
+        });
+
+      // Hand off to the laptop, which owns the save files and is the only side
+      // that can restore one. It bundles the current session FIRST - that
+      // ordering is the watcher's, and getting it wrong saves the next
+      // scenario's baseline under this session's id.
+      await hub.setPhase("switching", target);
+
+      // ...but do not hang forever if nobody is listening. A learner running the
+      // pod without the laptop watcher gets a fresh session and is told plainly
+      // that nothing was restored, which beats a transition screen that never ends.
+      const waitMs = opts.switchTimeoutMs ?? 60_000;
+      const timer = setTimeout(() => {
+        if (state.phase !== "switching" || state.target !== target) return;
+        void converge(target, newSessionId());
+      }, waitMs);
+      timer.unref?.();
+
+      return { ok: true, target };
+    },
+  );
+
+  app.post("/api/session/quit", async () => {
+    await hub.setPhase("ended");
+    return { ok: true, scenario: state.scenario, passed: state.passed.length };
+  });
+
+  app.post<{ Body: { confirm?: string } }>(
+    "/api/session/destroy",
+    async (req, reply) => {
+      // Re-checked HERE, not only in the browser. A confirmation enforced in the
+      // client is a suggestion; this route is the boundary, and it is the one
+      // route in this repo that can end in `terraform destroy`. See CLAUDE.md
+      // hard rule 1 and the exception written into it.
+      if (req.body?.confirm !== "DESTROY")
+        return reply.code(400).send({
+          error:
+            'tearing the environment down needs confirm: "DESTROY", exactly',
+        });
+      await hub.setPhase("destroy-requested");
+      return { ok: true };
+    },
+  );
+
+  // The laptop's side of the handshake. Any request naming a session id we are
+  // not already running converges us onto it - which covers `make scenario N=06`,
+  // and covers the watcher answering a switch we asked for.
+  if (opts.reader) {
+    const stop = watchRequest(
+      opts.reader,
+      stateNs,
+      state.sessionId,
+      async (req) => {
+        await converge(req.scenario, req.sessionId);
+      },
+      { ...(opts.requestPollMs ? { intervalMs: opts.requestPollMs } : {}) },
+    );
+    app.addHook("onClose", async () => stop());
+  }
+
+  await registerTerminal(app, opts, hub);
   await registerProxy(app, {
     ...(opts.argoUpstream ? { argo: opts.argoUpstream } : {}),
     ...(opts.grafanaUpstream ? { grafana: opts.grafanaUpstream } : {}),

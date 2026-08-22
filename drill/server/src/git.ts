@@ -165,3 +165,43 @@ export async function gitStatus(workspaceDir: string): Promise<GitStatus> {
 
   return { repo: true, branch, ahead, behind, files };
 }
+
+/**
+ * Point the workspace at whatever cluster git now holds, discarding local state.
+ *
+ * Called on a scenario switch, and only then. The workspace PVC survives the
+ * switch - the init container clones once, at first pod start, and deliberately
+ * leaves an existing workspace alone - so without this the learner lands in
+ * scenario 06 looking at scenario 03's finished working tree.
+ *
+ * ---- THIS DISCARDS UNCOMMITTED WORK, AND THAT IS THE HONEST BEHAVIOUR -----
+ *
+ * The save file is a `git bundle` of CLUSTER GIT. Anything the learner edited and
+ * did not commit and push was never in it and never could be, and pretending
+ * otherwise would be worse: it would mean a resume that silently restores some of
+ * your work. The drill's own subject is the gap between saved, committed and
+ * pushed, so this is the lesson rather than a limitation of it - but the GUI must
+ * SAY SO before it gets here, which is why the pause menu reads
+ * `GET /api/git/status` and warns on a dirty tree before it offers to switch.
+ *
+ * Returns false rather than throwing when there is no repo or no remote. A
+ * workspace that is not a clone is a broken deployment, not a reason to lose the
+ * session that is currently running fine.
+ */
+export async function resetToRemote(workspaceDir: string): Promise<boolean> {
+  if (!(await isRepoRoot(workspaceDir))) return false;
+  const git = (...args: string[]) =>
+    run("git", ["-C", resolve(workspaceDir), ...args], { maxBuffer: 8 << 20 });
+  try {
+    await git("fetch", "--prune", "origin");
+    // `origin/HEAD` is frequently unset on a bare-served clone, so main is named
+    // explicitly - the same branch git-seed publishes and Argo tracks.
+    await git("reset", "--hard", "origin/main");
+    // -x as well as -d: a switch has to clear ignored build output too, or a
+    // `helm template > out.yaml` from the previous drill survives into the next.
+    await git("clean", "-fdx");
+    return true;
+  } catch {
+    return false;
+  }
+}

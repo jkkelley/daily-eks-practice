@@ -208,6 +208,37 @@ def new_session(scenario: str, started_at: datetime | None = None) -> Path:
     return d
 
 
+def ensure_session(scenario: str, session_id: str) -> Path:
+    """Adopt a session id that was minted somewhere else, and make it current.
+
+    The pause menu's RESTART and SWITCH mint an id inside the pod, so the first
+    this side hears of a session is a mirrored state naming one. Without this
+    those sessions have nowhere on disk to live and are simply never saved - and
+    it is why the id format is pinned identically on both sides of the contract
+    rather than merely being similar.
+
+    Idempotent: an id that already exists is left exactly as it is.
+    """
+    d = session_dir(scenario, session_id)
+    if d.is_dir():
+        return d
+    d.mkdir(parents=True, exist_ok=True)
+    idx = _index(scenario)
+    if not any(r.get("session") == session_id for r in idx.get("results", [])):
+        idx.setdefault("results", []).append(
+            {
+                "session": session_id,
+                "startedAt": datetime.now(timezone.utc).isoformat(),
+                "passed": 0,
+                "total": 0,
+                "endedAt": None,
+            }
+        )
+    idx["current"] = session_id
+    write_atomic(index_path(scenario), idx)
+    return d
+
+
 def current_session(scenario: str) -> str | None:
     return _index(scenario).get("current")
 

@@ -7,7 +7,7 @@
  */
 import { loadConfig } from "./config.ts";
 import { createServer } from "./server.ts";
-import { createReader } from "./integrations/k8s.ts";
+import { createReader, createWriter } from "./integrations/k8s.ts";
 import { gitCommittedReader } from "./committed.ts";
 
 export const VERSION = "0.0.0";
@@ -21,6 +21,13 @@ const opts = loadConfig(process.env);
 // reader and a reader that is explicitly nothing are not the same statement.
 const reader = createReader(process.env);
 
+// The other half, and a deliberately different type: this one may write the
+// `drill-state` ConfigMap and nothing else in the cluster. Absent outside a
+// cluster, which means the session simply is not mirrored anywhere - the drill
+// still runs, it is just not being saved, which is the correct behaviour on a
+// laptop with no laptop-side watcher either.
+const writer = createWriter(process.env);
+
 // The GitOps half of the grader. Always wired: it answers `undefined` - "not known,
 // so not graded" - whenever the workspace has no reachable remote, which is exactly
 // the preview case. Leaving it out on a laptop and in on a pod would mean the drill
@@ -30,6 +37,7 @@ const readCommitted = gitCommittedReader({ workspaceDir: opts.workspaceDir });
 const app = await createServer({
   ...opts,
   ...(reader ? { reader } : {}),
+  ...(writer ? { writer } : {}),
   readCommitted,
 });
 

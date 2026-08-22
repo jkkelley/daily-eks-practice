@@ -43,6 +43,7 @@ async function listening(): Promise<{
     scenario: "03",
     argoNamespace: "argocd",
     argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
   });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const { port } = app.server.address() as AddressInfo;
