@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run build -w @drill/shared && npm run test --workspaces --if-present",
     "typecheck": "npm run build -w @drill/shared && npm run typecheck --workspaces --if-present"
   }
 }

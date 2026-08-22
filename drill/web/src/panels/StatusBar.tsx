@@ -1,9 +1,13 @@
 import type { SessionState } from "@drill/shared";
+import type { IdleView } from "../lib/idle.ts";
+import { clockDuration } from "../lib/idle.ts";
 
 interface Props {
   state: SessionState | null;
   total: number;
   connected: boolean;
+  /** Null when the laptop published no idle limit. */
+  idle: IdleView | null;
   themeLabel: string;
   onOpenThemes: () => void;
   /** Absent when nothing is open in the editor. */
@@ -17,6 +21,7 @@ export function StatusBar({
   state,
   total,
   connected,
+  idle,
   themeLabel,
   onOpenThemes,
   cursor,
@@ -42,6 +47,27 @@ export function StatusBar({
         </strong>{" "}
         passed
       </span>
+
+      {/* Present whenever a limit exists at all, not only inside the warn window.
+          A countdown that appears only once it is nearly too late teaches the
+          learner that the clock is a surprise; one that is always visible makes
+          it a fact of the environment, which is what it is. */}
+      {idle && (
+        <>
+          <span className="sep" />
+          <span
+            className={`idleclock${idle.warning ? " warning" : ""}`}
+            title={
+              idle.action === "destroy"
+                ? "Idle limit: the cluster tears itself down when this reaches zero"
+                : "Idle limit: warn only - nothing will be destroyed"
+            }
+          >
+            idle {clockDuration(idle.secondsLeft)}
+            {idle.action === "warn" ? " (warn)" : ""}
+          </span>
+        </>
+      )}
 
       <span className="grow" />
 

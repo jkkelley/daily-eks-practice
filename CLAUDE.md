@@ -102,14 +102,29 @@ close-out
 
 1. **Never run `terraform apply`, `make up/apply/down`, or otherwise touch real AWS without explicit user approval.** The user drives all applies and destroys. Plans and validation are fine.
 
-   **The one sanctioned exception, granted by the user on 2026-08-21 and narrow on purpose: the drill GUI's `SHUT IT DOWN` entry.** It is written here rather than left implicit, because an unwritten exception does not narrow a rule, it voids it - the next reader finds code that destroys AWS resources, finds a rule saying that never happens, and concludes the rule is decorative. Every clause below is load-bearing and none of them may be dropped without asking again.
+   **There are exactly two sanctioned exceptions, both granted explicitly by the user, both narrow on purpose, and both written here rather than left implicit** - because an unwritten exception does not narrow a rule, it voids it: the next reader finds code that destroys AWS resources, finds a rule saying that never happens, and concludes the rule is decorative. Every clause under each is load-bearing and none of them may be dropped without asking again.
+
+   **Exception 1, granted 2026-08-21: the drill GUI's `SHUT IT DOWN` entry.**
 
    - The learner types the literal string `DESTROY` in the browser, and **the server re-checks it**. A confirmation enforced only in the client is a suggestion.
    - **The pod destroys nothing.** It writes `phase: "destroy-requested"` into a ConfigMap. The destroy is carried out by `scripts/drill-watch.py`, a process the user started themselves, on their own laptop, in their own checkout, against the Terraform state that lives there.
    - The watcher prints a ten-second countdown naming what is about to go, and `ctrl-c` aborts it, so the last gate is in the terminal the user is sitting at. `DRILL_ALLOW_DESTROY=0` disarms the branch entirely.
    - It runs `make down`, so `scripts/pre-destroy.py` runs first and exits 1 rather than destroying into a mess. The safe teardown path is not bypassed - it is the thing being invoked.
 
-   This exception does **not** generalise. An agent may still never run a destroy on its own initiative, and nothing else in this repo may acquire a "the user pre-approved it" path without the user approving that path specifically.
+   **Exception 2, granted 2026-08-22: idle teardown.** The playground stands itself down after a configurable quiet period, because the control plane bills for as long as it is up and the only thing that stops it is somebody remembering. Every comparable platform - Cloud9, SageMaker Studio, Codespaces, Gitpod - ships one for the same reason.
+
+   Configured entirely on the laptop, on `scripts/drill-watch.py`: `DRILL_IDLE_TIMEOUT` (`90s`, `5m`, `1h`, or bare seconds), `DRILL_IDLE_ACTION` (`warn` or `destroy`), `DRILL_IDLE_GRACE`.
+
+   - **Off unless `DRILL_IDLE_TIMEOUT` is set. There is no default and there must never be one.** A malformed value is fatal, never rounded to something sensible - a destroy timer the user and the machine disagree about is the worst failure available here.
+   - **`warn` is the default action.** Arming it is a second deliberate act by the user, not a consequence of turning the clock on.
+   - **The pod destroys nothing**, exactly as in Exception 1. It stamps `lastActivityAt` and renders the countdown; `scripts/drill-watch.py` decides and acts.
+   - **The deadline is computed only from human input** - a keystroke, a save, a submission. Never from the app's own dependency push, health probe or Argo poll. If chatter counted, an abandoned tab would hold the cluster open forever and the feature would silently never fire.
+   - **State that cannot be read is never grounds to destroy.** An unreachable API and an idle learner are different answers, and only one of them may act.
+   - The countdown is abortable with `ctrl-c` on a longer grace than Exception 1's ten seconds, because here the user is walking back to the keyboard rather than sitting at it. `DRILL_ALLOW_DESTROY=0` disarms it, and it runs `make down`, so `pre-destroy.py` runs first.
+
+   **The gate Exception 1 has and this one cannot: the typed `DESTROY`.** Its whole premise is that nobody is at the keyboard, so there is no one to type anything. What stands in for it is being off by default, warn-by-default, and a countdown the learner can see in the GUI that any keystroke resets. That substitution is the reason this needed approving separately rather than being read as covered by Exception 1.
+
+   Neither exception generalises. An agent may still never run a destroy on its own initiative, and nothing else in this repo may acquire a "the user pre-approved it" path without the user approving that path specifically.
 
 2. **Config-driven - no defaults, no hardcoding.** Every Terraform variable has NO default; all values live in `scripts/config.toml` (`[common]` + `[dev]`). To add a value: put it in `scripts/config.example.toml` (documented) AND declare the default-less variable threaded through env -> `modules/stack` -> the module. Never write a `default =`. Run Terraform through `scripts/bootstrap.py` / `make`, never bare.
 3. **No PII / personal values in git.** No AWS account ids, profile names, real domains, or repo-owner strings outside `scripts/config.toml` (git-ignored) and generated files. The Argo CD Application is generated from the user's git remote (`scripts/gen-argocd-app.py`), never committed.

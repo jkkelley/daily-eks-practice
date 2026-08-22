@@ -222,6 +222,290 @@ def test_finish_closes_the_session_without_deleting_the_save_file():
         )
 
 
+
+# ---------------------------------------------------------------------------
+# The idle clock
+# ---------------------------------------------------------------------------
+
+
+def test_the_duration_parser_takes_the_units_a_human_would_type():
+    for raw, expected in [
+        ("90", 90), ("90s", 90), ("5m", 300), ("1h", 3600),
+        ("30m", 1800), ("2h", 7200), (" 5M ", 300),
+    ]:
+        check(f"{raw!r} parses to {expected}s", dw.parse_duration(raw) == expected)
+
+    check("330s renders back as 5m30s", dw.human_duration(330) == "5m30s")
+    check("3600s renders back as 1h", dw.human_duration(3600) == "1h")
+    check("45s renders back as 45s", dw.human_duration(45) == "45s")
+
+
+def test_a_malformed_duration_is_fatal_and_never_defaulted_around():
+    """The whole point. A typo that becomes some other number is the worst outcome
+    available for a setting whose job is to destroy an environment: the user
+    believes they set one thing, the machine believes another, and the
+    disagreement only surfaces once the cluster is already gone."""
+    for bad_value in ["", "   ", "0", "0s", "5x", "abc", "-5", "5 m", "m", "1.5h"]:
+        try:
+            got = dw.parse_duration(bad_value)
+            bad(f"{bad_value!r} was accepted as {got}s - it must raise instead")
+        except dw.IdleConfigError:
+            ok(f"{bad_value!r} is refused rather than defaulted")
+
+    try:
+        dw.parse_duration("0")
+        bad("zero was accepted")
+    except dw.IdleConfigError as e:
+        check(
+            "and the zero refusal names the way to actually turn it off",
+            "unset" in str(e).lower(),
+        )
+
+
+def test_unset_means_off_and_nothing_else_does():
+    check("no DRILL_IDLE_TIMEOUT at all is off", dw.idle_policy_from_env({}) is None)
+    check("an empty value is off", dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": ""}) is None)
+    check(
+        "whitespace is off",
+        dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "   "}) is None,
+    )
+
+    p = dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "5m"})
+    check("a set value is on", p is not None and p.timeout == 300)
+    check("and defaults to warn, not destroy", p.action == "warn")
+    check("so it is NOT armed by default", not p.armed)
+    check("with the 60s grace, not the 10s SHUT IT DOWN uses", p.grace == 60)
+
+    armed = dw.idle_policy_from_env(
+        {"DRILL_IDLE_TIMEOUT": "5m", "DRILL_IDLE_ACTION": "destroy"}
+    )
+    check("destroy arms it", armed.armed)
+
+    try:
+        dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "5m", "DRILL_IDLE_ACTION": "yes"})
+        bad("a nonsense action was accepted")
+    except dw.IdleConfigError:
+        ok("a nonsense action is refused rather than treated as one of the two")
+
+
+def test_the_warn_window_is_a_third_of_the_limit_capped_at_two_minutes():
+    """The only shape that behaves at both ends of the range.
+
+    A flat two minutes is two thirds of a three-minute limit - most of the window
+    spent shouting, which teaches the learner to ignore the one thing they must
+    not ignore. A flat third is twenty minutes of an hour, which is worse the
+    other way. A third, capped, reads sensibly everywhere."""
+    for timeout, expected in [(60, 20), (180, 60), (300, 100), (900, 120), (3600, 120)]:
+        got = dw.default_warn(timeout)
+        check(
+            f"a {dw.human_duration(timeout)} limit warns for {dw.human_duration(expected)}",
+            got == expected,
+        )
+
+    check("even an absurdly short limit still warns", dw.default_warn(2) >= 1)
+
+    p = dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "3m"})
+    check("a 3m limit is 2m quiet then 1m of countdown", p.warn == 60)
+    check("and the user can still override it", 
+          dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "3m", "DRILL_IDLE_WARN": "30s"}).warn == 30)
+
+
+def test_the_warn_window_can_never_exceed_the_timeout():
+    """Otherwise the banner is on screen from the first second of every drill,
+    which teaches the learner to ignore the one thing they must not ignore."""
+    p = dw.idle_policy_from_env({"DRILL_IDLE_TIMEOUT": "60s", "DRILL_IDLE_WARN": "10m"})
+    check("a warn window longer than the timeout is clamped to it", p.warn == 60)
+
+
+def test_the_verdict_counts_down_and_then_fires():
+    p = dw.IdlePolicy(timeout=300, action="destroy", grace=60, warn=120)
+    at = 1_000_000.0
+    stamped = "2026-08-22T12:00:00+00:00"
+    base = dw._iso_to_epoch(stamped)
+
+    def verdict(elapsed):
+        return dw.idle_verdict(p, stamped, base + elapsed, base + elapsed)
+
+    check("fresh activity is active", verdict(10)[0] == "active")
+    check("halfway is still active", verdict(150)[0] == "active")
+    check("inside the warn window it warns", verdict(200)[0] == "warn")
+    check("and the warn reports the seconds left", verdict(200)[1] == 100)
+    check("at the deadline it fires", verdict(300)[0] == "fire")
+    check("past the deadline it still fires", verdict(999)[0] == "fire")
+
+
+def test_it_never_fires_on_information_it_does_not_have():
+    """`unknown` and `stale` are separate from `active` on purpose, and neither may
+    ever become `fire`. A server too old to stamp lastActivityAt, and an API that
+    stopped answering, are both cases where nobody knows whether a human is
+    working - and not knowing is never grounds to destroy an environment."""
+    p = dw.IdlePolicy(timeout=300, action="destroy", grace=60, warn=120)
+    now = 1_000_000.0
+
+    check(
+        "a state with no lastActivityAt is unknown, not idle",
+        dw.idle_verdict(p, None, now, now)[0] == "unknown",
+    )
+    check(
+        "an unparseable lastActivityAt is unknown, not idle",
+        dw.idle_verdict(p, "yesterday afternoon", now, now)[0] == "unknown",
+    )
+    check(
+        "a state that was never successfully read is stale, not idle",
+        dw.idle_verdict(p, "2026-08-22T12:00:00+00:00", None, now)[0] == "stale",
+    )
+
+    # The one that matters: activity IS old enough to fire, but the reading of it
+    # is old too - which is what an unreachable API looks like from here.
+    stamped = "2026-08-22T12:00:00+00:00"
+    base = dw._iso_to_epoch(stamped)
+    verdict, _ = dw.idle_verdict(p, stamped, base, base + 10_000)
+    check(
+        "an old activity stamp behind a DEAD API is stale, not fire",
+        verdict == "stale",
+    )
+
+    # ...and the same age, read a moment ago, genuinely is idle.
+    verdict, _ = dw.idle_verdict(p, stamped, base + 10_000, base + 10_000)
+    check("the same staleness with a LIVE read does fire", verdict == "fire")
+
+
+def test_the_banner_quotes_the_users_own_number_back_at_them():
+    armed = dw.IdlePolicy(timeout=300, action="destroy", grace=60, warn=120)
+    text = dw.idle_banner(armed, 48, "03")
+    check("it names the configured limit", "5m" in text)
+    check("it names the time left", "48s" in text)
+    check("it says self-terminate, in the armed voice", "SELF-TERMINATES" in text)
+    check("it tells them how to come back", "make scenario N=03" in text)
+    check("it says what resets the clock", "resets the clock" in text)
+    check("and the pun landed", "Hasta la vista" in text)
+
+    warn = dw.IdlePolicy(timeout=300, action="warn", grace=60, warn=120)
+    wtext = dw.idle_banner(warn, 48, "03")
+    check(
+        "in warn mode it says WOULD, because saying WILL would be a lie",
+        "WOULD self-terminate" in wtext and "SELF-TERMINATES" not in wtext,
+    )
+    check(
+        "and it names the flag that arms it",
+        "DRILL_IDLE_ACTION=destroy" in wtext,
+    )
+
+
+
+def test_the_monitor_stands_down_on_anything_that_is_not_a_live_drill():
+    """The clock must not race a switch or a quit that is already under way, and
+    must not act at all on state it does not have."""
+    p = dw.IdlePolicy(timeout=300, action="destroy", grace=60, warn=120)
+    fired = []
+    m = dw.IdleMonitor(p, on_fire=lambda: fired.append(1))
+
+    check("with nothing observed it does nothing", m.tick() == "nothing")
+
+    for phase in ("switching", "ended", "destroy-requested"):
+        m.observe({"phase": phase, "lastActivityAt": "2020-01-01T00:00:00+00:00"})
+        check(f"phase {phase} stands the clock down", m.tick() == "not-active")
+
+    m.observe({"phase": "active"})
+    check("no lastActivityAt is 'unknown', never 'fire'", m.tick() == "unknown")
+    check("and nothing was destroyed", not fired)
+
+
+def test_the_monitor_fires_only_when_armed():
+    """Same elapsed time, same everything, one flag apart. warn must report and
+    NOT call on_fire; destroy must."""
+    stamped = "2026-08-22T12:00:00+00:00"
+    base = dw._iso_to_epoch(stamped)
+    state = {"phase": "active", "scenario": "03", "lastActivityAt": stamped}
+
+    warn_fired = []
+    warn = dw.IdleMonitor(
+        dw.IdlePolicy(timeout=60, action="warn", grace=60, warn=30),
+        on_fire=lambda: warn_fired.append(1),
+    )
+    warn.observe(state)
+    warn._last_read_at = base + 100
+    check("warn mode reports rather than fires", warn.tick(now=base + 100) == "warned-only")
+    check("warn mode called on_fire ZERO times", not warn_fired)
+    check("and warn mode never sets .fired", not warn.fired)
+
+    armed_fired = []
+    armed = dw.IdleMonitor(
+        dw.IdlePolicy(timeout=60, action="destroy", grace=60, warn=30),
+        on_fire=lambda: armed_fired.append(1),
+    )
+    armed.observe(state)
+    armed._last_read_at = base + 100
+    check("armed mode fires", armed.tick(now=base + 100) == "fired")
+    check("and calls on_fire exactly once", len(armed_fired) == 1)
+    check("and records it", armed.fired)
+
+
+def test_the_monitor_counts_down_and_resets_on_activity():
+    stamped = "2026-08-22T12:00:00+00:00"
+    base = dw._iso_to_epoch(stamped)
+    m = dw.IdleMonitor(
+        dw.IdlePolicy(timeout=300, action="destroy", grace=60, warn=120),
+        on_fire=lambda: None,
+    )
+    m.observe({"phase": "active", "scenario": "03", "lastActivityAt": stamped})
+    m._last_read_at = base
+
+    check("early on it is simply active", m.tick(now=base + 10) == "active")
+    m._last_read_at = base + 200
+    check("inside the window it warns", m.tick(now=base + 200) == "warn")
+
+    # The learner comes back and types. The stamp moves, and the clock restarts -
+    # this is the whole contract from the watcher's side.
+    later = "2026-08-22T12:04:00+00:00"
+    m.observe({"phase": "active", "scenario": "03", "lastActivityAt": later})
+    check(
+        "a fresh keystroke puts it back to active",
+        m.tick(now=dw._iso_to_epoch(later) + 5) == "active",
+    )
+
+
+def test_publishing_the_idle_policy_never_clobbers_the_scenario():
+    """drill-request carries BOTH the scenario and the idle policy, and they are
+    written by different call sites. A publish that replaced the object would drop
+    the session id, and the pod would converge onto nothing."""
+    calls = []
+    real_read, real_apply = dw.read_request, dw.apply_request
+    try:
+        dw.read_request = lambda cfg: {"scenario": "03", "sessionId": "s-1"}
+        dw.apply_request = lambda payload: calls.append(payload)
+
+        dw.publish_idle_policy({}, dw.IdlePolicy(timeout=300, action="warn", grace=60, warn=120))
+        check("it wrote once", len(calls) == 1)
+        check("the scenario survived", calls[0].get("scenario") == "03")
+        check("the session id survived", calls[0].get("sessionId") == "s-1")
+        check("and the policy landed", calls[0].get("idleTimeoutSeconds") == 300)
+        check("with the action", calls[0].get("idleAction") == "warn")
+
+        # Turning the feature off must REMOVE the keys, not leave them behind -
+        # a stale policy has the GUI counting down to a teardown no watcher will do.
+        calls.clear()
+        dw.read_request = lambda cfg: {
+            "scenario": "03", "sessionId": "s-1",
+            "idleTimeoutSeconds": 300, "idleAction": "warn", "idleWarnSeconds": 120,
+        }
+        dw.publish_idle_policy({}, None)
+        check("turning it off rewrites the object", len(calls) == 1)
+        check("the idle keys are gone", "idleTimeoutSeconds" not in calls[0])
+        check("and the scenario is still there", calls[0].get("scenario") == "03")
+
+        # Nothing changed: no write at all. A write per tick would churn the object.
+        calls.clear()
+        dw.read_request = lambda cfg: {
+            "scenario": "03", "sessionId": "s-1",
+            "idleTimeoutSeconds": 300, "idleAction": "warn", "idleWarnSeconds": 120,
+        }
+        dw.publish_idle_policy({}, dw.IdlePolicy(timeout=300, action="warn", grace=60, warn=120))
+        check("an unchanged policy writes nothing at all", not calls)
+    finally:
+        dw.read_request, dw.apply_request = real_read, real_apply
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     print(f"tests/test_drill_watch.py - {len(tests)} groups")

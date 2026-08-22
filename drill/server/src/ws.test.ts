@@ -228,3 +228,100 @@ test("the pty log is written where config said, not somewhere derived from it", 
     /teed-to-the-volume/,
   );
 });
+
+test("the idle clock is stamped by human input and by NOTHING else", async () => {
+  // THE load-bearing assertion of the idle-teardown feature.
+  //
+  // If the app's own chatter counted as activity, an abandoned browser tab would
+  // hold the cluster open forever: this socket alone pushes a dependency frame
+  // every ten seconds, and the web app polls on top of that. The feature would
+  // look completely healthy - the field advances, the state mirrors, every other
+  // test passes - and it would never once fire. That is the exact shape of the
+  // vacuous pass this project has now been bitten by four times.
+  const marks: string[] = [];
+  const spy = {
+    mark: () => marks.push("mark"),
+    lastActivityAt: () => new Date().toISOString(),
+    flush: async () => false,
+    stop: () => undefined,
+  };
+
+  const root = await mkdtemp(join(tmpdir(), "drill-idle-"));
+  const workspace = join(root, "workspace");
+  const logDir = await mkdtemp(join(tmpdir(), "drill-idlelog-"));
+  await mkdir(join(workspace, "helm/practice-app"), { recursive: true });
+  await writeFile(join(workspace, "helm/practice-app/values.yaml"), "a: 1\n");
+
+  const app = await createServer({
+    port: 0,
+    host: "127.0.0.1",
+    webRoot: WEB_ROOT,
+    answersDir: ANSWERS_DIR,
+    workspaceDir: workspace,
+    logDir,
+    scenario: "03",
+    argoNamespace: "argocd",
+    argoAppName: "practice-app",
+    drillNamespace: "practice-drill",
+    activity: spy,
+  });
+  await app.listen({ port: 0, host: "127.0.0.1" });
+  const { port } = app.server.address() as AddressInfo;
+  const url = `http://127.0.0.1:${port}`;
+
+  // try/finally, not cleanup after the assertions. A pty keeps the event loop
+  // alive, so a throw before the teardown line makes the whole run HANG for its
+  // full timeout instead of failing - which reads as a broken harness and hides
+  // the very failure the test was written to report. Learned the hard way, twice.
+  let sock: Awaited<ReturnType<typeof connect>> | undefined;
+  try {
+    // createServer stamps once at startup so a just-converged session does not
+    // read as idle since the epoch. Everything after this is what we are judging.
+    const atStartup = marks.length;
+    assert.equal(atStartup, 1, "startup should stamp exactly once");
+
+    sock = await connect(url);
+    await sock.until((m) => m.type === "session", "the session frame");
+    // A dependency frame is pushed on connect and every ten seconds after.
+    await sock.until((m) => m.type === "deps", "the dependency push");
+
+    assert.equal(
+      marks.length,
+      atStartup,
+      "connecting and receiving a dependency push must NOT count as activity",
+    );
+
+    // A resize is not activity either: it fires on mount and on any layout
+    // change, including ones the browser makes on its own, so counting it would
+    // keep the clock reset for a tab nobody is looking at.
+    sock.send({ type: "term:resize", cols: 100, rows: 30 });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(marks.length, atStartup, "a resize must NOT count as activity");
+
+    // A keystroke is.
+    sock.send({ type: "term:input", data: "e" });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(marks.length, atStartup + 1, "a keystroke MUST count");
+
+    // So is saving a file.
+    sock.send({
+      type: "file:save",
+      path: "helm/practice-app/values.yaml",
+      content: "a: 2\n",
+    });
+    await sock.until((m) => m.type === "file:saved", "the save acknowledgement");
+    assert.equal(marks.length, atStartup + 2, "a save MUST count");
+
+    // And so is submitting an answer.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/submit",
+      payload: { taskId: "t1", answer: "kubectl get pods" },
+    });
+    assert.ok(res.statusCode < 500);
+    assert.equal(marks.length, atStartup + 3, "a submission MUST count");
+  } finally {
+    sock?.close();
+    await app.close();
+  }
+});

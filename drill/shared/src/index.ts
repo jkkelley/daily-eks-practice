@@ -100,6 +100,40 @@ export interface SessionState {
    * is the failure this project has now been bitten by three times.
    */
   attemptsDropped?: number;
+  /**
+   * When a HUMAN last did something. The idle clock's only input.
+   *
+   * Stamped by `markActivity` on a keystroke, a save, a submit or a hint request,
+   * and by NOTHING else. Deliberately not touched by the dependency push, the
+   * health probe, the Argo poll or the state mirror's own writes: if the app's
+   * own chatter counted, an abandoned browser tab would hold the cluster open
+   * forever and the idle timeout would silently never fire - which looks exactly
+   * like the feature being broken, and would be.
+   *
+   * Absent means "this server does not report it", never "nobody is here". The
+   * watcher treats the two differently and must keep doing so.
+   */
+  lastActivityAt?: string;
+  /** Published by the laptop into `drill-request`; mirrored here so the GUI can render it. */
+  idle?: IdlePolicyView;
+}
+
+/**
+ * The idle limit the laptop published, so the GUI can count down to the same second.
+ *
+ * The pod does not enforce this and must never try to. It renders it - which is
+ * the point, because the gate the `SHUT IT DOWN` path gets from a typed
+ * confirmation is one the idle path structurally cannot have, and a countdown
+ * nobody can see is not a warning. Enforcement lives in `scripts/drill-watch.py`,
+ * on the laptop, exactly as it does for every other way this repo destroys
+ * anything.
+ */
+export interface IdlePolicyView {
+  timeoutSeconds: number;
+  /** `warn` counts down and does nothing. `destroy` runs `make down`. */
+  action: "warn" | "destroy";
+  /** How long before the deadline the learner starts being told. */
+  warnSeconds: number;
 }
 
 /** One submission. Append-only: nothing here is ever rewritten or deleted. */
@@ -109,4 +143,82 @@ export interface Attempt {
   submitted: string;
   passed: boolean;
   message: string;
+}
+
+
+/* ---- the idle clock ------------------------------------------------------
+ *
+ * Pure, and here rather than in the web app, for two reasons. It is a function of
+ * `SessionState` and nothing else, so it belongs beside the type it reads. And the
+ * web workspace runs no unit tests, so logic that decides when to tell somebody
+ * their environment is about to be destroyed would have had no test home at all -
+ * which is exactly the kind of thing that must not be checked only by looking.
+ *
+ * The countdown is computed from `lastActivityAt` - the SAME field
+ * `scripts/drill-watch.py` computes from - rather than from anything the browser
+ * knows about its own keystrokes. That is deliberate. The browser has fresher
+ * information, and using it would produce a countdown that disagreed with the
+ * process actually holding the axe. A warning that says four minutes while the
+ * watcher believes three is worse than no warning, because it will be trusted.
+ *
+ * The cost is that this reads slightly pessimistic - it warns a few seconds EARLY,
+ * by up to one mirror flush. That is the safe direction, and the only direction
+ * worth being wrong in here.
+ */
+
+export interface IdleView {
+  /** Inside the warn window: show the banner. */
+  warning: boolean;
+  secondsLeft: number;
+  action: "warn" | "destroy";
+  timeoutSeconds: number;
+}
+
+/**
+ * `null` when there is nothing to show, which covers three different situations
+ * that must not be collapsed: no policy published, no activity stamp yet, and a
+ * terminal phase where a countdown would be noise on top of a game-over screen.
+ */
+export function idleView(
+  state: SessionState | null,
+  now: number = Date.now(),
+): IdleView | null {
+  if (!state?.idle) return null;
+  if (!state.lastActivityAt) return null;
+  if (state.phase !== "active") return null;
+
+  const stamped = Date.parse(state.lastActivityAt);
+  if (Number.isNaN(stamped)) return null;
+
+  const { timeoutSeconds, warnSeconds, action } = state.idle;
+  const secondsLeft = Math.max(
+    0,
+    Math.round(timeoutSeconds - (now - stamped) / 1000),
+  );
+
+  return {
+    warning: secondsLeft <= warnSeconds,
+    secondsLeft,
+    action,
+    timeoutSeconds,
+  };
+}
+
+/** `330` -> `5m30s`, matching what drill-watch.py prints, so the two agree on screen. */
+export function humanDuration(seconds: number): string {
+  if (seconds <= 0) return "0s";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  let out = h ? `${h}h` : "";
+  out += m ? `${m}m` : "";
+  if (s || !out) out += `${s}s`;
+  return out;
+}
+
+/** `330` -> `5:30`. The compact form, for the status bar. */
+export function clockDuration(seconds: number): string {
+  const m = Math.floor(Math.max(0, seconds) / 60);
+  const s = Math.floor(Math.max(0, seconds) % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
 }

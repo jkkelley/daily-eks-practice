@@ -65,3 +65,8 @@ drill/**/node_modules/
 drill/**/dist/
 drill/**/.vite/
 drill/**/*.tsbuildinfo
+
+# ---- skill update logs ----
+# Written by skill-versioning's skill-update.sh, one per run, naming a local
+# dotfiles path. Machine-specific and of no use to anyone else who clones this.
+.claude/logs/

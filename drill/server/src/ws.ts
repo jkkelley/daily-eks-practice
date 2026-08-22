@@ -90,10 +90,17 @@ export async function registerTerminal(
         }
         switch (msg.type) {
           case "term:input":
+            // A keystroke is the clearest evidence a human is here, and it is
+            // the reason the idle clock can be trusted at all.
+            opts.activity?.mark();
             return term.write(msg.data);
           case "term:resize":
+            // Deliberately NOT activity. This fires on mount and on any layout
+            // change, including ones the browser makes on its own, so counting
+            // it would keep the idle clock reset for a tab nobody is looking at.
             return term.resize(msg.cols, msg.rows);
           case "file:save":
+            opts.activity?.mark();
             // Acknowledged only once it is on disk. The editor's "saved" indicator
             // means the server wrote the file, never that the browser sent a frame.
             void writeWorkspaceFile(opts.workspaceDir, msg.path, msg.content)
