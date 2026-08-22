@@ -11,7 +11,9 @@ Receiving the bundle with `kubectl exec -i ... /bin/sh -c 'cat > file'` truncate
 surfaces later as "fatal: early EOF" from git. Exec'ing `tee` directly is intact.
 """
 import importlib.util
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +37,11 @@ def bad(m):
     global FAIL
     FAIL += 1
     print(f"  FAIL  {m}")
+
+
+def check(message, condition):
+    """ok/bad, but with the condition passed in rather than branched at each site."""
+    (ok if condition else bad)(message)
 
 
 def test_unbundle_script_is_idempotent():
@@ -99,6 +106,63 @@ def test_stream_command_execs_the_receiver_directly():
             bad(f"stream command is missing {needle!r}")
 
 
+def test_the_drill_tree_holds_the_chart_and_nothing_else():
+    """The load-bearing one: the learner's repo must not contain the answer key.
+
+    Seeding `--all` handed them scenarios/answers/*.toml, docs/ (the plan, which
+    explains every task), drill/ (the grader's own source) and work-orders/. The
+    server strips accept rules from every response; none of that matters if `cat`
+    reaches them in the workspace.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        out = gs.drill_tree(gs.DRILL_PATHS, Path(tmp) / "repo")
+        tracked = subprocess.check_output(
+            ["git", "-C", str(out), "ls-files"], text=True
+        ).split()
+
+    check("the chart is there", any(f.startswith("helm/practice-app/") for f in tracked))
+    check(
+        "values.yaml keeps its path, so Argo's `path: helm/practice-app` resolves",
+        "helm/practice-app/values.yaml" in tracked,
+    )
+    for forbidden in (
+        "scenarios/",
+        "docs/",
+        "drill/",
+        "work-orders/",
+        "scripts/",
+        "terraform/",
+        "CLAUDE.md",
+        "COMPASS.md",
+        "README.md",
+        "PRACTICE_ANSWERS.html",
+    ):
+        check(
+            f"{forbidden} is not in the learner's repository",
+            not any(f == forbidden or f.startswith(forbidden) for f in tracked),
+        )
+    check(
+        "and the answer key specifically is absent",
+        not any("answers" in f for f in tracked),
+    )
+
+
+def test_the_drill_tree_is_a_real_repo_with_one_commit():
+    with tempfile.TemporaryDirectory() as tmp:
+        out = gs.drill_tree(gs.DRILL_PATHS, Path(tmp) / "repo")
+        log = (
+            subprocess.check_output(["git", "-C", str(out), "log", "--oneline"], text=True)
+            .strip()
+            .split("\n")
+        )
+        branch = subprocess.check_output(
+            ["git", "-C", str(out), "rev-parse", "--abbrev-ref", "HEAD"], text=True
+        ).strip()
+
+    check("one baseline commit, not this project's history", len(log) == 1)
+    check("on main, which is what the Application targets", branch == "main")
+
+
 def main():
     for fn in (
         test_unbundle_script_is_idempotent,
@@ -106,6 +170,8 @@ def main():
         test_unbundle_script_honours_the_repo_path_it_is_given,
         test_unbundle_script_cleans_up_the_temp_bundle,
         test_stream_command_execs_the_receiver_directly,
+        test_the_drill_tree_holds_the_chart_and_nothing_else,
+        test_the_drill_tree_is_a_real_repo_with_one_commit,
     ):
         print(f"== {fn.__name__} ==")
         fn()

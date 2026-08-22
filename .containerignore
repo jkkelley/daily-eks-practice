@@ -1,0 +1,27 @@
+# Deny by default.
+#
+# The build context for drill/Containerfile is the REPO ROOT, because the grader
+# reads scenarios/answers/*.toml at runtime and those live above drill/. That puts
+# scripts/config.toml - AWS account id, profile name, your public IP - and
+# .kubeconfig-daily-eks-practice inside the context of an image published PUBLICLY.
+#
+# So this is an allow-list, not an exclude-list. An exclude-list leaks the next
+# secret file somebody adds and says nothing when it does; an allow-list cannot.
+# Only these two trees have any business in the image.
+#
+# Adding a `!` line here is a security decision. tests/test_containerignore.py fails
+# the static suite if one of them would re-admit scripts/, terraform/ or a kubeconfig,
+# and the built-image assertion in plan Task 5.5 Step 4 checks the result rather than
+# the intent.
+*
+!drill/
+!scenarios/answers/
+
+# ...minus the parts of drill/ that must not be in it either. node_modules is a HOST
+# build - glibc or musl depending on who ran it, and node-pty is native - and copying
+# it in would shadow the one `npm ci` builds inside the image. dist/ is stale output
+# for the same reason.
+drill/node_modules/
+drill/*/node_modules/
+drill/*/dist/
+drill/**/*.tsbuildinfo

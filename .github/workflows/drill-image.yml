@@ -1,0 +1,71 @@
+name: drill-image
+
+# Publish the drill GUI image to GHCR.
+#
+# This is the long-term publishing path: it builds from what is on `main` rather
+# than from whatever happened to be on someone's laptop, and it authenticates with
+# the automatic GITHUB_TOKEN - no PAT, no repository secret, nothing to rotate.
+# `make drill-image` exists for iterating locally.
+#
+# THE PACKAGE MUST BE PUBLIC. GHCR packages are private by default even when the
+# repo is public, and the cluster is deliberately configured with no
+# imagePullSecret - the repo is public and the answer key is already committed to
+# it, so the image holds nothing a reader could not already read, and a private
+# package would mean a GitHub credential in the cluster to create, rotate and clean
+# up for no gain. After the first successful run, set the package to Public once.
+
+on:
+  push:
+    branches: [main]
+    # Without this it rebuilds on every documentation commit. Nothing outside these
+    # three trees changes a byte of the image.
+    paths:
+      - "drill/**"
+      - "scenarios/answers/**"
+      - ".github/workflows/drill-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: drill-image
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derived, never hardcoded: the owner string is PII per CLAUDE.md and has no
+      # business in a committed file. Lowercased because a GitHub owner may have
+      # capitals and a registry path may not - the failure is a 403 that reads like
+      # a permissions problem.
+      - name: Compute the image reference
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/daily-eks-practice-drill-gui" >> "$GITHUB_OUTPUT"
+
+      # Context is the repo root, not drill/, because the grader reads
+      # scenarios/answers/*.toml at runtime. /.containerignore is what keeps
+      # scripts/config.toml out of a public image; tests/test_containerignore.py
+      # guards its shape in the static suite.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: drill/Containerfile
+          push: true
+          tags: |
+            ${{ steps.img.outputs.ref }}:${{ github.sha }}
+            ${{ steps.img.outputs.ref }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,69 @@
+# practice-app values. Scenarios routinely edit this file - replica counts,
+# image tags, probes, resources, ingress - then sync via Argo CD or helm.
+
+frontend:
+  replicas: 2
+  image:
+    repository: nginx
+    tag: 1.27-alpine # rolling-update scenario: bump to 1.28-alpine
+  service:
+    type: ClusterIP # loadbalancer scenario: switch to LoadBalancer (NLB)
+    port: 80
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  readinessProbe:
+    httpGet:
+      path: / # break-fix scenario: point this somewhere wrong and watch rollout stall
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+backend:
+  replicas: 1
+  image:
+    repository: postgrest/postgrest
+    tag: v12.2.12
+  service:
+    port: 3000
+  # Secret created by terraform (module platform) in the app namespace.
+  existingSecret: practice-db
+  dbAnonRole: web_anon
+  dbSchemas: public
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+# One-shot schema seed, runs as a helm hook on install/upgrade.
+seedJob:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 16-alpine
+
+# ALB Ingress (needs enable_alb_controller = true in scripts/config.toml).
+ingress:
+  enabled: false # ingress scenario: flip on
+  className: alb
+  host: "" # "" = no host rule (use the ALB DNS name); external-dns scenario sets one
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+
+# HPA for the frontend (needs metrics-server, on by default).
+hpa:
+  enabled: false # autoscaling scenario: flip on and load-test
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercent: 50
+
+# PodDisruptionBudget for the frontend.
+pdb:
+  enabled: false
+  minAvailable: 1

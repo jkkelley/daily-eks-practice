@@ -69,6 +69,9 @@ module "stack" {
 
   drill_ingress_group_name = var.drill_ingress_group_name
   drill_allowed_cidrs      = var.drill_allowed_cidrs
+  enable_drill_gui         = var.enable_drill_gui
+  drill_gui_image          = var.drill_gui_image
+  drill_gui_tag            = var.drill_gui_tag
 
   extra_tags = var.extra_tags
 }
