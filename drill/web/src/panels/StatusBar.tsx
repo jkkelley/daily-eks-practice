@@ -9,6 +9,8 @@ interface Props {
   /** Absent when nothing is open in the editor. */
   cursor: { line: number; column: number } | null;
   language: string | null;
+  /** Opens the pause menu. Shipped inert in Phase 5; live since Phase 6. */
+  onExit: () => void;
 }
 
 export function StatusBar({
@@ -19,6 +21,7 @@ export function StatusBar({
   onOpenThemes,
   cursor,
   language,
+  onExit,
 }: Props) {
   const passed = state?.passed.length ?? 0;
   return (
@@ -70,14 +73,13 @@ export function StatusBar({
       <span className={connected ? "dot live" : "dot absent"} />
       <span>{connected ? "connected" : "reconnecting"}</span>
       <span className="sep" />
-      {/* Deliberately not styled as a primary action, and deliberately still inert.
-          Ending a session - saving progress, then teardown - is the Phase 6 ticket
-          and an explicit non-goal here. It has its place in the layout now so the
-          layout does not move later, and it says so rather than pretending. */}
+      {/* Not styled as a primary action, because it is a way OUT of a thing you
+          came here to do. It is no longer inert: Phase 6 put the pause menu
+          behind it, and Escape opens the same menu. */}
       <button
         className="btn quiet"
-        disabled
-        title="Ending a session lands with the session lifecycle. Until then: make down"
+        onClick={onExit}
+        title="Pause: restart, switch scenario, quit, or tear it down (Esc)"
       >
         exit
       </button>

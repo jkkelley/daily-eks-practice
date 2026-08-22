@@ -99,3 +99,49 @@ export interface ArgoApplication {
 }
 
 export const getArgo = () => json<ArgoApplication>("/api/argo");
+
+// ---------------------------------------------------------------------------
+// The pause menu.
+//
+// These four POSTs are the only calls in this client that change anything. The
+// terminal beside them is a cluster-admin shell so it is not new exposure, but
+// it IS a different kind of call, and they are kept together rather than sprinkled
+// among the reads so that stays obvious.
+// ---------------------------------------------------------------------------
+
+/** One entry on the menu. Three fields, and never anything from an answers file. */
+export interface ScenarioSlot {
+  id: string;
+  title: string;
+  ported: boolean;
+  current: boolean;
+}
+
+export const getScenarios = () => json<ScenarioSlot[]>("/api/scenarios");
+
+const post = <T>(url: string, body?: unknown) =>
+  json<T>(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+
+export const restartSession = () => post<{ ok: true }>("/api/session/restart");
+
+export const switchScenario = (target: string) =>
+  post<{ ok: true; target: string }>("/api/session/switch", { target });
+
+export const quitSession = () =>
+  post<{ ok: true; scenario: string; passed: number }>("/api/session/quit");
+
+/**
+ * Arm the teardown. The literal string is required, and the SERVER re-checks it.
+ *
+ * The confirmation the learner types in the dialog is the friendly copy; the
+ * route is the boundary. This is the one call in this application that can end
+ * in `terraform destroy` - see CLAUDE.md hard rule 1 and the exception in it.
+ */
+export const destroyEnvironment = () =>
+  post<{ ok: true }>("/api/session/destroy", { confirm: "DESTROY" });
+
+export const getDeps = () => json<import("@drill/shared").DependencyStatus[]>("/api/deps");
