@@ -31,7 +31,7 @@ NODE        := podman run --rm --userns=keep-id \
                  -v $(NODE_MODULES):/repo/drill/node_modules:Z \
                  -w /repo/drill $(NODE_IMAGE)
 
-.PHONY: test fmt-check validate helm-lint helm-template history-scrubber answers-check script-tests cluster-git-test tflint scan ministack ministack-down kind-up kind-down kind-status drill-gui-test drill-node-image drill-install drill-test drill-build drill-typecheck drill-dev drill-clean
+.PHONY: test fmt-check validate helm-lint helm-template history-scrubber answers-check script-tests cluster-git-test tflint scan ministack ministack-down kind-up kind-down kind-status drill-gui-test drill-resume-test drill-node-image drill-install drill-test drill-build drill-typecheck drill-dev drill-clean
 
 test: fmt-check validate helm-lint history-scrubber answers-check script-tests ## Static checks (terraform + chart + answers + scripts; helm via Podman)
 
@@ -95,8 +95,11 @@ ministack-down: ## Force-stop any leftover ministack containers
 kind-up: ## Create the throwaway kind sandbox cluster ($0, no AWS)
 	bash scripts/kind-sandbox.sh up
 
-drill-gui-test: ## AC-H4: deploy the drill GUI to kind and drive it (needs `ministack` first)
+drill-gui-test: ## Deploy the drill GUI to kind and drive it (needs `ministack` first)
 	bash tests/drill-gui-kind.sh
+
+drill-resume-test: ## AC-H4: converge, destroy the cluster, rebuild, and prove the session came back (needs `ministack` first)
+	bash tests/drill-resume-kind.sh
 
 kind-status: ## Is the kind sandbox up and Ready?
 	bash scripts/kind-sandbox.sh status
