@@ -12,8 +12,8 @@
   "parent": "WO-20260819-f5c9",
   "branch": "feat/phase-6-session-lifecycle-the-sync-watcher-and-t",
   "pr": 29,
-  "merge_sha": null,
-  "closed": null,
+  "merge_sha": "cb2c5c97f9eaf30e8f32e7c4e3a86695a3e30330",
+  "closed": "2026-08-21",
   "approval": {
     "via": "lavish",
     "at": "2026-08-19"
