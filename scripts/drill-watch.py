@@ -365,63 +365,76 @@ class IdleMonitor(threading.Thread):
             self._complained = key
             print(message, file=sys.stderr, flush=True)
 
-    def run(self) -> None:  # pragma: no cover - the loop is the thread
-        while not self._stop.wait(1.0):
-            state, read_at = self._snapshot()
-            if state is None:
-                continue
-            # A terminal phase has its own path; the idle clock stands down so it
-            # cannot race a switch or a quit that is already under way.
-            if state.get("phase") not in (None, "active"):
-                continue
+    def tick(self, now: float | None = None) -> str:
+        """One decision. Split out of `run` so it is testable without a thread.
 
-            verdict, left = idle_verdict(
-                self.policy, state.get("lastActivityAt"), read_at, time.time()
+        Returns the verdict it acted on, which is also what the tests assert.
+        A loop that can only be exercised by waiting on a real clock is a loop
+        that does not get exercised, and this one decides whether to destroy an
+        environment.
+        """
+        state, read_at = self._snapshot()
+        if state is None:
+            return "nothing"
+        # A terminal phase has its own path; the idle clock stands down so it
+        # cannot race a switch or a quit that is already under way.
+        if state.get("phase") not in (None, "active"):
+            return "not-active"
+
+        verdict, left = idle_verdict(
+            self.policy,
+            state.get("lastActivityAt"),
+            read_at,
+            time.time() if now is None else now,
+        )
+
+        if verdict == "unknown":
+            self._complain_once(
+                "unknown",
+                "drill-watch: the idle timeout is set, but this drill server does not "
+                "report lastActivityAt - the clock is not running. Nothing will be "
+                "destroyed on a timer.",
             )
+            return verdict
+        if verdict == "stale":
+            self._complain_once(
+                "stale",
+                "drill-watch: cannot read the drill state, so the idle clock is "
+                "standing down. An unreachable API is not the same as an idle "
+                "learner, and only one of those is a reason to destroy anything.",
+            )
+            return verdict
 
-            if verdict == "unknown":
-                self._complain_once(
-                    "unknown",
-                    "drill-watch: the idle timeout is set, but this drill server does not "
-                    "report lastActivityAt - the clock is not running. Nothing will be "
-                    "destroyed on a timer.",
-                )
-                continue
-            if verdict == "stale":
-                self._complain_once(
-                    "stale",
-                    "drill-watch: cannot read the drill state, so the idle clock is "
-                    "standing down. An unreachable API is not the same as an idle "
-                    "learner, and only one of those is a reason to destroy anything.",
-                )
-                continue
+        self._complained = ""
 
-            self._complained = ""
+        if verdict == "active":
+            self._warned = False
+            return verdict
 
-            if verdict == "active":
-                self._warned = False
-                continue
+        if verdict == "warn":
+            if not self._warned:
+                self._warned = True
+                print(idle_banner(self.policy, left, state.get("scenario")), flush=True)
+            print(f"  idle: {human_duration(left)} left... ", end="\r", flush=True)
+            return verdict
 
-            if verdict == "warn":
-                if not self._warned:
-                    self._warned = True
-                    print(idle_banner(self.policy, left, state.get("scenario")), flush=True)
-                print(f"  idle: {human_duration(left)} left... ", end="\r", flush=True)
-                continue
+        # fire
+        if not self.policy.armed:
+            self._complain_once(
+                "warned-only",
+                "\ndrill-watch: the idle limit passed. DRILL_IDLE_ACTION=warn, so "
+                "nothing was destroyed and the cluster is still billing.",
+            )
+            return "warned-only"
 
-            # fire
-            if not self.policy.armed:
-                self._complain_once(
-                    "warned-only",
-                    "\ndrill-watch: the idle limit passed. DRILL_IDLE_ACTION=warn, so "
-                    "nothing was destroyed and the cluster is still billing.",
-                )
-                continue
+        self.fired = True
+        self._on_fire()
+        return "fired"
 
-            self.fired = True
-            self._on_fire()
-            return
-
+    def run(self) -> None:  # pragma: no cover - the thread; tick() is the tested part
+        while not self._stop.wait(1.0):
+            if self.tick() == "fired":
+                return
 
 def idle_destroy(policy: IdlePolicy, state: dict) -> int:
     """The idle half of the destroy path. Runs on the MAIN thread so ctrl-c works."""

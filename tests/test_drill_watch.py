@@ -370,6 +370,120 @@ def test_the_banner_quotes_the_users_own_number_back_at_them():
     )
 
 
+
+def test_the_monitor_stands_down_on_anything_that_is_not_a_live_drill():
+    """The clock must not race a switch or a quit that is already under way, and
+    must not act at all on state it does not have."""
+    p = dw.IdlePolicy(timeout=300, action="destroy", grace=60, warn=120)
+    fired = []
+    m = dw.IdleMonitor(p, on_fire=lambda: fired.append(1))
+
+    check("with nothing observed it does nothing", m.tick() == "nothing")
+
+    for phase in ("switching", "ended", "destroy-requested"):
+        m.observe({"phase": phase, "lastActivityAt": "2020-01-01T00:00:00+00:00"})
+        check(f"phase {phase} stands the clock down", m.tick() == "not-active")
+
+    m.observe({"phase": "active"})
+    check("no lastActivityAt is 'unknown', never 'fire'", m.tick() == "unknown")
+    check("and nothing was destroyed", not fired)
+
+
+def test_the_monitor_fires_only_when_armed():
+    """Same elapsed time, same everything, one flag apart. warn must report and
+    NOT call on_fire; destroy must."""
+    stamped = "2026-08-22T12:00:00+00:00"
+    base = dw._iso_to_epoch(stamped)
+    state = {"phase": "active", "scenario": "03", "lastActivityAt": stamped}
+
+    warn_fired = []
+    warn = dw.IdleMonitor(
+        dw.IdlePolicy(timeout=60, action="warn", grace=60, warn=30),
+        on_fire=lambda: warn_fired.append(1),
+    )
+    warn.observe(state)
+    warn._last_read_at = base + 100
+    check("warn mode reports rather than fires", warn.tick(now=base + 100) == "warned-only")
+    check("warn mode called on_fire ZERO times", not warn_fired)
+    check("and warn mode never sets .fired", not warn.fired)
+
+    armed_fired = []
+    armed = dw.IdleMonitor(
+        dw.IdlePolicy(timeout=60, action="destroy", grace=60, warn=30),
+        on_fire=lambda: armed_fired.append(1),
+    )
+    armed.observe(state)
+    armed._last_read_at = base + 100
+    check("armed mode fires", armed.tick(now=base + 100) == "fired")
+    check("and calls on_fire exactly once", len(armed_fired) == 1)
+    check("and records it", armed.fired)
+
+
+def test_the_monitor_counts_down_and_resets_on_activity():
+    stamped = "2026-08-22T12:00:00+00:00"
+    base = dw._iso_to_epoch(stamped)
+    m = dw.IdleMonitor(
+        dw.IdlePolicy(timeout=300, action="destroy", grace=60, warn=120),
+        on_fire=lambda: None,
+    )
+    m.observe({"phase": "active", "scenario": "03", "lastActivityAt": stamped})
+    m._last_read_at = base
+
+    check("early on it is simply active", m.tick(now=base + 10) == "active")
+    m._last_read_at = base + 200
+    check("inside the window it warns", m.tick(now=base + 200) == "warn")
+
+    # The learner comes back and types. The stamp moves, and the clock restarts -
+    # this is the whole contract from the watcher's side.
+    later = "2026-08-22T12:04:00+00:00"
+    m.observe({"phase": "active", "scenario": "03", "lastActivityAt": later})
+    check(
+        "a fresh keystroke puts it back to active",
+        m.tick(now=dw._iso_to_epoch(later) + 5) == "active",
+    )
+
+
+def test_publishing_the_idle_policy_never_clobbers_the_scenario():
+    """drill-request carries BOTH the scenario and the idle policy, and they are
+    written by different call sites. A publish that replaced the object would drop
+    the session id, and the pod would converge onto nothing."""
+    calls = []
+    real_read, real_apply = dw.read_request, dw.apply_request
+    try:
+        dw.read_request = lambda cfg: {"scenario": "03", "sessionId": "s-1"}
+        dw.apply_request = lambda payload: calls.append(payload)
+
+        dw.publish_idle_policy({}, dw.IdlePolicy(timeout=300, action="warn", grace=60, warn=120))
+        check("it wrote once", len(calls) == 1)
+        check("the scenario survived", calls[0].get("scenario") == "03")
+        check("the session id survived", calls[0].get("sessionId") == "s-1")
+        check("and the policy landed", calls[0].get("idleTimeoutSeconds") == 300)
+        check("with the action", calls[0].get("idleAction") == "warn")
+
+        # Turning the feature off must REMOVE the keys, not leave them behind -
+        # a stale policy has the GUI counting down to a teardown no watcher will do.
+        calls.clear()
+        dw.read_request = lambda cfg: {
+            "scenario": "03", "sessionId": "s-1",
+            "idleTimeoutSeconds": 300, "idleAction": "warn", "idleWarnSeconds": 120,
+        }
+        dw.publish_idle_policy({}, None)
+        check("turning it off rewrites the object", len(calls) == 1)
+        check("the idle keys are gone", "idleTimeoutSeconds" not in calls[0])
+        check("and the scenario is still there", calls[0].get("scenario") == "03")
+
+        # Nothing changed: no write at all. A write per tick would churn the object.
+        calls.clear()
+        dw.read_request = lambda cfg: {
+            "scenario": "03", "sessionId": "s-1",
+            "idleTimeoutSeconds": 300, "idleAction": "warn", "idleWarnSeconds": 120,
+        }
+        dw.publish_idle_policy({}, dw.IdlePolicy(timeout=300, action="warn", grace=60, warn=120))
+        check("an unchanged policy writes nothing at all", not calls)
+    finally:
+        dw.read_request, dw.apply_request = real_read, real_apply
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     print(f"tests/test_drill_watch.py - {len(tests)} groups")
